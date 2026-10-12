@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# Downloaded airport data (X-Plane Scenery Gateway) and parsed caches
+cache/
+
+# Local backups
+_backup*/
+
+# Navigraph / X-Plane nav data must never be committed
+Custom Data/
+*.procs.json
+
+# Local settings, logs, models
+*.log
+.env
+models/
+node_modules/

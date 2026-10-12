@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tower Trainer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <strong class="brand">TOWER TRAINER</strong>
+  <form id="aptForm" class="main-only"><input id="aptIcao" maxlength="7" spellcheck="false" placeholder="ICAO"><button>Load</button></form>
+  <span id="aptName" class="muted"></span>
+  <label class="main-only">RWY <select id="rwySel"></select></label>
+  <div id="atisBox" class="atis" title="ATIS / weather"></div>
+  <span class="grow"></span>
+  <button id="staffBtn" type="button" class="main-only" title="Choose the positions you work">Staffing</button>
+  <select id="speed" class="main-only" title="Simulation speed"><option value="0">Pause</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
+  <label class="main-only" title="Phraseology notes after each transmission"><input type="checkbox" id="coachToggle"> Coach</label>
+  <button id="guideBtn" type="button" class="main-only">Guide</button>
+  <button id="debriefBtn" type="button" class="main-only">Debrief</button>
+  <button id="settingsBtn" type="button" class="main-only">Settings</button>
+  <button id="helpBtn" type="button">Phraseology</button>
+  <span id="esStatus" class="pill" title="EuroScope (FSD) connection">ES: –</span>
+  <span id="xrStatus" class="pill hidden" title="XRadio">XR: off</span>
+</header>
+<div id="staffMenu" class="menu hidden">
+  <label><input type="radio" name="staffMode" value="combined"> Combined — one frequency (DEL/GND/TWR)</label>
+  <label><input type="radio" name="staffMode" value="split"> Split positions — I work:</label>
+  <div class="staffKeys">
+    <label><input type="checkbox" value="DEL"> Delivery</label>
+    <label><input type="checkbox" value="GND"> Ground</label>
+    <label><input type="checkbox" value="TWR"> Tower</label>
+    <label><input type="checkbox" value="APP"> Approach</label>
+    <label><input type="checkbox" value="CTR"> Centre</label>
+  </div>
+  <div class="muted small">Unstaffed positions are worked by AI controllers (shown in grey).</div>
+  <button id="staffApply" type="button">Apply</button>
+</div>
+<main>
+  <section class="scope">
+    <div class="viewTabs" id="viewTabs"></div>
+    <canvas id="radar"></canvas>
+    <div id="status" class="overlay"></div>
+    <div id="wxPanel" class="wxpanel hidden"></div>
+    <div id="alerts" class="alerts"></div>
+    <div id="coachPanel" class="coach hidden"></div>
+    <button id="restorePop" type="button" class="restore hidden"></button>
+  </section>
+  <aside>
+    <div class="posTabs" id="posTabs"></div>
+    <div class="posHead" id="posHead"></div>
+    <div class="panel delx hidden" id="delPanel">
+      <h3>Clearance requests</h3><div id="clrList"></div>
+      <h3>Flight plan</h3>
+      <div id="fpEditor" class="fp muted">Select an aircraft.</div>
+    </div>
+    <div class="panel strips" id="stripBoard"></div>
+    <div class="panel log"><h3 id="logTitle">Frequency</h3><div id="log"></div></div>
+    <form id="cmdForm" class="cmd">
+      <button type="button" id="mic" title="Hold to talk (or Ctrl+Space)">🎙</button>
+      <span id="txOn" class="txon" title="You transmit on this position"></span>
+      <input id="cmd" autocomplete="off" spellcheck="false" placeholder="FIN321 runway 26 cleared for takeoff">
+      <button type="button" id="assignSq" title="Next free squawk into a clearance for the selected aircraft">Assign squawk</button>
+    </form>
+    <div class="hint muted">Enter = transmit · hold <kbd>Ctrl</kbd>+<kbd>Space</kbd> = push-to-talk · click a target or strip to select · drag strips between bays</div>
+  </aside>
+</main>
+
+<dialog id="help">
+  <h2>Phraseology the pilots understand</h2>
+  <p class="muted">Start with the callsign (<code>FIN321</code> or <code>Finnair three two one</code>; GA <code>Echo Sierra Alpha Bravo Charlie</code>, abbreviated <code>Echo Bravo Charlie</code> after first contact). Several instructions can go in one transmission.</p>
+  <table>
+    <tr><th>Delivery</th><td><code>FIN321 cleared to Helsinki via flight planned route, climb 5000 feet, squawk 4201, contact Ground 131.905</code></td></tr>
+    <tr><th>Push</th><td><code>FIN321 push and start approved, facing east</code></td></tr>
+    <tr><th>Taxi</th><td><code>FIN321 taxi to holding point runway 26 via S A</code> · <code>cross runway 08</code> · <code>hold position</code> · <code>continue taxi</code></td></tr>
+    <tr><th>Tower</th><td><code>FIN321 runway 26 line up and wait</code> · <code>runway 26 cleared for takeoff</code> · <code>contact Tallinn Radar 127.905</code></td></tr>
+    <tr><th>Arrivals</th><td><code>FIN321 identified, descend 3000 feet, cleared ILS approach runway 26</code> · <code>contact Tower 135.905</code> · <code>runway 26 cleared to land</code> · <code>go around</code> · <code>taxi to stand K2 via B A</code></td></tr>
+    <tr><th>Fixes</th><td><code>FIN321 negative, squawk 4201</code> · <code>information Bravo is current</code> · <code>if you read, squawk ident</code> · <code>affirm</code></td></tr>
+  </table>
+  <h3>EuroScope as your radar</h3>
+  <ol class="small">
+    <li>Keep <code>python server.py</code> running (FSD on 127.0.0.1:6809).</li>
+    <li>EuroScope → <b>Connect</b>. Connect type <b>Direct to VATSIM</b>, <b>untick "Connect to VATSIM"</b>, Server <code>127.0.0.1</code>.</li>
+    <li>Any callsign (e.g. <code>EETN_TWR</code>), any CID/password; load a sector file for the airport.</li>
+    <li>Prime the tower frequency (e.g. 135.905) in the voice/frequency dialog. Text you send on that frequency (or privately to a pilot) is handled exactly like typing here.</li>
+  </ol>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+
+<dialog id="settings">
+  <h2>Settings</h2>
+  <div class="grid2">
+    <fieldset><legend>Radio &amp; voices</legend>
+      <label>Accents <select id="setAccents"><option value="off">Off (English voices only)</option><option value="natural">Natural</option><option value="strong">Strong (all native voices)</option></select></label>
+      <label>Speech rate <input id="setRate" type="range" min="0.7" max="1.4" step="0.05"> <span id="setRateV"></span></label>
+      <label>Radio effect <input id="setEffect" type="range" min="0" max="1" step="0.05"> <span id="setEffectV"></span></label>
+      <label><input type="checkbox" id="setVoices"> Pilot voices (TTS)</label>
+      <label><input type="checkbox" id="setBlocked"> Blocked transmissions</label>
+      <button type="button" id="testVoices">Test voices</button>
+    </fieldset>
+    <fieldset><legend>Pilot behaviour</legend>
+      <label>Readback errors <input id="setRbErr" type="number" min="0" max="30" step="1"> %</label>
+      <label>"Say again" <input id="setSayAgain" type="number" min="0" max="20" step="1"> %</label>
+      <label>Old ATIS reported <input id="setOldAtis" type="number" min="0" max="50" step="5"> %</label>
+      <label><input type="checkbox" id="setEvents"> Scripted 7600 / 7700 events</label>
+      <label>Departures/h <input id="depRate" type="number" min="0" max="40"></label>
+      <label>Arrivals/h <input id="arrRate" type="number" min="0" max="40"></label>
+    </fieldset>
+    <fieldset><legend>Training</legend>
+      <label><input type="checkbox" id="setCoach"> Coach mode</label>
+      <label>Guide / coach language <select id="setLang"><option value="en">English</option><option value="et">Eesti</option></select></label>
+      <label><input type="checkbox" id="graph"> Show taxi graph</label>
+    </fieldset>
+    <fieldset><legend>EuroScope</legend>
+      <div id="setEs" class="small"></div>
+    </fieldset>
+    <fieldset class="span2"><legend>XRadio (X-Plane multiplayer &amp; radio) — optional</legend>
+      <label><input type="checkbox" id="xrEnabled"> Connect to an XRadio server</label>
+      <div class="row">
+        <label>Server <input id="xrHost" size="16" placeholder="127.0.0.1"></label>
+        <label>Port <input id="xrPort" type="number" min="1" max="65535" style="width:80px"></label>
+        <label>Password <input id="xrPass" type="password" size="10"></label>
+      </div>
+      <div class="row">
+        <label>ATC callsign <input id="xrCs" size="10" placeholder="EETN_TWR"></label>
+        <label>Frequency <input id="xrFreq" size="8" placeholder="135.905"></label>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="xrAi"> AI traffic into X-Plane</label>
+        <label><input type="checkbox" id="xrHumans"> Real pilots on my radar</label>
+        <label><input type="checkbox" id="xrText"> Text</label>
+        <label><input type="checkbox" id="xrVoice"> Voice (WebCodecs Opus)</label>
+      </div>
+      <div id="xrInfo" class="small muted"></div>
+    </fieldset>
+  </div>
+  <h3>Voices per nationality</h3>
+  <p class="small muted">Edge has the best "Natural" voices. More voices: Windows Settings → Time &amp; language → Speech → Add voices (and Language → language packs with speech).</p>
+  <div id="voiceTable" class="voicetable"></div>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+
+<dialog id="debrief"><div id="debriefBody"></div><form method="dialog"><button>Close</button></form></dialog>
+
+<div id="guideLayer" class="guide hidden">
+  <div id="guideHole" class="hole"></div>
+  <div id="guideCard" class="gcard">
+    <div class="gstep" id="guideStep"></div>
+    <h3 id="guideTitle"></h3>
+    <div id="guideText"></div>
+    <div id="guidePhrase" class="gphrase hidden"></div>
+    <div class="gbtns">
+      <button id="guideBack" type="button">Back</button>
+      <button id="guideShow" type="button">Show me</button>
+      <button id="guideSkip" type="button">Skip</button>
+      <button id="guideNext" type="button">Next</button>
+      <button id="guideClose" type="button" class="gx">✕</button>
+    </div>
+  </div>
+</div>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
