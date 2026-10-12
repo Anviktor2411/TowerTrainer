@@ -1,0 +1,61 @@
+Next features for TowerTrainer. Build them in this order, one phase at a time, run the
+tests after each phase, keep existing features working, and tell me (in Estonian) what was
+done after each phase.
+
+PHASE 1 – REALISTIC TRAFFIC MIX
+- Airline/route mix per airport from real data: use OpenFlights routes.dat + airlines.dat
+  (downloaded once into cache/, not committed; ODbL licence noted in README) so each airport
+  gets the airlines and destinations that really serve it (EETN: airBaltic, Finnair, LOT,
+  Lufthansa, Ryanair…). Weight by number of routes. Fall back to the current random list.
+- Realistic aircraft type per airline (airBaltic → BCS3, Ryanair → B738/B38M, Wizz → A21N…).
+- Time-of-day traffic waves (morning/evening peaks) as an option.
+
+PHASE 2 – VFR, GA AND GROUND VEHICLES
+- VFR traffic: circuits (downwind/base/final reports, "touch and go", "full stop"),
+  VFR reporting points (from the procedure data or user-defined per airport),
+  special VFR, helicopters, squawk 7000/1200, VFR phraseology.
+- Ground vehicles (follow-me, tugs, fire, snow ploughs, runway inspection) that call
+  Ground/Tower to enter or cross runways, with their own callsigns ("Follow-me 2",
+  "Rescue 1") and voices; they count for runway occupancy and conflicts.
+
+PHASE 3 – WEATHER AND OPERATIONS
+- Weather that changes during a session (scripted or from live METAR updates): wind shift
+  → runway change procedure (stop departures, last arrival, new ATIS), gusts, crosswind
+  and tailwind limits per type.
+- Low visibility (LVP): RVR, CAT II/III holding points, stop bars, bigger spacing;
+  night ops with lighting; snow/ice with de-icing pad and holdover times.
+- Stop bars and runway lighting controls on the Tower view.
+
+PHASE 4 – ABNORMAL AND EMERGENCY EVENTS (toggle + frequency slider)
+- Medical emergency, bird strike, rejected takeoff, aircraft broken down on a taxiway
+  (blocks it until towed), FOD/runway inspection, runway incursion by a vehicle or aircraft,
+  go-around for unstable approach, PAN-PAN / MAYDAY phraseology, 7600/7700 handling.
+
+PHASE 5 – FLOW MANAGEMENT AND CONDITIONAL CLEARANCES
+- Conditional clearances ("behind the landing A320, line up and wait behind"), intersection
+  departures with declared distances, departure slots (CTOT) and A-CDM times (TOBT/TSAT),
+  departure sequence list in the Tower view, arrival spacing display in NM and seconds.
+
+PHASE 6 – LEARNING PATH
+- Difficulty levels and a "career": Delivery → Ground → Tower → Approach (like VATSIM
+  S1–S3), each with lessons, a practical checkout scenario and a pass/fail report.
+- Scenario library (JSON files in scenarios/): e.g. "EETN morning rush", "EGLL fog",
+  "EGSS runway change"; scenario editor in the UI (traffic list, weather timeline, events).
+- Session recording + replay with a timeline (positions, radio log, alerts, my commands),
+  export of the radio log as text.
+- Personal statistics over time (score per position, common mistakes) stored locally.
+
+PHASE 7 – TOOLS AND WORKFLOW
+- Command autocomplete: suggest callsigns on frequency and the next logical instruction
+  for the selected aircraft; Tab to accept; keyboard shortcuts for common phrases.
+- Strip board on a phone/tablet over LAN (responsive page, same session via WebSocket).
+- Simple 3D tower view (Three.js from cdnjs, pinned version): pavement and runways from
+  apt.dat, simple aircraft models by size class, camera at the tower position with
+  zoom/"binoculars"; optional, loads only when opened.
+
+PHASE 8 – PACKAGING
+- start.bat / start.sh that check Python, install optional packages and open the browser.
+- Optional PyInstaller build (like my other tools) and GitHub Releases with release notes.
+- GitHub Actions CI: run the Node and Python tests on every push; README with screenshots,
+  "🚧 In development" badge, licence and credits (X-Plane Scenery Gateway, OpenFlights,
+  XRadio).

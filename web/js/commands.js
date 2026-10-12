@@ -35,7 +35,10 @@ export function normalize(text) {
     if (/^\d+$/.test(w) && prev && /^\d{3}\.\d{0,2}$/.test(prev)) { out[out.length - 1] = prev + w; continue; }
     out.push(w);
   }
-  return out.join(" ").replace(/[#~]/g, "").toLowerCase().replace(/ , /g, ", ").replace(/\s+,\s*$/, "");
+  return out.join(" ").replace(/[#~]/g, "").toLowerCase().replace(/ , /g, ", ").replace(/\s+,\s*$/, "")
+    // speech-recognition homophones: "cleared four takeoff", "cleared two land", "ready four departure"
+    .replace(/\bcleared 4 (take ?off)/g, "cleared for $1").replace(/\bcleared 2 (land|cross)/g, "cleared to $1")
+    .replace(/\b(ready|request) 4 (departure|push|taxi)/g, "$1 for $2").replace(/\btaxi 2 (holding|stand|gate)/g, "taxi to $1");
 }
 
 /** Find which aircraft is addressed. Returns {ac, rest, abbrev}. */
@@ -95,7 +98,10 @@ export function parseInstructions(s) {
     const tail = s.slice(m.index);
     const sid = tail.match(/\bvia ([a-z0-9 ]+?)(?: departure)?(?=,| climb| initial| squawk| maintain|$)/);
     const sq = tail.match(/squawk (\d{4})/);
-    return { t: "clearance", dest: /^[a-z]{4}$/.test(m[1]) ? m[1].toUpperCase() : m[1], sid: sid ? sid[1].trim().toUpperCase() : null,
+    const sidTxt = sid ? sid[1].trim() : null;
+    const asFiled = sidTxt && /\b(flight planned|planned route|as filed|filed route)\b/.test(sidTxt);
+    return { t: "clearance", dest: /^[a-z]{4}$/.test(m[1]) ? m[1].toUpperCase() : m[1],
+      sid: asFiled ? "flight planned route" : sidTxt ? sidTxt.toUpperCase() + " departure" : null,
       alt: altText(tail), squawk: sq && /^[0-7]{4}$/.test(sq[1]) ? sq[1] : null };
   });
   const isClearance = found.some(f => f.t === "clearance");

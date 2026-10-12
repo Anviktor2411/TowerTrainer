@@ -79,6 +79,11 @@ export class Airport {
     return title((d.meta.city || d.name.split(" ")[0] || d.icao).split(/[-,/]/)[0].trim());
   }
 
+  // local metres <-> lat/lon (same projection as aptdat.py: kx = cos(lat0)*111320, ky = 110540)
+  get kx() { return Math.cos(this.d.lat * Math.PI / 180) * 111320; }
+  toLatLon(p) { return [this.d.lat + p[1] / 110540, this.d.lon + p[0] / this.kx]; }
+  toXY(lat, lon) { return [(lon - this.d.lon) * this.kx, (lat - this.d.lat) * 110540]; }
+
   nearestRunway(p) {
     let best = -1, bd = 1e9;
     for (const r of this.runways) {

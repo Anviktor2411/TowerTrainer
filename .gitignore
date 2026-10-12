@@ -1,19 +1,14 @@
-# Python
-__pycache__/
-*.pyc
-
-# Downloaded airport data (X-Plane Scenery Gateway) and parsed caches
+# local data, caches and secrets -- never commit
 cache/
-
-# Local backups
-_backup*/
-
-# Navigraph / X-Plane nav data must never be committed
-Custom Data/
-*.procs.json
-
-# Local settings, logs, models
-*.log
-.env
 models/
+*.procs.json
+secrets.json
+.env
+Custom Data/
+__pycache__/
+_backup*/
+*.pyc
+*.log
+*.key
+tts_keys.json
 node_modules/

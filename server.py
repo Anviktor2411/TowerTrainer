@@ -24,8 +24,39 @@ from socketserver import ThreadingMixIn
 
 import aptdat
 import fsd
+import navdata
+from urllib.parse import parse_qs, urlparse
 
 FSD = None       # fsd.FSDServer
+TTS = None       # tts.TTSManager (created on first use)
+STT = None       # stt.STTManager (created on first use)
+_rate = {}       # ip -> [window start, count] for TTS/STT requests from remote players
+
+
+def tts():
+    global TTS
+    if TTS is None:
+        import tts as _tts
+        TTS = _tts.TTSManager()
+    return TTS
+
+
+def stt():
+    global STT
+    if STT is None:
+        import stt as _stt
+        STT = _stt.STTManager()
+    return STT
+
+
+def rate_ok(ip, per_10s=40):
+    if ip in ("127.0.0.1", "::1"):
+        return True
+    w = _rate.setdefault(ip, [time.time(), 0])
+    if time.time() - w[0] > 10:
+        w[0], w[1] = time.time(), 0
+    w[1] += 1
+    return w[1] <= per_10s
 XR = None        # xradio_bridge.XRadioBridge (created on first use)
 
 ROOT = Path(__file__).resolve().parent
@@ -118,6 +149,21 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         try:
             body = self.read_json()
+            if path == "/api/stt":
+                if not rate_ok(self.client_address[0], 20):
+                    return self.send(429, {"error": "too many requests"})
+                import stt as _stt
+                wav, phrases = _stt.decode_request(body)
+                try:
+                    return self.send(200, stt().transcribe(wav, phrases, body.get("engine", "auto")))
+                except LookupError as e:
+                    return self.send(503, {"error": str(e)})
+            if path in ("/api/stt/vosk/download", "/api/stt/whisper/warmup"):
+                if not self.is_local():
+                    return self.send(403, {"error": "local only"})
+                return self.send(200, stt().download_vosk() if "vosk" in path else stt().warm_whisper())
+            if path.startswith("/api/tts/"):
+                return self.tts_post(path, body)
             if path == "/api/es/sync":
                 if not FSD:
                     return self.send(200, {"messages": [], "status": None})
@@ -132,6 +178,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, {"error": "unknown endpoint"})
         except Exception as e:
             return self.send(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def tts_post(self, path, body):
+        local = self.is_local()
+        if path == "/api/tts/cast":
+            v = tts().cast(str(body.get("nat", "GB"))[:3], int(body.get("seed", 0) or 0), body.get("gender"),
+                           [str(x) for x in (body.get("exclude") or [])][:50], body.get("role", "pilot"))
+            return self.send(200, {"voice": v})
+        if path == "/api/tts/speak":
+            if not rate_ok(self.client_address[0]):
+                return self.send(429, {"error": "too many requests"})
+            try:
+                data, mime = tts().render(str(body.get("voice", "")), str(body.get("text", ""))[:600], body.get("prosody") or {})
+            except LookupError as e:
+                return self.send(503, {"error": str(e), "fallback": True})
+            return self.send(200, data, mime)
+        if not local:
+            return self.send(403, {"error": "voice settings are only available on the host PC"})
+        if path == "/api/tts/config":
+            return self.send(200, tts().configure(body))
+        if path == "/api/tts/piper/download":
+            return self.send(200, tts().piper_download(str(body.get("name", ""))))
+        if path == "/api/tts/kokoro/warmup":
+            return self.send(200, tts().kokoro_warmup())
+        return self.send(404, {"error": "unknown endpoint"})
 
     def sse_voice(self):
         """Server-sent events: XRadio voice frames for the browser (WebCodecs Opus decoder)."""
@@ -151,9 +221,34 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             return
 
+    def is_local(self):
+        return self.client_address[0] in ("127.0.0.1", "::1")
+
     def do_GET(self):
         path = self.path.split("?")[0]
+        q = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
         try:
+            m = re.fullmatch(r"/api/procedures/([A-Za-z0-9]{3,7})", path)
+            if m:
+                # reads local X-Plane / Navigraph / sector files: only for this PC, never for remote players
+                if not self.is_local():
+                    return self.send(403, {"error": "procedures are only available on the host PC"})
+                apt = load_airport(m.group(1))
+                return self.send(200, navdata.load_procedures(
+                    m.group(1), apt["lat"], apt["lon"], CACHE, xplane=q.get("xplane", ""), mode=q.get("mode", "auto"),
+                    custom=q.get("custom", ""), sector=q.get("sector", ""), use_cache=q.get("refresh") != "1"))
+            if path == "/api/navdata":
+                if not self.is_local():
+                    return self.send(403, {"error": "local only"})
+                return self.send(200, navdata.navdata_info(q.get("xplane", ""), q.get("mode", "auto"), q.get("custom", "")))
+            if path == "/api/stt/status":
+                return self.send(200, stt().status())
+            if path == "/api/tts/status":
+                return self.send(200, tts().status())
+            if path == "/api/tts/voices":
+                return self.send(200, {"voices": tts().catalog(refresh=q.get("refresh") == "1")})
+            if path == "/api/tts/piper/catalog":
+                return self.send(200, tts().piper_catalog())
             if path == "/api/es/status":
                 return self.send(200, FSD.status() if FSD else None)
             if path == "/api/xradio/status":

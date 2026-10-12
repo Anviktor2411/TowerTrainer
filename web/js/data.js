@@ -105,7 +105,17 @@ export const TYPE_SPOKEN = {
   C172: ["Cessna one seventy-two", "Cessna"], PA28: ["Piper Cherokee", "Piper"], SR22: ["Cirrus", "Cirrus SR twenty-two"],
   DA40: ["Diamond forty", "Diamond Star"],
 };
-export const TYPE_MAKER = { C172: "Cessna", PA28: "Piper", SR22: "Cirrus", DA40: "Diamond" };
+// Real dimensions for drawing: type -> [wingspan m, length m, silhouette]
+export const AC_DIM = {
+  A320: [35.8, 37.6, "airliner"], A20N: [35.8, 37.6, "airliner"], A21N: [35.8, 44.5, "airliner"], A319: [35.8, 33.8, "airliner"],
+  B738: [35.8, 39.5, "airliner"], B38M: [35.9, 39.5, "airliner"], BCS3: [35.1, 38.7, "airliner"],
+  E190: [28.7, 36.2, "regional"], E195: [28.7, 38.7, "regional"], CRJ9: [24.9, 36.2, "regional"],
+  AT76: [27.1, 27.2, "turboprop"], DH8D: [28.4, 32.8, "turboprop"],
+  B77W: [64.8, 73.9, "widebody"], A359: [64.8, 66.8, "widebody"], B789: [60.1, 62.8, "widebody"], A333: [60.3, 63.7, "widebody"],
+  C172: [11.0, 8.3, "ga"], PA28: [10.7, 7.3, "ga"], SR22: [11.7, 7.9, "ga"], DA40: [11.9, 8.1, "ga"],
+  H145: [11.0, 13.6, "heli"], EC35: [10.2, 12.2, "heli"],
+};
+export const TYPE_MAKER ={ C172: "Cessna", PA28: "Piper", SR22: "Cirrus", DA40: "Diamond" };
 
 // ---------- squawk allocation ----------
 // Local code blocks by ICAO prefix (longest prefix wins). Ranges are octal codes as strings, inclusive.

@@ -7,7 +7,8 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
   font: 13px/1.4 system-ui, "Segoe UI", sans-serif; }
-header { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-bottom: 1px solid var(--line);
+body { display: flex; flex-direction: column; overflow: hidden; }
+header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line);
   background: var(--panel); flex-wrap: wrap; position: relative; }
 .brand { letter-spacing: .12em; color: var(--atc); }
 .grow { flex: 1; }
@@ -21,7 +22,8 @@ button { cursor: pointer; } button:hover { border-color: #3a4a5a; }
 input[type=number] { width: 52px; }
 .atis { font: 11px ui-monospace, Consolas, monospace; display: flex; gap: 8px; align-items: center; max-width: 560px; overflow: hidden; }
 .atis b { color: var(--atc); font-size: 14px; }
-.atis .raw { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 330px; }
+.atis .raw { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+@media (max-width: 1500px) { .atis .raw { display: none; } }
 .pill { font: 11px ui-monospace, Consolas, monospace; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); }
 .pill.on { color: var(--atc); border-color: #2f6b45; }
 .pill.err { color: var(--alert); border-color: #6b2f2f; }
@@ -29,8 +31,7 @@ input[type=number] { width: 52px; }
   border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; box-shadow: 0 8px 24px #0008; }
 .staffKeys { display: flex; flex-wrap: wrap; gap: 10px; padding-left: 20px; }
 
-main { display: flex; height: calc(100% - 42px); }
-body.popout main { height: calc(100% - 42px); }
+main { display: flex; flex: 1; min-height: 0; }
 .scope { position: relative; flex: 1; min-width: 0; }
 #radar { width: 100%; height: 100%; display: block; cursor: crosshair; }
 .viewTabs { position: absolute; top: 6px; right: 8px; z-index: 3; display: flex; gap: 4px; }
@@ -50,7 +51,7 @@ body.popout main { height: calc(100% - 42px); }
 .coach .ref { color: var(--muted); font-size: 10px; }
 .restore { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); z-index: 5; border-color: var(--atc); }
 
-aside { width: 470px; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel); }
+aside { width: 470px; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel); min-height: 0; overflow: hidden; }
 body.popout aside { width: 520px; }
 .posTabs { display: flex; gap: 2px; padding: 6px 6px 0; flex-wrap: wrap; }
 .posTabs .tab { padding: 4px 10px; border: 1px solid var(--line); border-bottom: none; border-radius: 6px 6px 0 0; cursor: pointer;
@@ -63,10 +64,10 @@ body.popout aside { width: 520px; }
 .posHead b { color: var(--text); }
 .panel { overflow-y: auto; padding: 6px 8px; }
 .panel h3 { margin: 6px 0 4px; font-size: 11px; letter-spacing: .1em; color: var(--muted); text-transform: uppercase; }
-.delx { flex: 0 0 auto; max-height: 34%; border-bottom: 1px solid var(--line); }
+.delx { flex: 0 1 auto; max-height: 30%; border-bottom: 1px solid var(--line); }
 .fp { display: grid; grid-template-columns: 80px 1fr; gap: 3px 8px; font: 12px ui-monospace, Consolas, monospace; }
 .fp input { width: 100%; padding: 1px 4px; }
-.strips { flex: 1 1 50%; border-bottom: 1px solid var(--line); }
+.strips { flex: 1 1 50%; min-height: 80px; border-bottom: 1px solid var(--line); }
 .bay { margin-bottom: 6px; min-height: 22px; border: 1px dashed transparent; border-radius: 4px; }
 .bay.drop { border-color: var(--atc); }
 .bay h4 { margin: 2px 0; font-size: 10px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase; }
@@ -83,7 +84,7 @@ body.popout aside { width: 520px; }
 .strip [contenteditable] { outline: none; border-bottom: 1px dotted #33414f; min-width: 20px; }
 .strip .w { color: var(--alert); font-size: 10px; }
 .strip .other { color: var(--muted); font-size: 10px; }
-.log { flex: 1 1 40%; }
+.log { flex: 1 1 40%; min-height: 80px; }
 #log div { padding: 2px 0; border-bottom: 1px solid #141c24; }
 #log .atc { color: var(--atc); }
 #log .ai { color: var(--ai); }

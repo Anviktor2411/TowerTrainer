@@ -819,7 +819,8 @@ export class Sim {
       if (s === "clr_req" || (s === "parked" && a.lastCall != null)) {
         const code = this.squawks.next(this.t);
         const gnd = this.positions.GND ? `, when ready ${this.contactPhrase("GND")}` : "";
-        return `${cs}, cleared to ${a.other[1]} via flight planned route, climb 5000 feet, squawk ${code}${gnd}`;
+        const sg = this.suggestDeparture(a);
+        return `${cs}, cleared to ${a.other[1]} via ${sg.sid ? sg.sid + " departure" : "flight planned route"}, climb ${sg.climb} feet, squawk ${code}${gnd}`;
       }
       if (s === "cleared" && a.askedHandoff && this.positions.GND) return `${cs}, ${this.contactPhrase("GND")}`;
     }
@@ -894,6 +895,12 @@ export class Sim {
     return null;
   }
 
+  /** Suggested SID + initial climb (main.js plugs in procedures from CIFP / EuroScope; generic otherwise). */
+  suggestDeparture(a) {
+    if (this.suggest) { try { const s = this.suggest(a); if (s) return s; } catch { /* ignore */ } }
+    return { sid: null, climb: this.region === "US" ? 5000 : 4000, generic: true };
+  }
+
   /** Taxiway names along the shortest taxi route to the departure runway (for AI taxi instructions). */
   viaNames(a) {
     const start = this.startNode(a, true);
@@ -941,8 +948,9 @@ export class Sim {
     // correction of a pending readback error
     const err = a.rbError;
     let corrected = false;
-    if (err && !err.fixed && !err.missed && new RegExp(`\\b${err.rightKey.replace(".", "\\.")}\\b`).test(text)) {
-      err.fixed = true; corrected = true; this.stats.rbCaught++;
+    if (err && !err.fixed && new RegExp(`\\b${err.rightKey.replace(".", "\\.")}\\b`).test(text)) {
+      err.fixed = true; corrected = true;
+      if (!err.missed) this.stats.rbCaught++;   // a late correction still fixes the aircraft, but was not "caught"
       err.apply();
       this.onEvent({ type: "readbackCorrected", ac: a, err });
       // "negative, squawk 4521" is applied as an instruction too; a bare correction gets the fixed item read back
@@ -970,7 +978,10 @@ export class Sim {
     }
     if (!items.length) return readback(["roger"], csObj, st);
     // a planted readback error (training): wrong squawk digit, reciprocal runway, wrong altitude/frequency
-    if (!opts.ai && !corrected && this.rates.readbackError > 0 && Math.random() < this.rates.readbackError) this.plantError(a, items);
+    if (!opts.ai && !corrected && (this.forceRbError || (this.rates.readbackError > 0 && Math.random() < this.rates.readbackError))) {
+      this.forceRbError = false;
+      this.plantError(a, items);
+    }
     return readback(items, csObj, st, extra);
   }
 
@@ -1015,7 +1026,7 @@ export class Sim {
         this.serviced(a, "clearance");
         if (a.assignedSq && a.assignedSq !== i.squawk) this.squawks.release(a.assignedSq, this.t);
         a.squawk = i.squawk; a.assignedSq = i.squawk; this.squawks.take(i.squawk);
-        a.ifr = true; a.sid = i.sid; a.initAlt = i.alt;
+        a.ifr = true; a.sid = i.sid && i.sid !== "flight planned route" ? i.sid.replace(/ departure$/, "") : a.sid; a.initAlt = i.alt;
         if (i.alt) { const m = i.alt.match(/(\d+)/); if (m) a.cfl = /flight level/.test(i.alt) ? +m[1] * 100 : +m[1]; }
         if (a.state !== "cleared") { a.state = "cleared"; a.callAt = this.t + rint(20, 60); }
         const parts = [`cleared to ${i.dest ? a.other[1] : "destination"}`];
@@ -1121,7 +1132,7 @@ export class Sim {
         }
         if (i.unit === "frequency change approved") { a.handedOff = true; a.removeAt = this.t + 6; return { text: "frequency change approved", signoff: true }; }
         const target = positionFor(i.unit, i.freq, this.positions);
-        const unitWord = cap(i.unit);
+        const unitWord = i.unit.replace(/\b\w/g, c => c.toUpperCase());
         if (i.freq && (!target || !target.exact)) {
           // a frequency nobody is on: the pilot goes there and comes back
           a.switchTo = { lost: true, freq: i.freq }; a.switchAt = this.t + 3;
