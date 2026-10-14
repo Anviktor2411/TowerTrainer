@@ -5,6 +5,7 @@ models/
 secrets.json
 .env
 Custom Data/
+!tests/fixtures/xplane/Custom Data/
 __pycache__/
 _backup*/
 *.pyc

@@ -1,0 +1,2 @@
+Synthetic X-Plane default data for the tests
+AIRAC cycle    : 2206

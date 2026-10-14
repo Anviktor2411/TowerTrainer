@@ -4,6 +4,8 @@
 """
 import base64
 import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows consoles default to cp1252
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent

@@ -1,0 +1,4 @@
+Synthetic navigation data for the TowerTrainer tests -- not real Navigraph data.
+AIRAC cycle    : 2511
+Version        : 1
+Valid (from/to): 30/OCT/2025 - 26/NOV/2025

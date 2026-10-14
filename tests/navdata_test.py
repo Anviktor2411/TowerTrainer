@@ -4,6 +4,8 @@
 """
 import datetime as dt
 import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows consoles default to cp1252
 import tempfile
 from pathlib import Path
 
