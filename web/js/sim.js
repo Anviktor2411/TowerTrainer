@@ -243,12 +243,14 @@ export class Sim {
     const m = typeof text === "string" ? { d: text, s: sayNumbers(text, a.style || NEUTRAL_STYLE) } : text;
     if (a.nordo) { a.lastWant = m.d; a.lastWantAt = this.t; this.onEvent({ type: "nordoWants", ac: a, text: m.d }); return; }
     a.lastCall = this.t;
-    const speaker = Math.random() < 0.85 ? 0 : 1;
-    this.onRadio({ from: "pilot", ac: a, text: m.d, say: m.s, pos: a.freq, speaker, kind });
+    const speaker = m.prepared ? 0 : Math.random() < 0.85 ? 0 : 1;
+    // an emergency that lost its frequency calls on guard (121.500), which Tower and Approach always monitor
+    const pos = a.mayday && a.freq === "LOST" ? "GUARD" : a.freq;
+    this.onRadio({ from: "pilot", ac: a, text: m.d, say: m.s, pos, speaker, kind, prepared: !!m.prepared });
   }
 
-  /** A templated pilot call. */
-  call(a, kind, ctx = {}, phaseUnit = "TWR") {
+  /** Build a templated pilot call {d, s} without transmitting it. */
+  buildCall(a, kind, ctx = {}, phaseUnit = "TWR") {
     const st = a.style || NEUTRAL_STYLE;
     const c = {
       st, cs: this.cs(a), unit: this.unitFor(a, phaseUnit), typeSp: spokenType(a.type),
@@ -259,13 +261,40 @@ export class Sim {
       c.greet = greeting(st, localHour(this.clockUtc + this.t * 1000, this.apt.d.lon), this.apt.icao);
       a.greeted = { ...(a.greeted || {}), [a.freq]: true };
     }
-    this.pilot(a, pilotCall(kind, c), kind);
+    return pilotCall(kind, c);
+  }
+
+  /** A templated pilot call. */
+  call(a, kind, ctx = {}, phaseUnit = "TWR") {
+    this.pilot(a, this.buildCall(a, kind, ctx, phaseUnit), kind);
     a.reqAt = this.t;
+  }
+
+  /** Build the pilot's next call now (so its voice can be rendered before they key) and keep it for later. */
+  scheduleCall(a, kind, ctx = {}, phaseUnit = "TWR", at = a.callAt) {
+    if (a.nordo) return;
+    const m = this.buildCall(a, kind, ctx, phaseUnit);
+    m.prepared = true;
+    a.prepared = { kind, m, at, freq: a.freq };
+    this.onEvent({ type: "prepare", ac: a, m: { ...m, kind } });
+  }
+  /** Transmit a prepared call if it still fits (same frequency), else build a fresh one. */
+  callPrepared(a, kind, ctx = {}, phaseUnit = "TWR") {
+    const p = a.prepared;
+    a.prepared = null;
+    if (p && p.kind === kind && p.freq === a.freq) { this.pilot(a, p.m, kind); a.reqAt = this.t; return; }
+    this.call(a, kind, ctx, phaseUnit);
   }
 
   /** ATC (AI controller) transmission on a position; parsed and applied like the user's. */
   atc(pos, text) {
     const pp = parse(text, this.ac.filter(a => this.hears(a, pos)), null);
+    const action = pp.ins.length && pp.ins.every(i => i.t === "light" || i.t === "followMe");
+    if (action) {                      // a light-gun signal is not a transmission
+      if (pp.ac) this.respond(pp.ac, pp.ins, { text: pp.normalized, pos, ai: true });
+      this.onEvent({ type: "aiAction", pos, text, ac: pp.ac });
+      return;
+    }
     this.onRadio({ from: "atc", ai: true, pos, text, say: sayNumbers(text, NEUTRAL_STYLE) });
     if (pp.ac && !pp.ac.human) {
       const r = this.respond(pp.ac, pp.ins, { text: pp.normalized, pos, ai: true });
@@ -331,7 +360,7 @@ export class Sim {
         a.callAt = this.t + 120;
       } else if (s === "cleared" && this.t >= a.callAt) {
         if (!this.split || a.freq === "GND" || !this.hasPos("GND")) {
-          this.call(a, "push", {}, "GND");
+          this.callPrepared(a, "push", {}, "GND");
           a.state = "push_req"; a.callAt = this.t + 150;
         } else if (!a.askedHandoff) {
           a.askedHandoff = true; // left on Delivery: asks where to go
@@ -344,9 +373,10 @@ export class Sim {
         if (this.followPath(a, dt, true)) {
           a.state = "pushed"; a.callAt = this.t + rint(20, 60);
           if (a.autoTaxi) { a.autoTaxi = false; this.lightTaxi(a); }
+          else this.scheduleCall(a, "taxi", {}, "GND");
         }
       } else if (s === "pushed" && this.t >= a.callAt) {
-        this.call(a, "taxi", {}, "GND");
+        this.callPrepared(a, "taxi", {}, "GND");
         a.state = "taxi_req"; a.callAt = this.t + 150;
       } else if (s === "taxi_req" && this.t >= a.callAt) {
         this.call(a, "stillWaitingGeneric", { what: "ready to taxi", greet: "" }, "GND");
@@ -357,8 +387,10 @@ export class Sim {
           if (done) { this.parkAt(a); a.returned = true; a.callAt = this.t + rint(240, 600); a.state = "parked"; }
         } else if (s === "taxi" && a.atStop && a.blockedRwy === a.depEnd.rwy && a.spd < 0.1) {
           a.state = "holding"; a.holdAt = this.t;
-          if (!a.calledReadyEarly) this.call(a, "ready", { rwy: a.depEnd.name }, "TWR");
+          if (!a.calledReadyEarly) this.callPrepared(a, "ready", { rwy: a.depEnd.name }, "TWR");
           a.calledReadyEarly = false; a.callAt = this.t + 120;
+        } else if (s === "taxi" && !a.prepared && !a.calledReadyEarly && a.blockedRwy === a.depEnd.rwy && a.distToStop != null && a.distToStop < 300 && a.freq !== "LOST") {
+          this.scheduleCall(a, "ready", { rwy: a.depEnd.name }, "TWR", this.t + 20);
         } else if (done && s === "lineup") {
           a.state = "lining";
         }
@@ -735,6 +767,8 @@ export class Sim {
     a.freq = to.key;
     if (a.prevFreq === "TWR" && a.kind === "dep" && !a.onGround) a.handedOff = true;
     a.checkInAt = this.t + rint(3, 8);
+    // the first call on the new frequency is predictable: render it now
+    if (!a.nordo && a.kind === "dep" && to.key === "GND" && ["cleared", "parked"].includes(a.state)) this.scheduleCall(a, "push", {}, "GND", a.checkInAt);
   }
 
   /** First call on a new frequency. */
@@ -743,7 +777,7 @@ export class Sim {
     const altTxt = () => `${Math.max(100, Math.round(a.alt / 100) * 100)} feet`;
     const cflTxt = () => a.cfl >= 6000 ? `flight level ${Math.round(a.cfl / 100)}` : `${a.cfl} feet`;
     if (a.kind === "dep") {
-      if (f === "GND" && ["cleared", "parked"].includes(s)) { this.call(a, "push", {}, "GND"); a.state = "push_req"; a.callAt = this.t + 150; }
+      if (f === "GND" && ["cleared", "parked"].includes(s)) { this.callPrepared(a, "push", {}, "GND"); a.state = "push_req"; a.callAt = this.t + 150; }
       else if (f === "GND" && s === "pushed") { this.call(a, "taxi", {}, "GND"); a.state = "taxi_req"; }
       else if (f === "TWR" && s === "holding") { this.call(a, "ready", {}, "TWR"); a.callAt = this.t + 120; }
       else if (f === "TWR" && s === "taxi") { this.call(a, "approachingHold", {}, "TWR"); a.calledReadyEarly = true; }
@@ -858,6 +892,7 @@ export class Sim {
       if (o === a || !o.onGround) continue;
       if (a.veh && o === a.target) continue;        // the car drives up to its aircraft, and its follower is behind it
       if (o.leader === a) continue;
+      if (a.leader === o && o.state !== "leading") continue;   // the car has stepped aside at the stand
       if (o.veh && o.serving === a) continue;                                // ground equipment at our stand
       const dx = o.pos[0] - a.pos[0], dy = o.pos[1] - a.pos[1];
       const along = dx * v[0] + dy * v[1], cross = Math.abs(dx * v[1] - dy * v[0]);
@@ -1339,7 +1374,10 @@ export class Sim {
         a.squawk = i.squawk; a.assignedSq = i.squawk; this.squawks.take(i.squawk);
         a.ifr = true; a.sid = i.sid && i.sid !== "flight planned route" ? i.sid.replace(/ departure$/, "") : a.sid; a.initAlt = i.alt;
         if (i.alt) { const m = i.alt.match(/(\d+)/); if (m) a.cfl = /flight level/.test(i.alt) ? +m[1] * 100 : +m[1]; }
-        if (a.state !== "cleared") { a.state = "cleared"; a.callAt = this.t + rint(20, 60); }
+        if (a.state !== "cleared") {
+          a.state = "cleared"; a.callAt = this.t + rint(20, 60);
+          if (!this.split || a.freq === "GND" || !this.hasPos("GND")) this.scheduleCall(a, "push", {}, "GND");
+        }
         const parts = [`cleared to ${i.dest ? a.other[1] : "destination"}`];
         if (i.sid) parts.push(i.sid);
         if (i.alt) parts.push(`climb ${i.alt}`);

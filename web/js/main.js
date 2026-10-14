@@ -14,6 +14,7 @@ import { NAT_NAME } from "./data.js";
 import { suggestSid, procLines } from "./procs.js";
 import { nextExpected, callsignText } from "./advisor.js";
 import { statePhrase, issueMarkers } from "./labels.js";
+import { buildAtis, parseMetar, atisSummary } from "./atis.js";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -30,7 +31,7 @@ const PRESET_EFFECT = { clean: 0, good: 0.85, distant: 1, old: 0.95 };
 
 const DEFAULTS = {
   accents: "natural", rate: 1, effect: 0.85, preset: "good", voices: true, blocked: true, rbErr: 4, sayAgain: 2, oldAtis: 10, events: false,
-  dep: 10, arr: 8, coach: false, lang: "en", graph: false,
+  dep: 10, arr: 8, coach: false, lang: "en", graph: false, monitor: [],
   staff: { mode: "combined", keys: ["TWR"] },
   xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false },
 };
@@ -68,8 +69,8 @@ function bootMain() {
   function addLog(pos, cls, html) {
     pos = pos || "ALL";
     const t = sim ? fmtClock(sim) : "";
-    const entry = { cls, html: `<span class="t">${t}</span>${html}` };
-    for (const p of new Set([pos, "ALL"])) {
+    const entry = { cls, html: `<span class="t">${t}</span>${pos === "GUARD" ? '<span class="guard">121.5</span> ' : ""}${html}` };
+    for (const p of new Set([pos, "ALL", ...(pos === "GUARD" ? ["TWR", "APP"] : [])])) {
       (logs[p] ||= []).push(entry);
       if (logs[p].length > 300) logs[p].shift();
       if (p !== activePos && p !== "ALL") unread[p] = (unread[p] || 0) + 1;
@@ -92,8 +93,9 @@ function bootMain() {
   radio.on((m) => {
     if (m.from === "voices") { if ($("settings").open) renderVoiceTable(); renderVoicePill(); return; }
     if (m.from === "engine") { radio.lastEngine = m; renderVoicePill(); return; }
-    if (m.from === "blocked") { addLog(m.pos, "blk", `⟿ blocked transmission${m.ac ? " (" + esc(m.ac.cs) + (m.rival ? " + " + esc(m.rival.cs) : "") + ")" : ""}`); return; }
+    if (m.from === "blocked") { addLog(m.pos, "blk", m.stuck ? `⟿ ${m.ac ? esc(m.ac.cs) + " " : "your transmission "}blocked — a microphone is stuck open on the frequency` : `⟿ blocked transmission${m.ac ? " (" + esc(m.ac.cs) + (m.rival ? " + " + esc(m.rival.cs) : "") + ")" : ""}`); return; }
     if (m.from === "stuck") { addLog(m.pos, "blk", `⟿ stuck microphone on the frequency${m.ac ? " (" + esc(m.ac.cs) + ")" : ""} — ${m.on ? "nobody can get through" : "cleared"}`); return; }
+    if (m.from === "lab") { sysLog(`Radio lab: ${m.step}`); return; }
     if (m.from === "atc") {
       const who = m.ai ? `${esc(posCs(m.pos))} (AI)` : "ATC";
       addLog(m.pos, m.ai ? "ai" : "atc", `<b>${who}</b> ${esc(m.text)}`);
@@ -197,16 +199,21 @@ function bootMain() {
     if (metar && typeof metar.wdir === "number") sim.wind = { dir: metar.wdir, spd: metar.wspd || 0 };
     if ($("rwySel").value) sim.setRunway($("rwySel").value);
     radio.onFrequency = (pos) => (sim ? sim.onFrequency(pos) : []);
+    // after two stations block each other an AI controller asks who called; a staffed position leaves that to you
+    radio.onBlocked = (pos) => { if (sim && sim.split && sim.positions[pos] && !sim.userWorks(pos)) setTimeout(() => sim && sim.atc(pos, Math.random() < 0.5 ? "station calling, say again" : "two stations calling at once, say again"), 900); };
     selectedId = null;
     activePos = split ? [...staffing].sort((a, b) => POS_ORDER.indexOf(a) - POS_ORDER.indexOf(b))[0] : "ALL";
-    radio.audible = split ? new Set([...staffing]) : null;
+    radio.audible = split ? new Set([...staffing, "GUARD"]) : null;
+    radio.monitor = new Set(split ? (settings.monitor || []).filter(k => !staffing.has(k)) : []);
     setView(DEFAULT_VIEW[activePos]);
     renderTabs(); renderLog(); renderPosHead(); renderInfo();
     applyProcs();
   }
 
   function onSimEvent(e) {
-    if (e.type === "atis") { renderAtis(); sysLog(`ATIS information ${e.letter} is now current.`); }
+    if (e.type === "atis") { renderAtis(); sysLog(`ATIS information ${e.letter} is now current.`); if (atisOn) startAtis(); }
+    if (e.type === "prepare") radio.prerenderText(e.ac, e.m);
+    if (e.type === "aiAction") addLog(e.pos, "ai", `<b>${esc(posCs(e.pos))} (AI)</b> 💡 ${esc(e.text)}`);
     if (e.type === "readbackCorrected") addLog(e.ac.freq, "sys", `✓ readback corrected (${esc(e.ac.cs)})`);
     if (e.type === "emergency") { alertBox(`${e.ac.cs} squawking ${e.code}${e.code === "7600" ? " — radio failure (RCF): use light signals or the follow-me" : e.code === "7500" ? " — unlawful interference" : " — emergency"}`); renderInfo(); }
     if (e.type === "gone" && e.ac.id === selectedId) { selectedId = null; renderInfo(); }
@@ -229,16 +236,48 @@ function bootMain() {
   }
   function windText() { return metar && metar.wdir != null ? `${String(metar.wdir).padStart(3, "0")}° / ${metar.wspd} kt` : "calm / unknown"; }
 
+  // ---------- ATIS ----------
+  let atisOn = false;
+  function utcClock() { const d = new Date((sim ? sim.clockUtc + sim.t * 1000 : Date.now())); return `${String(d.getUTCHours()).padStart(2, "0")}${String(d.getUTCMinutes()).padStart(2, "0")}`; }
+  function atisText() {
+    if (!sim || !apt) return "";
+    return buildAtis({ icao: apt.icao, name: apt.callName, letter: sim.atisLetter(), rwy: sim.depEnd.name, arrRwy: sim.arrEnd.name,
+      metar: metar && metar.rawOb ? metar.rawOb : "", region: sim.region, utc: utcClock(), lvp: !!(sim.lvp), remarks: sim.atisRemarks || [] });
+  }
+  function startAtis() { atisOn = true; $("atisListen").classList.add("on"); $("atisListen").textContent = "■ ATIS"; radio.playAtis(atisText()); }
+  function stopAtis() { atisOn = false; $("atisListen").classList.remove("on"); $("atisListen").textContent = "▶ ATIS"; radio.stopAtis(); }
+  $("atisListen").addEventListener("click", () => (atisOn ? stopAtis() : startAtis()));
+
   function renderAtis() {
     if (!sim) return;
     const m = metar || {};
-    const qnh = m.altim ? Math.round(m.altim) : null;
+    const dec = parseMetar(m.rawOb || "");
+    const qnh = dec.qnh || (m.altim ? Math.round(m.altim) : null);
     const rvr = (m.rawOb || "").match(/\bR\d\d[LRC]?\/[PM]?\d{4}/g);
+    const txt = atisText();
     $("atisBox").innerHTML = `<span>ATIS <b>${sim.atisLetter()}</b></span><span>RWY ${esc(sim.depEnd.name)}</span>` +
       `<span>${windText()}</span>${qnh ? `<span>Q${qnh}</span>` : ""}<span class="raw" title="${esc(m.rawOb || "")}">${esc(m.rawOb || "no METAR")}</span>`;
-    $("wxPanel").innerHTML = `WIND <b>${windText()}</b><br>QNH <b>${qnh || "—"}</b> · VIS <b>${esc(m.visib ?? "—")}</b>${rvr ? `<br>RVR <b>${esc(rvr.join(" "))}</b>` : ""}` +
-      `<br>RWY <b>${esc(sim.depEnd.name)}</b> · ATIS <b>${sim.atisLetter()}</b>`;
+    $("atisBox").title = txt;
+    $("wxPanel").innerHTML = `WIND <b>${windText()}</b>${dec.wind && dec.wind.gust ? ` G<b>${dec.wind.gust}</b>` : ""}<br>QNH <b>${qnh || "—"}</b> · VIS <b>${esc(dec.cavok ? "CAVOK" : dec.vis != null ? (dec.vis >= 9999 ? "10km+" : dec.vis + " m") : m.visib ?? "—")}</b>${rvr ? `<br>RVR <b>${esc(rvr.join(" "))}</b>` : ""}` +
+      `${dec.wx.length ? `<br>WX <b>${esc(dec.wx.map(x => x.int + x.codes.join("")).join(" "))}</b>` : ""}${dec.temp != null ? `<br>T/DP <b>${dec.temp}/${dec.dew ?? "—"}</b>` : ""}` +
+      `<br>RWY <b>${esc(sim.depEnd.name)}</b> · ATIS <b>${sim.atisLetter()}</b>${sim.lvp ? ' · <b class="warnline">LVP</b>' : ""}<br><span class="muted atistxt" title="${esc(txt)}">${esc(txt.slice(0, 90))}…</span>`;
+    if (apt && apt.freq.atis) $("atisListen").title = `Listen to the ATIS loop (${fmtFreq(apt.freq.atis.mhz)})`;
   }
+  /** Live METAR: every 10 minutes; a changed observation rolls the ATIS letter and updates the wind. */
+  async function pollMetar() {
+    if (!apt) return;
+    try {
+      const m = await (await fetch(`/api/metar/${apt.icao}`)).json();
+      if (m && m.rawOb && (!metar || metar.rawOb !== m.rawOb)) {
+        const first = !metar;
+        metar = m;
+        if (sim && typeof m.wdir === "number") sim.wind = { dir: m.wdir, spd: m.wspd || 0, gust: m.wgst || 0 };
+        if (sim && !first) { sim.rollAtis(); sysLog(`New METAR: ${m.rawOb}`); }
+        renderAtis();
+      }
+    } catch { /* offline */ }
+  }
+  setInterval(pollMetar, 600000);
 
   // ---------- positions, tabs, views ----------
   function staffedKeys() { return sim && sim.split ? POS_ORDER.filter(k => sim.userWorks(k)) : ["ALL"]; }
@@ -248,8 +287,9 @@ function bootMain() {
     $("posTabs").innerHTML = keys.map(k => {
       const ai = sim.split && !sim.userWorks(k);
       const label = k === "ALL" ? "DEL/GND/TWR" : k;
+      const mon = ai ? `<button class="mon${radio.monitor.has(k) ? " on" : ""}" data-mon="${k}" title="${radio.monitor.has(k) ? "Monitoring this frequency (quiet) — click to stop" : "Monitor this frequency (quiet)"}">${radio.monitor.has(k) ? "🔈" : "🔇"}</button>` : "";
       return `<div class="tab${k === activePos ? " on" : ""}${ai ? " ai" : ""}" data-pos="${k}" title="${ai ? "AI controller" : "you"}">${label}` +
-        `${unread[k] ? `<span class="badge">${unread[k]}</span>` : ""}<button class="pop" data-pop="${k}" title="Pop out">⧉</button></div>`;
+        `${unread[k] ? `<span class="badge">${unread[k]}</span>` : ""}${mon}<button class="pop" data-pop="${k}" title="Pop out">⧉</button></div>`;
     }).join("");
     $("viewTabs").innerHTML = Object.keys(VIEWS).map(v => `<button data-view="${v}" class="${radar.view === v ? "on" : ""}">${VIEWS[v]}</button>`).join("");
     renderPosHead();
@@ -277,6 +317,15 @@ function bootMain() {
   $("posTabs").addEventListener("click", (e) => {
     const pop = e.target.closest("[data-pop]");
     if (pop) { e.stopPropagation(); popOut(pop.dataset.pop); return; }
+    const mon = e.target.closest("[data-mon]");
+    if (mon) {
+      e.stopPropagation();
+      const k = mon.dataset.mon;
+      if (radio.monitor.has(k)) radio.monitor.delete(k); else radio.monitor.add(k);
+      settings.monitor = [...radio.monitor]; save(); renderTabs();
+      sysLog(radio.monitor.has(k) ? `Monitoring ${posCs(k)} quietly.` : `Stopped monitoring ${posCs(k)}.`);
+      return;
+    }
     const t = e.target.closest(".tab"); if (t) setActive(t.dataset.pos);
   });
   $("viewTabs").addEventListener("click", (e) => { const b = e.target.closest("[data-view]"); if (b) setView(b.dataset.view); });
@@ -733,7 +782,7 @@ function bootMain() {
   // ---------- guide ----------
   Object.defineProperties(app, { apt: { get: () => apt }, sim: { get: () => sim } });
   Object.assign(app, {
-    settings, select, setSpeed, openDebrief, windText, bestRunway,
+    settings, select, setSpeed, openDebrief, windText, bestRunway, atisText, pollMetar,
     clearanceText: (a) => clearanceText(a),
     taxiText: (a) => { if (!a) return ""; const via = sim.viaNames(a); return `${a.tel} ${a.num} taxi to holding point runway ${sim.depEnd.name}${via.length ? " via " + via.join(" ") : ""}`; },
     taxiInText: (a) => { if (!a || !a.stand) return a ? `${a.tel} ${a.num} taxi to stand` : ""; const via = sim.viaNamesTo(a, a.stand.pos); return `${a.tel} ${a.num} taxi to stand ${a.stand.name}${via.length ? " via " + via.join(" ") : ""}`; },

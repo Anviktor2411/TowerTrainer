@@ -9,6 +9,7 @@ import { pickVoice, respell } from "../web/js/voices.js";
 import { SquawkAllocator, rangesFor } from "../web/js/squawk.js";
 import { buildPositions, positionFor } from "../web/js/positions.js";
 import { coach } from "../web/js/coach.js";
+import { parseMetar, buildAtis, transitionLevel, atisSummary } from "../web/js/atis.js";
 
 let seed = 7;
 Math.random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
@@ -229,6 +230,27 @@ ok(notes.some(x => /already in use/i.test(x.msg)), "coach: squawk already in use
 notes = coach({ text: "cleared for takeoff", parsed: parse("cleared for takeoff", sim.ac, d), sim, pos: "ALL", lang: "et" });
 ok(notes.some(x => /kutsung/i.test(x.msg)), "coach in Estonian");
 
+// ---------- ATIS from a METAR ----------
+{
+  const raw = "METAR EETN 141920Z 13007KT 100V160 9999 -RA FEW025 BKN040 09/08 Q1015 NOSIG";
+  const mt = parseMetar(raw);
+  ok(mt.wind.dir === 130 && mt.wind.spd === 7 && mt.wind.from === 100 && mt.vis === 9999 && mt.wx[0].codes[0] === "RA" && mt.wx[0].int === "-" &&
+    mt.clouds.length === 2 && mt.clouds[1].cover === "BKN" && mt.clouds[1].ft === 4000 && mt.temp === 9 && mt.dew === 8 && mt.qnh === 1015, "METAR decoded: " + JSON.stringify({ w: mt.wind, v: mt.vis, wx: mt.wx, c: mt.clouds, t: mt.temp, q: mt.qnh }));
+  eq(transitionLevel(5000, 1015), 60, "TL 60 at QNH 1015 (TA 5000)"); eq(transitionLevel(5000, 1000), 65, "TL 65 at QNH 1000"); eq(transitionLevel(6000, 1033), 65, "TL 65 at QNH 1033 (TA 6000)");
+  const txt = buildAtis({ icao: "EETN", name: "Tallinn", letter: "B", rwy: "26", metar: raw, region: "ICAO", utc: "1920" });
+  for (const re of [/information Bravo/, /time 1920/, /Runway in use 26/, /Transition level 60/, /Wind 130 degrees 7 knots, varying between 100 and 160/, /light rain/i, /Few 2500 feet, broken 4000 feet/, /Temperature 9, dew point 8/, /QNH 1015/, /Acknowledge information Bravo on first contact/])
+    ok(re.test(txt), `ATIS text has ${re}`);
+  const us = parseMetar("KJFK 141951Z 18012G20KT 10SM FEW050 SCT250 22/14 A3002 RMK AO2 SLP165");
+  ok(us.wind.gust === 20 && us.vis === 16090 && Math.abs(us.qnh - 1017) <= 1 && us.qnhInHg === 30.02 && us.remarks.startsWith("AO2"), "US METAR: gusts, statute miles, inHg: " + JSON.stringify({ g: us.wind.gust, v: us.vis, q: us.qnh, r: us.remarks }));
+  const txt2 = buildAtis({ icao: "KJFK", name: "Kennedy", letter: "K", rwy: "31L", metar: us, region: "US", utc: "1951" });
+  ok(/Altimeter 3 0 0 2/.test(txt2) && /gusting 20 knots/.test(txt2) && /Advise on initial contact you have information Kilo/.test(txt2) && !/Transition level/.test(txt2), "US ATIS: altimeter, gusts, no transition level: " + txt2);
+  const fog = parseMetar("EGLL 060750Z 00000KT 0200 R27R/0400N FG VV001 03/03 Q1030");
+  const txt3 = buildAtis({ icao: "EGLL", name: "Heathrow", letter: "C", rwy: "27R", metar: fog, region: "UK", utc: "0750", lvp: true });
+  ok(/Wind calm/.test(txt3) && /Visibility 200 metres/.test(txt3) && /RVR runway 27R 400 metres/.test(txt3) && /Low visibility procedures in operation/.test(txt3) && /fog/i.test(txt3) && /Transition level 70/.test(txt3), "LVP ATIS: " + txt3);
+  ok(/CAVOK/.test(buildAtis({ icao: "EETN", name: "Tallinn", letter: "A", rwy: "08", metar: "EETN 141920Z 27005KT CAVOK 15/05 Q1020", region: "ICAO" })), "CAVOK read out");
+  ok(/130\/7 · 10km\+ · -RA · 9\/8 · Q1015/.test(atisSummary(mt)), "summary line: " + atisSummary(mt));
+}
+
 // ---------- NORDO (7600): light signals, circuit rejoin, follow-me ----------
 {
   const rad2 = [];
@@ -280,10 +302,19 @@ ok(notes.some(x => /kutsung/i.test(x.msg)), "coach in Estonian");
   run(sim, 900, () => nb.state === "vacated");
   sim.respond(nb, parse(`${nb.cs} send follow-me`, sim.ac).ins, { text: "" });
   ok(nb.followMe && nb.followMe.veh && nb.followMe.cs === "FOLLOWME1" && nb.followMe.state === "toAircraft", "follow-me car dispatched: " + (nb.followMe && nb.followMe.cs));
-  run(sim, 900, () => nb.followMe.state === "leading");
-  ok(nb.followMe.state === "leading" && nb.leader === nb.followMe && nb.state === "taxi", "car reached the aircraft and leads it: " + nb.followMe.state);
-  run(sim, 2400, () => nb.state === "parked");
-  ok(nb.state === "parked", "aircraft followed the car onto the stand: " + nb.state);
+  const car = nb.followMe;
+  const crossings = [];
+  const drive = (sec, until) => { // like a controller: clear the car across any runway it stops at
+    for (let k = 0; k < 10; k++) {
+      if (run(sim, sec, () => until() || (car.atStop && car.blockedRwy != null && car.spd < 0.1))) { if (until()) return true; }
+      if (car.atStop && car.blockedRwy != null) { const r = apt.runways[car.blockedRwy].ends[0].name; crossings.push(r); sim.respond(car, parse(`${car.cs} cross runway ${r}`, sim.ac).ins, { text: "" }); } else return until();
+    }
+    return until();
+  };
+  drive(900, () => car.state === "leading");
+  ok(car.state === "leading" && nb.leader === car && nb.state === "taxi", "car reached the aircraft and leads it: " + car.state);
+  drive(2400, () => nb.state === "parked");
+  ok(nb.state === "parked", "aircraft followed the car onto the stand: " + nb.state + (crossings.length ? " (crossed runway " + crossings.join(", ") + " on the car's clearance)" : ""));
   run(sim, 600, () => nb.followMe.gone);
   ok(nb.followMe.gone, "follow-me returned to base and left");
   ok(!sim.ac.some(a => a.veh), "no vehicle left behind");

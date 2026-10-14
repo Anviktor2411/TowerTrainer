@@ -167,3 +167,7 @@ fieldset .row { display: flex; gap: 12px; flex-wrap: wrap; }
 .clr.sel { outline: 1px solid var(--atc); }
 .clr .cs { font-weight: 700; } .clr .sg { color: var(--atc); grid-column: 1 / span 3; font-size: 11px; } .clr .st { color: var(--muted); text-align: right; }
 .clr button { font-size: 10px; padding: 0 6px; }
+#atisListen { font-size: 11px; padding: 2px 6px; } #atisListen.on { color: var(--atc); border-color: var(--atc); }
+.posTabs .tab .mon { font-size: 10px; padding: 0 3px; opacity: .6; } .posTabs .tab .mon.on { opacity: 1; color: var(--atc); }
+#log .guard { color: var(--alert); font-weight: 700; font-size: 10px; margin-right: 4px; }
+.atistxt { display: block; max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 10px; }

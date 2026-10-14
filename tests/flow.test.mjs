@@ -13,7 +13,9 @@ Math.random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483
 const apt = new Airport(JSON.parse(readFileSync(new URL(`../cache/${icao}.json`, import.meta.url), "utf8")));
 const radio = [], alerts = [];
 const sim = new Sim(apt, { onRadio: (m) => radio.push(`${m.ac.cs}: ${m.text}`), onAlert: (m) => alerts.push(m) });
-const rwy = process.argv[3] === "-0" ? apt.runways[0].ends[0].name : process.argv[3] && process.argv[3] !== "-" ? process.argv[3] : apt.runways[0].ends[1].name;
+const usable = apt.runways.filter(r => apt.entries(r.ends[0]).length && apt.entries(r.ends[1]).length);   // a strip without taxiways is not a runway in use
+const r0 = usable[0] || apt.runways[0];
+const rwy = process.argv[3] === "-0" ? r0.ends[0].name : process.argv[3] && process.argv[3] !== "-" ? process.argv[3] : r0.ends[1].name;
 sim.setRunway(rwy);
 sim.depPerHour = 0; sim.arrPerHour = 0; sim.nextDep = sim.nextArr = 1e9;
 

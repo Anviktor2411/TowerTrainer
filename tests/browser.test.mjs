@@ -64,6 +64,17 @@ try {
   ok(await p.eval(`document.getElementById("voicePill").innerText.startsWith("Voices:")`) && (vst.neural ? await p.eval(`document.getElementById("voiceBanner").classList.contains("hidden") || /Neural voices ready/.test(document.getElementById("voiceBanner").innerText)`) : await p.eval(`!document.getElementById("voiceBanner").classList.contains("hidden")`)), `voice banner/pill match the server (neural=${vst.neural})`);
   await p.eval(`TT.setView("GND")`);
 
+  // ---- radio chain measured offline (OfflineAudioContext), ATIS text ----
+  const st = await p.eval(`TT.radio.selfTest(0.85, "good")`);
+  ok(st && st.worklet, "radio worklet loads in an OfflineAudioContext");
+  ok(st.lowRatio > 4 && st.highRatio > 4, `band-pass: 1 kHz passes, 150 Hz and 6 kHz are cut (ratios ${st.lowRatio.toFixed(1)}, ${st.highRatio.toFixed(1)})`);
+  ok(st.floor > 0.002 && st.floor < st.mid, `AM noise floor under the carrier, below the voice (${st.floor.toFixed(4)} vs ${st.mid.toFixed(3)})`);
+  ok(st.tail > st.after * 3 && st.after < 0.003, `squelch tail then silence (tail ${st.tail.toFixed(4)}, after ${st.after.toFixed(5)})`);
+  const stClean = await p.eval(`TT.radio.selfTest(0, "clean")`);
+  ok(stClean.lowRatio < 2 && stClean.floor < 0.0005, "clean preset: no band limiting, no noise");
+  ok(await p.eval(`/information [A-Z][a-z]+/.test(TT.app.atisText()) && /Runway in use/.test(TT.app.atisText())`), "ATIS text generated from the METAR: " + (await p.eval(`TT.app.atisText().slice(0, 90)`)));
+  ok(await p.eval(`document.getElementById("atisListen") && document.getElementById("wxPanel").innerText.includes("ATIS")`), "ATIS listen button and weather panel present");
+
   // ---- dialogs ----
   await p.click("#settingsBtn"); await sleep(300);
   ok(await p.eval(`document.getElementById("settings").open && document.querySelectorAll("#voiceTable tr").length > 10`), "settings dialog with voice table");
