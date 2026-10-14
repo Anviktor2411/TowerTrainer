@@ -293,6 +293,23 @@ export const TEMPLATES = {
   },
   noReply: { ICAO: [(p, c) => p`${c.unit}, ${c.cs}, no reply on ${c.freq}`, (p, c) => p`${c.unit}, ${c.cs}, nobody on ${c.freq}, back with you`] },
   mayday: { ICAO: [(p, c) => p`Mayday, mayday, mayday, ${c.unit}, ${c.cs}, engine failure, request priority landing runway ${c.rwy}`] },
+  // visual circuit / VFR
+  circuitReport: {
+    ICAO: [(p, c) => p`${c.unit}, ${c.cs}, ${c.leg} runway ${c.rwy}`, (p, c) => p`${c.cs}, ${c.leg}`],
+    US: [(p, c) => p`${c.unit}, ${c.cs}, ${c.leg} ${c.rwy}`, (p, c) => p`${c.cs}, ${c.leg}`],
+  },
+  finalReport: {
+    ICAO: [(p, c) => p`${c.unit}, ${c.cs}, final runway ${c.rwy}`, (p, c) => p`${c.cs}, ${c.dist} miles final runway ${c.rwy}`],
+    US: [(p, c) => p`${c.unit}, ${c.cs}, ${c.dist} mile final ${c.rwy}`, (p, c) => p`${c.cs}, final ${c.rwy}`],
+  },
+  // ground vehicles
+  vehHold: {
+    ICAO: [(p, c) => p`${c.unit}, ${c.cs}, holding short runway ${c.rwy}${c.ac ? " with " + c.ac : ""}, request crossing`,
+      (p, c) => p`${c.unit}, ${c.cs}${c.ac ? " with " + c.ac : ""}, holding short of runway ${c.rwy}, request to cross`],
+    US: [(p, c) => p`${c.unit}, ${c.cs}, holding short ${c.rwy}${c.ac ? " with " + c.ac : ""}, request to cross`],
+  },
+  vehVacated: { ICAO: [(p, c) => p`${c.cs}, runway ${c.rwy} vacated`, (p, c) => p`${c.cs}, clear of runway ${c.rwy}`], US: [(p, c) => p`${c.cs}, clear of ${c.rwy}`] },
+  vehRequest: { ICAO: [(p, c) => p`${c.unit}, ${c.cs}, ${c.what}`, (p, c) => p`${c.unit}, ${c.cs}, ${c.greet}${c.what}`] },
 };
 
 /** Build a pilot call. Falls back from region-specific to ICAO variants. */

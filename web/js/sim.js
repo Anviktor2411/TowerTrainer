@@ -1,8 +1,8 @@
 // Traffic simulation: aircraft state machines, ground movement, pilots' calls and readbacks,
 // ATC positions with handoffs, AI controllers for unstaffed positions, squawks, readback errors.
 import { KT, FT, dist, hdgOf, angDiff, vecFromHdg } from "./airport.js";
-import { AIRLINES, TYPES, GA_TYPES, REG_PREFIX, LETTER_WORD, DESTS, AIRLINE_NAT, REG_NAT, rnd, rint, distKm, weighted } from "./data.js";
-import { standKey, parse, normalize } from "./commands.js";
+import { AIRLINES, TYPES, GA_TYPES, REG_PREFIX, LETTER_WORD, DESTS, AIRLINE_NAT, REG_NAT, rnd, rint, distKm, weighted, controllerNat } from "./data.js";
+import { standKey, parse, normalize, setTaxiNames } from "./commands.js";
 import { regionOf, makeStyle, callsign, spokenType, pilotCall, readback, ph, greeting, signOff, localHour, cap, NEUTRAL_STYLE, sayNumbers } from "./phrase.js";
 import { makeCrew } from "./voices.js";
 import { SquawkAllocator, validCode } from "./squawk.js";
@@ -51,6 +51,9 @@ export class Sim {
     this.wind = { dir: null, spd: 0 };
     this.lastTakeoff = null; // {t, wtc, cs}
     this.alerted = new Map();
+    this.vehNo = {};         // vehicle callsign counters per type
+    this.lightLog = [];      // light-gun signals given {t, cs, color, mode, effect}
+    setTaxiNames(apt.taxiNames);
     this.stats = { departures: 0, arrivals: 0, goArounds: 0, alerts: 0, rbErrors: 0, rbCaught: 0, missedRb: 0,
       conflicts: 0, delays: [], tx: {} };
   }
@@ -234,9 +237,11 @@ export class Sim {
   sayCs(a) { return callsign(a, a.style || NEUTRAL_STYLE).d; }
   cs(a) { return callsign(a, a.style || NEUTRAL_STYLE); }
 
-  /** Emit a pilot transmission. text may be a string or {d, s}. */
+  /** Emit a pilot transmission. text may be a string or {d, s}. A radio-failure aircraft cannot transmit:
+   *  what it would have said is kept for the info panel instead. */
   pilot(a, text, kind) {
     const m = typeof text === "string" ? { d: text, s: sayNumbers(text, a.style || NEUTRAL_STYLE) } : text;
+    if (a.nordo) { a.lastWant = m.d; a.lastWantAt = this.t; this.onEvent({ type: "nordoWants", ac: a, text: m.d }); return; }
     a.lastCall = this.t;
     const speaker = Math.random() < 0.85 ? 0 : 1;
     this.onRadio({ from: "pilot", ac: a, text: m.d, say: m.s, pos: a.freq, speaker, kind });
@@ -307,9 +312,12 @@ export class Sim {
       this.call(a, "noReply", { freq: a.lostFreq, greet: "" });
     }
     if (a.checkInAt && this.t >= a.checkInAt && !a.lostUntil) { a.checkInAt = null; this.checkIn(a); }
+    if (a.veh) { this.updateVehicle(a, dt); if (a.removeAt && this.t >= a.removeAt) a.gone = true; return; }
     this.transponder(a);
 
-    if (a.kind === "dep") {
+    if (s === "circuit") {
+      this.circuitMove(a, dt);
+    } else if (a.kind === "dep") {
       if (s === "parked" && this.t >= a.callAt && a.ga) {
         this.call(a, "gaTaxi", { dest: a.other[1] }, "GND");
         a.state = "taxi_req";
@@ -335,6 +343,7 @@ export class Sim {
       } else if (s === "pushing") {
         if (this.followPath(a, dt, true)) {
           a.state = "pushed"; a.callAt = this.t + rint(20, 60);
+          if (a.autoTaxi) { a.autoTaxi = false; this.lightTaxi(a); }
         }
       } else if (s === "pushed" && this.t >= a.callAt) {
         this.call(a, "taxi", {}, "GND");
@@ -344,7 +353,9 @@ export class Sim {
         a.callAt = this.t + 150;
       } else if (s === "taxi" || s === "lineup") {
         const done = this.followPath(a, dt);
-        if (s === "taxi" && a.atStop && a.blockedRwy === a.depEnd.rwy && a.spd < 0.1) {
+        if (s === "taxi" && a.taxiTo === "stand") {
+          if (done) { this.parkAt(a); a.returned = true; a.callAt = this.t + rint(240, 600); a.state = "parked"; }
+        } else if (s === "taxi" && a.atStop && a.blockedRwy === a.depEnd.rwy && a.spd < 0.1) {
           a.state = "holding"; a.holdAt = this.t;
           if (!a.calledReadyEarly) this.call(a, "ready", { rwy: a.depEnd.name }, "TWR");
           a.calledReadyEarly = false; a.callAt = this.t + 120;
@@ -390,7 +401,7 @@ export class Sim {
             if (this.split && this.hasPos("GND") && a.freq !== "GND") this.call(a, "vacated", { exit: a.exitName, greet: "" }, "TWR");
             else this.call(a, "vacatedTaxi", { exit: a.exitName, greet: "" }, "GND");
           } else if (a.taxiTo === "stand") {
-            a.state = "parked"; a.parkedAt = this.t; a.xpdr = "S";
+            this.parkAt(a);
           } else {
             a.state = "holding_short";
             this.call(a, "holdingShort", { rwy: a.holdRwyName }, "GND");
@@ -409,14 +420,285 @@ export class Sim {
       const r = this.apt.runways[a.blockedRwy];
       a.holdRwyName = r.label;
       a.reqAt = this.t;
-      this.call(a, "holdingShort", { rwy: r.label }, "GND");
+      if (!a.leader) this.call(a, "holdingShort", { rwy: r.label }, "GND");   // behind a follow-me the car calls
     }
     if (a.removeAt && this.t >= a.removeAt) a.gone = true;
   }
 
+  /** The aircraft is on its stand. */
+  parkAt(a) {
+    a.state = "parked"; a.parkedAt = this.t; a.xpdr = "S"; a.spd = 0;
+    if (a.stand) { a.pos = [...a.stand.pos]; a.hdg = a.stand.hdg; }
+    a.path = null; a.taxiTo = null; a.holdPos = false;
+    if (a.leader) { a.leader = null; }
+    a.crossOk.clear();
+  }
+
+  // ---------- light signals (ICAO Annex 2, Appendix 1) ----------
+  /**
+   * Apply a light-gun signal. Returns a short description of the effect (for the log / tests), or null when
+   * the signal means nothing in this situation.
+   *   ground: green flashing = cleared to taxi · green steady = cleared for takeoff · red steady = stop
+   *           red flashing = taxi clear of the landing area · white flashing = return to the starting point
+   *   air:    green steady = cleared to land · green flashing = return for landing · red steady = give way,
+   *           continue circling (go around) · red flashing = aerodrome unsafe, do not land
+   */
+  applyLight(a, color, mode) {
+    let effect = null;
+    if (a.onGround) {
+      if (color === "green" && mode === "flashing") effect = this.lightTaxi(a);
+      else if (color === "green" && mode === "steady") {
+        if (a.kind === "dep" && ["holding", "lined_up", "lineup", "lining", "taxi"].includes(a.state) && a.depEnd) {
+          a.toClr = true;
+          if (a.state === "lined_up") this.startRoll(a); else if (a.state === "holding" || a.state === "taxi") this.lineUp(a, true);
+          effect = "cleared for takeoff";
+        }
+      } else if (color === "red" && mode === "steady") { a.holdPos = true; if (a.leader) a.leader.holdPos = true; effect = "stop"; }
+      else if (color === "red" && mode === "flashing") effect = this.lightClearRunway(a);
+      else if (color === "white" && mode === "flashing") effect = this.lightReturn(a);
+    } else if (a.kind === "arr" && (a.state === "final" || a.state === "circuit" || a.state === "goaround")) {
+      if (color === "green" && mode === "steady") { if (a.state === "final") { a.landClr = true; effect = "cleared to land"; } else { a.landClr = true; effect = "cleared to land (will land from the circuit)"; } }
+      else if (color === "green" && mode === "flashing") { a.rejoin = true; effect = "return for landing"; }
+      else if (color === "red") {
+        if (a.state === "final") { a.rejoin = mode === "steady"; this.goAround(a, "instructed"); effect = mode === "steady" ? "go around, continue circling" : "go around, aerodrome unsafe"; }
+        else effect = "continue circling";
+        if (mode === "flashing") a.divert = true;
+      }
+    }
+    this.lightLog.push({ t: this.t, cs: a.cs, color, mode, effect });
+    this.onEvent({ type: "light", ac: a, color, mode, effect });
+    return effect;
+  }
+
+  lightTaxi(a) {
+    if (a.holdPos) { a.holdPos = false; if (a.leader) a.leader.holdPos = false; return "continue taxi"; }
+    if (a.atStop && a.blockedRwy != null) {
+      a.crossOk.add(a.blockedRwy); a.calledHold = false;
+      if (a.leader) a.leader.crossOk.add(a.blockedRwy);
+      return `cross runway ${this.apt.runways[a.blockedRwy].label}`;
+    }
+    if (a.kind === "arr" && ["vacated", "holding_short", "rollout"].includes(a.state)) {
+      if (!a.stand) a.stand = rnd(this.freeStands()) || null;
+      if (!a.stand) return null;
+      const start = this.startNode(a);
+      const route = this.apt.routeToPos(start.node, a.stand.pos, [], start.avoid) || this.apt.routeToPos(start.node, a.stand.pos, []);
+      if (!route) return null;
+      this.setPath(a, route); a.state = "taxi"; a.taxiTo = "stand"; a.holdPos = false; a.viaText = "";
+      return `taxi to stand ${a.stand.name}`;
+    }
+    if (a.kind === "dep" && a.onGround) {
+      if (["parked", "clr_req", "cleared", "push_req"].includes(a.state)) {
+        if (!a.ga) { this.planPush(a, null); a.state = "pushing"; a.autoTaxi = true; return "push back and taxi"; }
+      }
+      if (["pushed", "taxi_req", "parked", "clr_req", "cleared"].includes(a.state)) {
+        const start = this.startNode(a);
+        const route = this.apt.routeToRunway(start.node, this.depEnd, [], start.avoid) || this.apt.routeToRunway(start.node, this.depEnd, []);
+        if (!route) return null;
+        a.depEnd = this.depEnd; this.setPath(a, route); a.state = "taxi"; a.holdPos = false; a.viaText = ""; a.taxiTo = null;
+        return `taxi to holding point runway ${this.depEnd.name}`;
+      }
+      if (a.state === "taxi") { a.holdPos = false; return "continue taxi"; }
+    }
+    return null;
+  }
+
+  /** Red flashing on the ground: get off the runway. */
+  lightClearRunway(a) {
+    const r = this.apt.runways.find(R => this.apt.onRunway(a.pos, R, 5));
+    if (r) {
+      const near = [...this.apt.rwyNodes[r.id]].map(n => [n, dist(this.apt.nodes[n], a.pos)]).sort((x, y) => x[1] - y[1]);
+      for (const [n] of near) {
+        const route = this.apt.exitRoute(n, r.id, null);
+        if (!route) continue;
+        a.path = [[...a.pos, null], ...route.map(k => [...this.apt.nodes[k], k])]; a.pi = 1;
+        a.crossOk.add(r.id); a.toClr = false; a.holdPos = false;
+        a.state = "vacating"; a.end = a.end || a.depEnd || r.ends[0]; a.exitName = "";
+        if (a.kind === "dep") { a.kind = "dep"; a.vacateToHold = true; }
+        return `vacate runway ${r.label}`;
+      }
+      return null;
+    }
+    a.holdPos = true;
+    return "hold clear of the runway";
+  }
+
+  /** White flashing: return to the starting point (a departure goes back to its stand). */
+  lightReturn(a) {
+    if (!a.onGround) return null;
+    let st = a.stand || (a.standName && this.apt.stands.find(s => s.name === a.standName)) || null;
+    if (!st || this.ac.some(o => o !== a && o.onGround && o.stand === st && o.state === "parked")) st = rnd(this.freeStands()) || st;
+    if (!st) return null;
+    a.stand = st;
+    const start = this.startNode(a);
+    const route = this.apt.routeToPos(start.node, st.pos, [], start.avoid) || this.apt.routeToPos(start.node, st.pos, []);
+    if (!route) return null;
+    this.setPath(a, route); a.state = "taxi"; a.taxiTo = "stand"; a.holdPos = false; a.toClr = false; a.viaText = "";
+    return `return to stand ${st.name}`;
+  }
+
+  // ---------- visual circuit (NORDO rejoin, VFR circuits, go-around rejoins) ----------
+  /**
+   * Fly a rectangular circuit around runway end `end` and rejoin final at `joinNm`.
+   * side: "left" | "right" (direction of the turns), altFt: circuit altitude.
+   */
+  startCircuit(a, end, { side = "left", joinNm = a.ga ? 2.5 : 4, altFt = a.ga ? 1000 : 1500, widthM = a.ga ? 1300 : 3300 } = {}) {
+    const v = end.v, n = side === "right" ? [v[1], -v[0]] : [-v[1], v[0]];
+    const len = this.apt.runways[end.rwy].len, thr = end.thr, joinM = joinNm * NM;
+    const P = (along, out) => [thr[0] + v[0] * along + n[0] * out, thr[1] + v[1] * along + n[1] * out];
+    a.wps = [
+      { p: P(len + 700, widthM * 0.25), leg: "crosswind" },
+      { p: P(len + 200, widthM), leg: "downwind" },
+      { p: P(-1.0 * NM, widthM), leg: "late downwind" },
+      { p: P(-joinM, widthM * 0.45), leg: "base" },
+      { p: P(-joinM, 0), leg: "final" },
+    ];
+    a.wpi = 0; a.circuitLeg = "upwind"; a.circuitAlt = altFt; a.circuitSpd = (a.ga ? 90 : 170) * KT;
+    a.end = end; a.state = "circuit"; a.onGround = false; a.landClr = false; a.calledIn = false; a.toClr = false;
+    a.circuitSide = side; a.circuitStart = this.t; a.circuitFrom = [...a.pos];
+    return a.wps;
+  }
+
+  circuitMove(a, dt) {
+    const wp = a.wps && a.wps[a.wpi];
+    if (!wp) { this.joinFinal(a); return; }
+    const dx = wp.p[0] - a.pos[0], dy = wp.p[1] - a.pos[1], d = Math.hypot(dx, dy);
+    a.hdg = this.turnToward(a.hdg, hdgOf(dx, dy), dt, a.ga ? 4.5 : 3);
+    a.spd += Math.max(-2 * dt, Math.min(1.5 * dt, a.circuitSpd - a.spd));
+    const want = a.circuitAlt;
+    a.alt += Math.max(-800 / 60 * dt, Math.min((a.ga ? 700 : 1500) / 60 * dt, want - a.alt));
+    const v = vecFromHdg(a.hdg);
+    a.pos = [a.pos[0] + v[0] * a.spd * dt, a.pos[1] + v[1] * a.spd * dt];
+    // reached: close to it, or passed abeam it (so a wide turn never circles a waypoint for ever)
+    const prev = a.wpi ? a.wps[a.wpi - 1].p : a.circuitFrom || a.pos;
+    const lx = wp.p[0] - prev[0], ly = wp.p[1] - prev[1], ll = Math.hypot(lx, ly) || 1;
+    const passed = ((wp.p[0] - a.pos[0]) * lx + (wp.p[1] - a.pos[1]) * ly) / ll < -50;
+    if (d < Math.max(120, a.spd * 3.5) || passed || this.t - a.circuitStart > 900) {
+      a.circuitLeg = wp.leg; a.wpi++;
+      this.onEvent({ type: "circuitLeg", ac: a, leg: wp.leg });
+      if (wp.leg === "downwind" && a.reports?.downwind !== false && !a.nordo) this.call(a, "circuitReport", { leg: "downwind", rwy: a.end.name, greet: "" }, "TWR");
+      if (wp.leg === "base" && !a.nordo && a.reports?.base) this.call(a, "circuitReport", { leg: "base", rwy: a.end.name, greet: "" }, "TWR");
+      if (a.wpi >= a.wps.length) this.joinFinal(a);
+    }
+  }
+
+  joinFinal(a) {
+    const e = a.end;
+    const d = Math.max(2.0 * NM, this.distToThr(a));
+    a.pos = [e.thr[0] - e.v[0] * d, e.thr[1] - e.v[1] * d];
+    a.hdg = e.hdg; a.state = "final"; a.kind = "arr"; a.onGround = false;
+    a.alt = Math.min(a.alt, this.glideAlt(a)); a.spd = a.appSpd || a.spd;
+    a.calledIn = false; a.callAt = this.t + 2; a.wps = null; a.circuitLeg = null;
+    if (!a.nordo) { a.calledIn = true; this.call(a, "finalReport", { rwy: e.name, greet: "", dist: Math.max(2, Math.round(d / NM)) }, "TWR"); }
+    this.onEvent({ type: "joinedFinal", ac: a });
+  }
+
+  // ---------- ground vehicles ----------
+  homeNat() { return controllerNat(this.apt.icao); }
+  /** Where vehicles live: a taxi node near the apron centroid that is not a stand and not in a runway zone. */
+  vehicleBase() {
+    if (this._vehBase != null) return this._vehBase;
+    const c = this.apt.towerPos();
+    this._vehBase = this.apt.nearestNode(c, i => !this.apt.nodeStand.has(i) && !this.apt.adj[i].some(o => o.e.runway || o.e.zones.size));
+    return this._vehBase;
+  }
+
+  spawnVehicle({ vtype = "followme", cs, tel, num, pos, freq = "GND", maxSpd = 11 } = {}) {
+    const n = (this.vehNo[vtype] = (this.vehNo[vtype] || 0) + 1);
+    const NAMES = { followme: ["FOLLOWME", "Follow-me"], tug: ["TUG", "Tug"], fire: ["RESCUE", "Rescue"], ops: ["OPS", "Ops"],
+      snow: ["SNOW", "Snow"], fuel: ["FUEL", "Fuel"], bus: ["BUS", "Bus"], catering: ["CATERING", "Catering"], baggage: ["BAGGAGE", "Baggage"] };
+    const [pre, t] = NAMES[vtype] || [vtype.toUpperCase(), vtype];
+    const nat = this.homeNat();
+    const v = {
+      id: nextId++, kind: "veh", veh: true, vtype, cs: cs || `${pre}${num ?? n}`, tel: tel || t, num: String(num ?? n), type: vtype.toUpperCase(),
+      wtc: "L", pos: [...(pos || this.apt.towerPos())], hdg: 0, spd: 0, alt: 0, onGround: true, state: "idle", crossOk: new Set(), log: [],
+      freq: this.split ? freq : "ALL", maxSpd, other: ["", ""], ga: false, squawk: "", xpdr: "O", ifr: false, nat,
+      crew: makeCrew(nat), style: { ...makeStyle(this.region, nat), chatty: 0.15 },
+    };
+    v.voice = { pitch: v.crew[0].pitch, rate: v.crew[0].rate, idx: v.crew[0].seed };
+    this.ac.push(v);
+    this.onEvent({ type: "spawn", ac: v });
+    return v;
+  }
+
+  /** Dispatch the follow-me car to aircraft `a`; it leads the aircraft to its stand. */
+  sendFollowMe(a) {
+    if (a.followMe && !a.followMe.gone) return a.followMe;
+    const base = this.vehicleBase();
+    if (base == null || base < 0) return null;
+    const v = this.spawnVehicle({ vtype: "followme", pos: this.apt.nodes[base], freq: ["GND", "TWR"].includes(a.freq) ? a.freq : "GND" });
+    v.target = a; v.targetCs = a.cs; a.followMe = v;
+    const start = this.startNode(a, true);
+    const route = this.apt.routeNodes(base, start.node) || this.apt.routeToPos(base, a.pos, []);
+    if (!route) { v.gone = true; return null; }
+    this.setPath(v, route); v.state = "toAircraft";
+    this.onEvent({ type: "followMeSent", ac: a, veh: v });
+    return v;
+  }
+
+  updateVehicle(v, dt) {
+    const t = v.target;
+    if (v.state === "idle") return;
+    if (v.state === "toAircraft") {
+      const done = this.followPath(v, dt);
+      this.vehicleHoldCall(v);
+      if (!t || t.gone) { this.vehicleHome(v); return; }
+      if (done || dist(v.pos, t.pos) < 60) {
+        const st = t.stand || (t.standName && this.apt.stands.find(s => s.name === t.standName)) || rnd(this.freeStands()) || null;
+        if (!st) { this.vehicleHome(v); return; }
+        t.stand = st; v.standTo = st.name;
+        const vs = this.startNode(v), as = this.startNode(t);
+        const vroute = this.apt.routeToPos(vs.node, st.pos, [], vs.avoid) || this.apt.routeToPos(vs.node, st.pos, []);
+        const aroute = this.apt.routeToPos(as.node, st.pos, [], as.avoid) || this.apt.routeToPos(as.node, st.pos, []);
+        if (!vroute || !aroute) { this.vehicleHome(v); return; }
+        this.setPath(v, vroute); v.state = "leading"; v.crossOk = new Set();
+        this.setPath(t, aroute); t.state = "taxi"; t.taxiTo = "stand"; t.holdPos = false; t.leader = v; t.crossOk = new Set(); t.calledHold = false;
+        this.onEvent({ type: "followMe", ac: t, veh: v });
+      }
+      return;
+    }
+    if (v.state === "leading") {
+      if (!t || t.gone) { this.vehicleHome(v); return; }
+      v.holdPos = dist(v.pos, t.pos) > 110;         // wait for the aircraft
+      const done = this.followPath(v, dt);
+      if (t.leader === v) for (const r of v.crossOk) t.crossOk.add(r);
+      this.vehicleHoldCall(v);
+      if (done) {
+        v.state = "aside";
+        const h = (t.stand ? t.stand.hdg : v.hdg) + 90, vv = vecFromHdg(h);
+        v.path = [[v.pos[0] + vv[0] * 30, v.pos[1] + vv[1] * 30, null]]; v.pi = 0; v.holdPos = false; v.blockedRwy = null;
+      }
+      return;
+    }
+    if (v.state === "aside") {
+      this.followPath(v, dt);
+      if (!t || t.gone || t.state === "parked") { if (t) t.leader = null; this.vehicleHome(v); }
+      return;
+    }
+    if (v.state === "home") { if (this.followPath(v, dt)) v.gone = true; return; }
+    if (v.state === "task") { if (this.followPath(v, dt) && v.onDone) v.onDone(v); this.vehicleHoldCall(v); return; }
+  }
+
+  vehicleHome(v) {
+    v.target = null; v.holdPos = false; v.state = "home";
+    const base = this.vehicleBase();
+    const s = this.startNode(v);
+    const r = base != null && base >= 0 ? this.apt.routeNodes(s.node, base) : null;
+    if (r && r.length > 1) this.setPath(v, r); else v.gone = true;
+  }
+
+  /** A vehicle stopped short of a runway asks to cross (with the aircraft it leads, if any). */
+  vehicleHoldCall(v) {
+    if (v.atStop && v.spd < 0.1 && v.blockedRwy != null && !v.calledHold) {
+      v.calledHold = true;
+      const r = this.apt.runways[v.blockedRwy];
+      v.holdRwyName = r.label; v.reqAt = this.t;
+      this.call(v, "vehHold", { rwy: r.label, ac: v.target && v.target.leader === v ? this.cs(v.target).d : "" }, "GND");
+    }
+  }
+
   /** Transponder mode follows the phase of flight (Europe: mode C from line-up; US: from taxi). */
   transponder(a) {
-    if (a.nordo || a.mayday || a.ga) return;
+    if (a.nordo || a.mayday || a.ga || a.veh) return;
     const s = a.state;
     if (a.kind === "dep") {
       const on = ["lining", "lined_up", "lineup", "roll", "airborne"].includes(s) || (this.region === "US" && s === "taxi");
@@ -428,7 +710,9 @@ export class Sim {
   /** Radar label warnings like a real system: missing mode C, wrong code, duplicate code, emergencies. */
   labelWarnings(a) {
     const w = [];
+    if (a.veh) return w;
     if (a.squawk === "7600") w.push("RCF");
+    if (a.squawk === "7500") w.push("HIJ");
     if (a.squawk === "7700") w.push("EMG");
     if (!a.onGround && a.xpdr !== "C" && !a.human) w.push("NO MODE C");
     if (a.assignedSq && a.squawk !== a.assignedSq && !["7600", "7700"].includes(a.squawk)) w.push("SQK " + a.assignedSq);
@@ -510,7 +794,7 @@ export class Sim {
     let dStop = 0, prev = a.pos;
     for (let k = a.pi; k <= stop.j; k++) { dStop += dist(prev, p[k]); prev = p[k]; }
     a.distToStop = dStop;
-    let target = reverse ? PUSH_SPD : TAXI_SPD;
+    let target = reverse ? PUSH_SPD : (a.maxSpd || TAXI_SPD);
     if (!reverse) {
       // slow for turns ahead
       let acc = dist(a.pos, p[a.pi]);
@@ -552,9 +836,9 @@ export class Sim {
     return d;
   }
 
-  turnToward(h, target, dt) {
+  turnToward(h, target, dt, rate = 90) {
     const d = angDiff(h, target);
-    return (h + Math.sign(d) * Math.min(Math.abs(d), 90 * dt) + 360) % 360;
+    return (h + Math.sign(d) * Math.min(Math.abs(d), rate * dt) + 360) % 360;
   }
 
   onPassNode(a) {
@@ -572,6 +856,9 @@ export class Sim {
     const v = vecFromHdg(a.hdg);
     for (const o of this.ac) {
       if (o === a || !o.onGround) continue;
+      if (a.veh && o === a.target) continue;        // the car drives up to its aircraft, and its follower is behind it
+      if (o.leader === a) continue;
+      if (o.veh && o.serving === a) continue;                                // ground equipment at our stand
       const dx = o.pos[0] - a.pos[0], dy = o.pos[1] - a.pos[1];
       const along = dx * v[0] + dy * v[1], cross = Math.abs(dx * v[1] - dy * v[0]);
       if (along > 0 && along < 90 && cross < 25) {
@@ -648,12 +935,14 @@ export class Sim {
       a.alt += 1800 / 60 * dt;
       a.spd = Math.min(a.spd + 1 * dt, 180 * KT);
       a.pos = [a.pos[0] + e.v[0] * a.spd * dt, a.pos[1] + e.v[1] * a.spd * dt];
-      if (a.alt > 3000) a.gone = true;
+      if (a.rejoin && a.alt > (a.ga ? 900 : 1400)) { a.rejoin = false; this.startCircuit(a, e); }
+      else if (!a.rejoin && a.alt > 3000) a.gone = true;
     }
   }
 
   goAround(a, why) {
     a.state = "goaround"; this.stats.goArounds++;
+    if (a.nordo) a.rejoin = true;                 // a radio-failure aircraft stays in the circuit and tries again
     this.call(a, "goingAround", { greet: "" }, "TWR");
     this.alert(`${a.cs} went around: ${why}.`, "ga" + a.cs, why !== "instructed");
   }
@@ -740,6 +1029,7 @@ export class Sim {
     }
     const g = this.ac.filter(o => o.onGround);
     for (let i = 0; i < g.length; i++) for (let j = i + 1; j < g.length; j++) {
+      if (g[i].leader === g[j] || g[j].leader === g[i] || (g[i].veh && g[i].serving === g[j]) || (g[j].veh && g[j].serving === g[i])) continue;
       if (dist(g[i].pos, g[j].pos) < 30 && (g[i].spd > 0.5 || g[j].spd > 0.5) && !this.alerted.has(`gc${g[i].cs}${g[j].cs}`)) {
         this.stats.conflicts++;
         this.alert(`Ground conflict: ${g[i].cs} and ${g[j].cs} are less than 30 m apart.`, `gc${g[i].cs}${g[j].cs}`);
@@ -774,11 +1064,12 @@ export class Sim {
       this.onEvent({ type: "emergency", ac: a, code: "7700" });
     }
   }
-  triggerEvent(kind) { // for the UI / tests
-    const c = this.ac.find(a => a.kind === "arr" && a.state === "final");
+  triggerEvent(kind, ac) { // for the UI / tests
+    const c = ac || this.ac.find(a => a.kind === "arr" && a.state === "final");
     if (!c) return null;
     if (kind === "7600") { c.nordo = true; c.squawk = "7600"; }
-    else { c.mayday = true; c.squawk = "7700"; this.pilot(c, pilotCall("mayday", { st: c.style, cs: this.cs(c), unit: this.unitFor(c, "TWR"), rwy: c.end.name }), "mayday"); }
+    else if (kind === "7500") { c.hijack = true; c.squawk = "7500"; }
+    else { c.mayday = true; c.squawk = "7700"; this.pilot(c, pilotCall("mayday", { st: c.style, cs: this.cs(c), unit: this.unitFor(c, "TWR"), rwy: (c.end || this.arrEnd).name }), "mayday"); }
     this.onEvent({ type: "emergency", ac: c, code: kind });
     return c;
   }
@@ -823,6 +1114,21 @@ export class Sim {
         return `${cs}, cleared to ${a.other[1]} via ${sg.sid ? sg.sid + " departure" : "flight planned route"}, climb ${sg.climb} feet, squawk ${code}${gnd}`;
       }
       if (s === "cleared" && a.askedHandoff && this.positions.GND) return `${cs}, ${this.contactPhrase("GND")}`;
+    }
+    if (a.nordo) {
+      // radio failure: the AI controller uses the light gun (logged as an action, not a transmission)
+      if (pos === "GND" || pos === "TWR") {
+        if (a.onGround && (["vacated", "holding_short"].includes(s) || (s === "taxi" && a.atStop && a.blockedRwy != null && this.runwayFree(a.blockedRwy, a)))) return `${cs}, light green flashing`;
+        if (!a.onGround && a.kind === "arr" && s === "final" && this.distToThr(a) < 5 * NM && this.runwayFree(a.end.rwy, a) && !a.landClr) return `${cs}, light green steady`;
+      }
+      return null;
+    }
+    if (a.veh) {
+      if (a.atStop && a.blockedRwy != null && (pos === "GND" || pos === "TWR")) {
+        const r = apt.runways[a.blockedRwy];
+        if (this.runwayFree(r.id, a) && r.ends.every(x => this.nearestArrival(x) > 3 * NM)) return `${cs}, cross runway ${r.ends[0].name}`;
+      }
+      return null;
     }
     if (pos === "GND") {
       if (a.kind === "dep" && s === "push_req") return `${cs}, push and start approved`;
@@ -940,9 +1246,14 @@ export class Sim {
     const neg = /\b(negative|correction|wrong)\b/.test(text);
     if (opts.pos && opts.pos !== "ALL") this.stats.tx[opts.pos] = (this.stats.tx[opts.pos] || 0) + 1;
     if (a.ga && !a.abbrev && opts.abbrevUsed) a.abbrev = true;
-    // radio failure: only "squawk ident" gets an answer (the ident on the label)
+    // radio failure: nothing is heard; "squawk ident" is answered on the label, light signals and the follow-me
+    // car are acted on (the pilot can see those)
     if (a.nordo) {
-      if (ins.some(i => i.t === "ident")) a.identUntil = this.t + 15;
+      for (const i of ins) {
+        if (i.t === "ident") a.identUntil = this.t + 15;
+        else if (i.t === "light") this.applyLight(a, i.color, i.mode);
+        else if (i.t === "followMe") this.sendFollowMe(a);
+      }
       return null;
     }
     // correction of a pending readback error
@@ -1056,7 +1367,7 @@ export class Sim {
         this.serviced(a, "taxi");
         a.depEnd = end;
         this.setPath(a, route);
-        a.state = "taxi"; a.holdPos = false;
+        a.state = "taxi"; a.holdPos = false; a.taxiTo = null; a.viaText = i.via.join(" ");
         return `taxi holding point runway ${end.name}${i.via.length ? " via " + i.via.join(" ") : ""}`;
       }
       case "taxiStand": {
@@ -1075,8 +1386,8 @@ export class Sim {
         if (!route) return { unable: `Unable to find that route, say again taxi instructions` };
         this.serviced(a, "taxiIn");
         this.setPath(a, route);
-        a.path.push([...st.pos, null]);
-        a.state = "taxi"; a.taxiTo = "stand"; a.holdPos = false;
+        if (dist(a.path[a.path.length - 1], st.pos) > 1) a.path.push([...st.pos, null]);
+        a.state = "taxi"; a.taxiTo = "stand"; a.holdPos = false; a.viaText = i.via.join(" ");
         return `taxi to stand ${st.name}${i.via.length ? " via " + i.via.join(" ") : ""}`;
       }
       case "holdShort": {
@@ -1157,6 +1468,15 @@ export class Sim {
       }
       case "approach": return `cleared ILS approach runway ${a.end ? a.end.name : this.arrEnd.name}`;
       case "identified": return null;
+      case "light": {
+        const eff = this.applyLight(a, i.color, i.mode);
+        return eff ? `roger, ${i.color} ${i.mode}` : { unable: "Say again" };
+      }
+      case "followMe": {
+        const v = this.sendFollowMe(a);
+        if (!v) return { unable: "Unable, no follow-me available" };
+        return a.veh ? null : "roger, we'll follow the follow-me car";
+      }
     }
     return null;
   }
@@ -1195,7 +1515,8 @@ export class Sim {
     // Pick the nearest one from which the aircraft can taxi forward to the runway.
     const want = face ? { north: 180, south: 0, east: 270, west: 90 }[face] : null;
     const inZone = (i) => apt.adj[i].some(o => o.e.runway || o.e.zones.size);
-    let near = apt.nodes.map((p, i) => [i, dist(p, a.pos)]).filter(([i, d]) => d < 160 && apt.adj[i].length)
+    // never push onto a stand node (our own or a neighbour's); the taxilane node the stand link joins is the target
+    let near = apt.nodes.map((p, i) => [i, dist(p, a.pos)]).filter(([i, d]) => d < 160 && apt.adj[i].length && !apt.nodeStand.has(i))
       .sort((x, y) => x[1] - y[1]);
     // never push onto a runway or into a runway hold zone
     const onRwy = (i) => apt.adj[i].some(o => o.e.runway);
@@ -1233,18 +1554,27 @@ export class Sim {
     a.state = "lineup";
   }
 
-  /** Serializable state for pop-out windows and the EuroScope / XRadio bridges. */
+  /** Serializable state for pop-out windows, multiplayer and the EuroScope / XRadio bridges. */
   snapshot(selectedId) {
     return this.ac.map(a => ({
-      id: a.id, cs: a.cs, type: a.type, wtc: a.wtc, kind: a.kind, state: a.state, pos: a.pos, hdg: a.hdg, spd: a.spd,
+      id: a.id, cs: a.cs, tel: a.tel, num: a.num, type: a.type, wtc: a.wtc, kind: a.kind, state: a.state, pos: a.pos, hdg: a.hdg, spd: a.spd,
       alt: a.alt, onGround: a.onGround, squawk: a.squawk, assignedSq: a.assignedSq, xpdr: a.xpdr, freq: a.freq,
       other: a.other, stand: a.stand ? a.stand.name : a.standName || "", rwy: (a.depEnd || a.end || {}).name || "",
       human: !!a.human, ga: !!a.ga, sid: a.sid || "", cfl: a.cfl || 0, warn: this.labelWarnings(a), ident: !!a.identUntil,
       nat: a.nat, path: a.id === selectedId && a.path && a.onGround ? a.path.slice(a.pi).map(p => [p[0], p[1]]) : null,
       dthr: a.kind === "arr" && a.state === "final" ? this.distToThr(a) : null, strip: a.strip || null,
       stripData: a.stripData || null, callingUntil: a.callingUntil || 0, vfr: !!a.ga && a.kind !== "arr",
+      veh: !!a.veh, vtype: a.vtype || "", targetCs: a.targetCs || "", standTo: a.standTo || "", leader: a.leader ? a.leader.cs : "",
+      via: a.viaText || "", exit: a.exitName || "", holdRwy: a.holdRwyName || "", landClr: !!a.landClr, toClr: !!a.toClr, taxiTo: a.taxiTo || "",
+      atStop: !!a.atStop, holdPos: !!a.holdPos, nordo: !!a.nordo, mayday: !!a.mayday, circuitLeg: a.circuitLeg || "", returned: !!a.returned,
+      waiting: a.reqAt != null ? Math.round(this.t - a.reqAt) : null, rb: a.rbError && !a.rbError.fixed ? { label: a.rbError.label, missed: !!a.rbError.missed, wrong: a.rbError.wrong, right: a.rbError.right } : null,
+      atisReported: a.atisReported || null, lastWant: a.lastWant || "", ifr: !!a.ifr, calledIn: !!a.calledIn, abbrev: !!a.abbrev,
+      crewNat: a.nat || "", gender: a.crew && a.crew[0] ? a.crew[0].gender || "" : "", lastCall: a.lastCall ?? null,
     }));
   }
+
+  /** The aircraft on a position's frequency (for voice casting: no two identical voices on one frequency). */
+  onFrequency(pos) { return this.ac.filter(a => !a.veh ? this.hears(a, pos) : a.freq === pos || !this.split); }
 }
 
 const capFirstObj = (r) => ({ d: cap(r.d), s: cap(r.s) });

@@ -21,9 +21,12 @@
   <button id="debriefBtn" type="button" class="main-only">Debrief</button>
   <button id="settingsBtn" type="button" class="main-only">Settings</button>
   <button id="helpBtn" type="button">Phraseology</button>
+  <span id="navPill" class="pill hidden" title="Navigation data (SID/STAR source and AIRAC cycle)">NAV: –</span>
+  <span id="voicePill" class="pill main-only" title="Voice engine that is speaking">Voices: …</span>
   <span id="esStatus" class="pill" title="EuroScope (FSD) connection">ES: –</span>
   <span id="xrStatus" class="pill hidden" title="XRadio">XR: off</span>
 </header>
+<div id="voiceBanner" class="banner hidden main-only"></div>
 <div id="staffMenu" class="menu hidden">
   <label><input type="radio" name="staffMode" value="combined"> Combined — one frequency (DEL/GND/TWR)</label>
   <label><input type="radio" name="staffMode" value="split"> Split positions — I work:</label>
@@ -43,6 +46,7 @@
     <canvas id="radar"></canvas>
     <div id="status" class="overlay"></div>
     <div id="wxPanel" class="wxpanel hidden"></div>
+    <div id="seqPanel" class="seqpanel hidden"></div>
     <div id="alerts" class="alerts"></div>
     <div id="coachPanel" class="coach hidden"></div>
     <button id="restorePop" type="button" class="restore hidden"></button>
@@ -51,19 +55,20 @@
     <div class="posTabs" id="posTabs"></div>
     <div class="posHead" id="posHead"></div>
     <div class="panel delx hidden" id="delPanel">
-      <h3>Clearance requests</h3><div id="clrList"></div>
+      <h3>Clearance requests <span id="delNav" class="muted small"></span></h3><div id="clrList"></div>
       <h3>Flight plan</h3>
       <div id="fpEditor" class="fp muted">Select an aircraft.</div>
     </div>
+    <div class="panel acinfo hidden" id="acInfo"></div>
     <div class="panel strips" id="stripBoard"></div>
     <div class="panel log"><h3 id="logTitle">Frequency</h3><div id="log"></div></div>
     <form id="cmdForm" class="cmd">
       <button type="button" id="mic" title="Hold to talk (or Ctrl+Space)">🎙</button>
       <span id="txOn" class="txon" title="You transmit on this position"></span>
-      <input id="cmd" autocomplete="off" spellcheck="false" placeholder="FIN321 runway 26 cleared for takeoff">
+      <div class="cmdwrap"><input id="cmd" autocomplete="off" spellcheck="false" placeholder="FIN321 runway 26 cleared for takeoff"><div id="suggest" class="suggest hidden"></div></div>
       <button type="button" id="assignSq" title="Next free squawk into a clearance for the selected aircraft">Assign squawk</button>
     </form>
-    <div class="hint muted">Enter = transmit · hold <kbd>Ctrl</kbd>+<kbd>Space</kbd> = push-to-talk · click a target or strip to select · drag strips between bays</div>
+    <div class="hint muted">Enter = transmit · <kbd>Tab</kbd> = accept suggestion · hold <kbd>Ctrl</kbd>+<kbd>Space</kbd> = push-to-talk · click a target, strip or taxiway · drag strips between bays</div>
   </aside>
 </main>
 
@@ -73,10 +78,11 @@
   <table>
     <tr><th>Delivery</th><td><code>FIN321 cleared to Helsinki via flight planned route, climb 5000 feet, squawk 4201, contact Ground 131.905</code></td></tr>
     <tr><th>Push</th><td><code>FIN321 push and start approved, facing east</code></td></tr>
-    <tr><th>Taxi</th><td><code>FIN321 taxi to holding point runway 26 via S A</code> · <code>cross runway 08</code> · <code>hold position</code> · <code>continue taxi</code></td></tr>
+    <tr><th>Taxi</th><td><code>FIN321 taxi to holding point runway 26 via S A</code> · <code>cross runway 08</code> · <code>hold position</code> · <code>continue taxi</code> · <code>hold short of runway 08</code> · apron lane names work in "via" too</td></tr>
     <tr><th>Tower</th><td><code>FIN321 runway 26 line up and wait</code> · <code>runway 26 cleared for takeoff</code> · <code>contact Tallinn Radar 127.905</code></td></tr>
     <tr><th>Arrivals</th><td><code>FIN321 identified, descend 3000 feet, cleared ILS approach runway 26</code> · <code>contact Tower 135.905</code> · <code>runway 26 cleared to land</code> · <code>go around</code> · <code>taxi to stand K2 via B A</code></td></tr>
     <tr><th>Fixes</th><td><code>FIN321 negative, squawk 4201</code> · <code>information Bravo is current</code> · <code>if you read, squawk ident</code> · <code>affirm</code></td></tr>
+    <tr><th>Radio failure (RCF, squawk 7600)</th><td>The aircraft cannot hear or answer you — only <code>squawk ident</code> shows on the label. Use the <b>light gun</b> (ICAO Annex 2): on the ground <code>FIN321 light green flashing</code> = cleared to taxi (and to cross the next runway when holding short), <code>light green steady</code> = cleared for takeoff, <code>light red steady</code> = stop, <code>light red flashing</code> = clear the landing area, <code>light white flashing</code> = return to your starting point. In the air <code>light green steady</code> = cleared to land, <code>light green flashing</code> = return for landing, <code>light red steady</code> = give way / go around and continue circling, <code>light red flashing</code> = do not land. <code>FIN321 send follow-me</code> dispatches the follow-me car, which leads the aircraft to its stand and asks you for runway crossings (<code>Follow-me 1 cross runway 08</code>). The buttons in the aircraft panel do the same.</td></tr>
   </table>
   <h3>EuroScope as your radar</h3>
   <ol class="small">
@@ -94,10 +100,11 @@
     <fieldset><legend>Radio &amp; voices</legend>
       <label>Accents <select id="setAccents"><option value="off">Off (English voices only)</option><option value="natural">Natural</option><option value="strong">Strong (all native voices)</option></select></label>
       <label>Speech rate <input id="setRate" type="range" min="0.7" max="1.4" step="0.05"> <span id="setRateV"></span></label>
+      <label>Radio preset <select id="setPreset"><option value="clean">Clean</option><option value="good">Good VHF</option><option value="distant">Distant</option><option value="old">Old radio</option></select></label>
       <label>Radio effect <input id="setEffect" type="range" min="0" max="1" step="0.05"> <span id="setEffectV"></span></label>
       <label><input type="checkbox" id="setVoices"> Pilot voices (TTS)</label>
-      <label><input type="checkbox" id="setBlocked"> Blocked transmissions</label>
-      <button type="button" id="testVoices">Test voices</button>
+      <label><input type="checkbox" id="setBlocked"> Blocked transmissions &amp; stuck mics</label>
+      <div class="row"><button type="button" id="testVoices">Test voices</button><button type="button" id="radioLab" title="Hear the same call clean and through the radio (A/B)">Radio lab A/B</button></div>
     </fieldset>
     <fieldset><legend>Pilot behaviour</legend>
       <label>Readback errors <input id="setRbErr" type="number" min="0" max="30" step="1"> %</label>
@@ -110,10 +117,22 @@
     <fieldset><legend>Training</legend>
       <label><input type="checkbox" id="setCoach"> Coach mode</label>
       <label>Guide / coach language <select id="setLang"><option value="en">English</option><option value="et">Eesti</option></select></label>
-      <label><input type="checkbox" id="graph"> Show taxi graph</label>
+      <label><input type="checkbox" id="graph"> Show taxi graph (generated stand links dashed)</label>
     </fieldset>
     <fieldset><legend>EuroScope</legend>
       <div id="setEs" class="small"></div>
+    </fieldset>
+    <fieldset class="span2"><legend>Neural voices (server) — the engine that speaks</legend>
+      <div id="voiceEngines" class="small"></div>
+      <div class="row">
+        <label>Azure Speech key <input id="azureKey" type="password" size="18" placeholder="free tier key"></label>
+        <label>Region <input id="azureRegion" size="10" placeholder="westeurope"></label>
+        <label>ElevenLabs key <input id="elevenKey" type="password" size="14"></label>
+        <button type="button" id="saveKeys">Save keys</button>
+        <button type="button" id="voiceRefresh">Re-check engines</button>
+      </div>
+      <div class="row small muted">Install: <code>pip install edge-tts</code> (free, unofficial) · <code>pip install piper-tts</code> + download a voice below (offline) · Azure key (free tier) · the browser's own voices are the last fallback.</div>
+      <div id="piperList" class="small"></div>
     </fieldset>
     <fieldset class="span2"><legend>XRadio (X-Plane multiplayer &amp; radio) — optional</legend>
       <label><input type="checkbox" id="xrEnabled"> Connect to an XRadio server</label>
@@ -136,7 +155,7 @@
     </fieldset>
   </div>
   <h3>Voices per nationality</h3>
-  <p class="small muted">Edge has the best "Natural" voices. More voices: Windows Settings → Time &amp; language → Speech → Add voices (and Language → language packs with speech).</p>
+  <p class="small muted">With a neural engine the voices come from the server (own-language voice speaking English). Without one, Edge has the best browser "Natural" voices: Windows Settings → Time &amp; language → Speech → Add voices.</p>
   <div id="voiceTable" class="voicetable"></div>
   <form method="dialog"><button>Close</button></form>
 </dialog>

@@ -95,8 +95,18 @@ def load_airport(icao):
     icao = icao.upper()
     CACHE.mkdir(exist_ok=True)
     cached = CACHE / f"{icao}.json"
+    dat = CACHE / f"{icao}.dat"
     if cached.exists():
-        return json.loads(cached.read_text("utf-8"))
+        data = json.loads(cached.read_text("utf-8"))
+        if data.get("v") == aptdat.VERSION or not dat.exists():
+            return data
+        # parser changed since this airport was cached: re-parse the kept apt.dat
+        src = data.get("source")
+        data = aptdat.parse(dat.read_text("utf-8", "replace"))
+        if src:
+            data["source"] = src
+        cached.write_text(json.dumps(data, separators=(",", ":")), "utf-8")
+        return data
     info = http_json(f"{GATEWAY}/airport/{icao}")["airport"]
     sid = info.get("recommendedSceneryId")
     if not sid:

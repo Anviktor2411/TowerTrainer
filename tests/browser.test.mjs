@@ -26,8 +26,8 @@ try {
   ok(await p.eval(`dep.freq === "TWR" && dep.state === "holding"`), "AI Delivery+Ground brought the departure to my Tower frequency");
   await p.eval(`TT.setActive("GND")`);
   ok(await p.waitFor(`/AI/.test(document.getElementById("log").innerText) && /taxi to holding point/.test(document.getElementById("log").innerText)`, 40000), "Ground tab shows the AI controller's taxi instruction");
-  await p.eval(`TT.setActive("TWR")`); await sleep(400);
-  ok(await p.eval(`!!document.querySelector('#stripBoard .strip[data-id="' + dep.id + '"]')`), "departure strip is on the Tower board");
+  await p.eval(`TT.setActive("TWR")`);
+  ok(await p.waitFor(`!!document.querySelector('#stripBoard .strip[data-id="' + dep.id + '"]')`, 5000), "departure strip is on the Tower board");
   // transmit from the main window on TWR
   await p.eval(`TT.transmit(dep.tel + " " + dep.num + " runway " + dep.depEnd.name + " cleared for takeoff")`);
   ok(await p.eval(`dep.state === "lineup" || dep.state === "lining" || dep.state === "roll"`), "takeoff clearance applied");
@@ -35,7 +35,7 @@ try {
 
   // ---- pop-out window (BroadcastChannel) ----
   const pop = await br.newPage("http://localhost:8780/?popout=GND&icao=EETN");
-  ok(await pop.waitFor("window.TT && TT.state && TT.state.ac.length > 0", 15000), "pop-out receives the sim state");
+  ok(await pop.waitFor("window.TT && TT.state && TT.state.ac.length > 0", 15000), "pop-out receives the sim state " + (p.errors.join(" | ") || "") + (pop.errors.join(" | ") || ""));
   ok(await pop.waitFor(`document.getElementById("posHead").innerText.includes("EETN_GND")`), "pop-out shows the Ground position");
   const d2 = await p.eval(`(() => { const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture(); if (d && !d.ga) { d.freq = "GND"; d.state = "push_req"; d.ifr = true; return d.tel + " " + d.num; } } })()`);
   await pop.eval(`document.getElementById("cmd").value = ${JSON.stringify(d2 + " push and start approved")}; document.getElementById("cmdForm").requestSubmit();`);
@@ -44,6 +44,25 @@ try {
   await pop.shot(join(OUT, "popout-gnd.png"));
   ok(pop.errors.length === 0, "pop-out has no JS errors " + pop.errors.join(" | "));
   pop.close();
+  await p.send("Page.bringToFront");          // a background tab gets no animation frames in headless Chrome
+
+  // ---- Delivery view, plain-language labels, info panel, light signals, voice status ----
+  await p.eval(`TT.setView("DEL")`); await sleep(500);
+  ok(await p.eval(`!document.getElementById("delPanel").classList.contains("hidden") && document.querySelectorAll("#viewTabs button").length === 5`), "Delivery view tab shows the clearance panel");
+  await p.eval(`(() => { TT.app.setSpeed(0); const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture(); if (d && !d.ga) { d.callAt = s.t + 1; window.delAc = d; break; } } for (let i = 0; i < 25; i++) s.step(0.1); })()`);
+  await p.waitFor(`/squawk [0-9]{4}/.test(document.getElementById("clrList").innerText)`, 5000);
+  ok(await p.eval(`/squawk [0-9]{4}/.test(document.getElementById("clrList").innerText) && /climb [0-9]{4} ft/.test(document.getElementById("clrList").innerText)`), "clearance list shows SID/climb/next squawk suggestions: " + (await p.eval(`JSON.stringify({ st: delAc.state, ga: delAc.ga, kind: delAc.kind, lc: delAc.lastCall, t: TT.sim.t, n: TT.sim.ac.length, view: TT.radar.view })`)) + " " + (await p.eval(`document.getElementById("clrList").innerText.split("\\n").slice(0, 2).join(" | ")`)));
+  await p.eval(`TT.select(delAc.id)`); await sleep(300);
+  ok(await p.eval(`!document.getElementById("acInfo").classList.contains("hidden") && /LIGHT GUN/i.test(document.getElementById("acInfo").innerText) && /NEXT EXPECTED/i.test(document.getElementById("acInfo").innerText)`), "aircraft info panel opens on select with light-gun buttons and the next expected call");
+  ok(await p.eval(`(() => { const b = TT.radar.labelBoxes; for (let i = 0; i < b.length; i++) for (let j = i + 1; j < b.length; j++) { const p = b[i], q = b[j]; if (p.x < q.x + q.w && p.x + p.w > q.x && p.y < q.y + q.h && p.y + p.h > q.y) return false; } return b.length > 0; })()`), "no two data blocks overlap on the Delivery picture");
+  ok(await p.eval(`[...document.querySelectorAll("#stripBoard .strip .st")].every(e => !/^(CLRD|PUSH REQ|VACATED|LUW)$/.test(e.innerText.trim()))`), "strips use plain-language state text");
+  await p.eval(`TT.sim.triggerEvent("7600", delAc)`); await sleep(300);
+  await p.eval(`document.querySelector('#acInfo [data-cmd="light green flashing"]').click()`); await sleep(300);
+  ok(await p.eval(`TT.sim.lightLog.length > 0 && TT.sim.lightLog[TT.sim.lightLog.length - 1].cs === delAc.cs && delAc.nordo && (delAc.state === "pushing" || delAc.state === "taxi")`), "light-gun button on a 7600 aircraft: logged as an action and the aircraft complies (" + (await p.eval(`delAc.state`)) + ")");
+  await p.eval(`TT.app.setSpeed(1)`);
+  const vst = await p.eval(`fetch("/api/tts/status").then(r => r.json())`);
+  ok(await p.eval(`document.getElementById("voicePill").innerText.startsWith("Voices:")`) && (vst.neural ? await p.eval(`document.getElementById("voiceBanner").classList.contains("hidden") || /Neural voices ready/.test(document.getElementById("voiceBanner").innerText)`) : await p.eval(`!document.getElementById("voiceBanner").classList.contains("hidden")`)), `voice banner/pill match the server (neural=${vst.neural})`);
+  await p.eval(`TT.setView("GND")`);
 
   // ---- dialogs ----
   await p.click("#settingsBtn"); await sleep(300);

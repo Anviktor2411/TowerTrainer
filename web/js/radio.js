@@ -8,13 +8,10 @@
 //           Web Audio, so the radio feel is layered around it (click, static bed, tail).
 // Rendering starts as soon as a call is queued, in parallel with the pilot's 0.5–2.5 s reaction delay.
 import { pickVoice, respell } from "./voices.js";
-import { NAT_NAME, ENGLISH_NATIVE } from "./data.js";
+import { NAT_NAME, ENGLISH_NATIVE, controllerNat } from "./data.js";
 
 export { sayNumbers as sayify } from "./phrase.js";
-
-const COUNTRY_NAT = { EE: "EE", EF: "FI", EV: "LV", EY: "LT", ED: "DE", LF: "FR", EG: "GB", EI: "IE", ES: "SE", EN: "NO",
-  EK: "DK", EP: "PL", LE: "ES", LI: "IT", EH: "NL", LT: "TR", LO: "AT", LS: "CH", K: "US", C: "CA", Y: "AU" };
-export const controllerNat = (icao) => COUNTRY_NAT[String(icao).slice(0, 2)] || COUNTRY_NAT[String(icao)[0]] || "GB";
+export { controllerNat };
 
 export class Radio {
   constructor() {
@@ -362,6 +359,7 @@ export class Radio {
       if (buf) {
         try {
           const audio = await this.audio().decodeAudioData(buf.slice(0));
+          this.emit({ from: "engine", engine: String(m.voiceId || "").split(":")[0] || "server", voice: m.voiceId || "" });
           if (m.from === "pilot" && Math.random() < this.human * 0.5) this.burst(0.18, 0.05); // a breath before keying
           this.burst(0.03, 0.25);
           if (m.from === "pilot" && Math.random() < 0.03) this.chime();
@@ -377,6 +375,7 @@ export class Radio {
   speakBrowser(m, km, done) {
     if (typeof speechSynthesis === "undefined") { setTimeout(done, 400 + (m.say || m.text).length * 25); return; }
     const v = m.from === "atc" ? this.controllerVoice() : this.voiceFor(m.ac, m.speaker || 0);
+    this.emit({ from: "engine", engine: "browser", voice: v.voice ? v.voice.name : "" });
     const { text } = this.prepare(m, v.voice ? { lang: v.voice.lang, respell: v.respell } : null);
     const u = new SpeechSynthesisUtterance(text);
     if (v.voice) { u.voice = v.voice; u.lang = v.voice.lang; }

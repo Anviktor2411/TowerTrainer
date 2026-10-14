@@ -1,16 +1,17 @@
 // Electronic flight strips: bays per position, drag between bays, editable fields, highlight on call.
 // Works on sim snapshots so the same code renders strips in pop-out windows.
-import { STATE_SHORT } from "./render.js";
+import { shortState, statePhrase, issueMarkers } from "./labels.js";
 
 export const BAYS = {
   pending: "Pending", clearance: "Clearance", push: "Push", taxi: "Taxi", holding: "Holding", runway: "Runway",
   airborne: "Airborne", approach: "Approach", final: "Final", landed: "Runway (arr)", taxiin: "Taxi in", enroute: "Enroute", live: "Live (XRadio)",
+  vehicles: "Vehicles",
 };
 const POS_BAYS = {
-  ALL: ["pending", "clearance", "push", "taxi", "holding", "runway", "airborne", "approach", "final", "landed", "taxiin", "live"],
+  ALL: ["pending", "clearance", "push", "taxi", "holding", "runway", "airborne", "approach", "final", "landed", "taxiin", "vehicles", "live"],
   DEL: ["pending", "clearance"],
-  GND: ["clearance", "push", "taxi", "holding", "taxiin", "live"],
-  TWR: ["holding", "runway", "airborne", "final", "landed", "taxiin", "live"],
+  GND: ["clearance", "push", "taxi", "holding", "taxiin", "vehicles", "live"],
+  TWR: ["holding", "runway", "airborne", "final", "landed", "taxiin", "vehicles", "live"],
   APP: ["approach", "final", "airborne", "live"],
   CTR: ["enroute", "airborne", "approach", "live"],
 };
@@ -18,6 +19,7 @@ const POS_BAYS = {
 /** Natural bay for an aircraft's state. */
 export function autoBay(a) {
   if (a.human) return "live";
+  if (a.veh) return "vehicles";
   if (a.kind === "ovf") return "enroute";
   const s = a.state;
   if (a.kind === "dep") {
@@ -53,7 +55,8 @@ export function renderStrips(opts) {
   if (el.contains(document.activeElement) && document.activeElement.isContentEditable) return;
   const now = performance.now();
   const visible = ac.filter(a => !split || pos === "ALL" || a.freq === pos || (a.human && pos !== "DEL") ||
-    (pos === "DEL" && a.kind === "dep" && ["parked", "clr_req"].includes(a.state)));
+    (pos === "DEL" && a.kind === "dep" && ["parked", "clr_req"].includes(a.state)))
+    .filter(a => !(a.veh && a.state === "idle"));
   el.innerHTML = bays.map(b => {
     const list = visible.filter(a => bayOf(a) === b || (!bays.includes(bayOf(a)) && b === bays[bays.length - 1] && false));
     return `<div class="bay" data-bay="${b}"><h4>${BAYS[b]} ${list.length ? "(" + list.length + ")" : ""}</h4>${list.map(a => strip(a, selectedId, now)).join("")}</div>`;
@@ -67,15 +70,15 @@ function strip(a, selectedId, now) {
   const route = a.kind === "dep" ? `${a.other[0] === "VFR" ? "VFR " + esc(a.other[1]) : "→" + esc(a.other[0])}` : a.kind === "arr" ? `${esc(a.other[0])}→` : a.kind === "ovf" ? `${esc(a.other[0])}→${esc(a.other[1])}` : "";
   const sq = d.sq || a.assignedSq || "";
   const calling = a.callingUntil && a.callingUntil > Date.now();
-  const cls = `strip ${a.human ? "human" : a.kind}${a.id === selectedId ? " sel" : ""}${calling ? " calling" : ""}`;
+  const cls = `strip ${a.human ? "human" : a.veh ? "veh" : a.kind}${a.id === selectedId ? " sel" : ""}${calling ? " calling" : ""}${a.nordo ? " nordo" : ""}${a.mayday ? " mayday" : ""}`;
   const ed = (f, v, ph) => `<span contenteditable="true" spellcheck="false" data-f="${f}" title="${ph}">${esc(v)}</span>`;
   return `<div class="${cls}" draggable="true" data-id="${a.id}">` +
     `<span class="cs">${esc(a.cs)}</span>` +
     `<span>${esc(a.type)}/${a.wtc}</span>` +
     `<span>${route} ${a.kind === "dep" ? ed("sid", d.sid ?? a.sid ?? "", "SID") : ""} ${ed("cfl", d.cfl ?? (a.cfl ? (a.cfl >= 6000 ? "F" + a.cfl / 100 : a.cfl) : ""), "CFL")}` +
-    `${a.warn && a.warn.length ? ` <span class="w">${esc(a.warn.join(" "))}</span>` : ""}</span>` +
+    `${a.warn && a.warn.length ? ` <span class="w">${esc(a.warn.join(" "))}</span>` : ""}${issueMarkers(a).map(i => ` <span class="w ${i.level}">${esc(i.t)}</span>`).join("")}</span>` +
     `<span>${ed("sq", sq, "squawk")} ${ed("stand", d.stand ?? a.stand ?? "", "stand")}</span>` +
-    `<span class="st x5">${STATE_SHORT[a.state] || a.state}${a.kind === "dep" && a.rwy ? " " + ed("hp", d.hp ?? a.rwy, "holding point / runway") : ""}</span></div>`;
+    `<span class="st x5" title="${esc(statePhrase(a))}">${esc(shortState(a))}${a.kind === "dep" && a.rwy ? " " + ed("hp", d.hp ?? a.rwy, "holding point / runway") : ""}</span></div>`;
 }
 
 function otherFreq(all, visible, pos, split) {

@@ -1,7 +1,7 @@
 // Unit tests for phraseology, voices, squawks, readback errors, positions and AI controllers.
 //   node tests/unit.test.mjs
 import { readFileSync, existsSync } from "node:fs";
-import { Airport } from "../web/js/airport.js";
+import { Airport, dist } from "../web/js/airport.js";
 import { Sim } from "../web/js/sim.js";
 import { parse } from "../web/js/commands.js";
 import { regionOf, makeStyle, callsign, sayNumbers, groupNumber, digits, readback, pilotCall, NEUTRAL_STYLE } from "../web/js/phrase.js";
@@ -228,6 +228,70 @@ notes = coach({ text: `${other3.cs} cleared to ${other3.other[1]}, squawk 4201`,
 ok(notes.some(x => /already in use/i.test(x.msg)), "coach: squawk already in use");
 notes = coach({ text: "cleared for takeoff", parsed: parse("cleared for takeoff", sim.ac, d), sim, pos: "ALL", lang: "et" });
 ok(notes.some(x => /kutsung/i.test(x.msg)), "coach in Estonian");
+
+// ---------- NORDO (7600): light signals, circuit rejoin, follow-me ----------
+{
+  const rad2 = [];
+  sim = new Sim(apt, { onRadio: (m) => rad2.push(m), onAlert: () => {} }); sim.setRunway("26"); sim.nextDep = sim.nextArr = 1e9;
+  const na = ifrArr(sim); sim.triggerEvent("7600", na);
+  ok(na.nordo && na.squawk === "7600", "7600 set on the arrival");
+  let eff = sim.respond(na, parse(`${na.cs} light red steady`, sim.ac).ins, { text: "" });
+  ok(eff === null && na.state === "goaround" && na.rejoin, "red steady on final: NORDO goes around and will rejoin (no reply)");
+  run(sim, 900, () => na.state === "final" && !na.wps);
+  ok(na.state === "final", "NORDO rejoined final through the circuit: " + na.state + " " + (na.circuitLeg || ""));
+  sim.respond(na, parse(`${na.cs} light green steady`, sim.ac).ins, { text: "" });
+  ok(na.landClr, "green steady on final = cleared to land");
+  run(sim, 900, () => na.state === "vacated");
+  ok(na.state === "vacated", "NORDO landed and vacated: " + na.state);
+  ok(!rad2.some(m => m.ac === na), "a NORDO aircraft never transmits (" + rad2.filter(m => m.ac === na).length + " calls)");
+  ok(!!na.lastWant, "what it would have said is kept for the info panel: " + na.lastWant);
+  const before = sim.lightLog.length;
+  sim.respond(na, parse(`${na.cs} light green flashing`, sim.ac).ins, { text: "" });
+  ok(na.state === "taxi" && na.taxiTo === "stand" && sim.lightLog.length === before + 1, "green flashing on the ground: taxis to the stand");
+  sim.respond(na, parse(`${na.cs} light red steady`, sim.ac).ins, { text: "" });
+  ok(na.holdPos, "red steady: stop");
+  run(sim, 30); const p0 = [...na.pos]; run(sim, 20);
+  ok(dist(p0, na.pos) < 1, "stays stopped under red steady");
+  sim.respond(na, parse(`${na.cs} flashing green`, sim.ac).ins, { text: "" });
+  ok(!na.holdPos, "flashing green again: continues");
+  run(sim, 1800, () => na.state === "parked");
+  ok(na.state === "parked", "NORDO parked after light signals: " + na.state);
+  // departure under light signals
+  const nd = ifr(sim); nd.nordo = true; nd.squawk = "7600";
+  run(sim, 40, () => nd.state === "clr_req");
+  sim.respond(nd, parse(`${nd.cs} light green flashing`, sim.ac).ins, { text: "" });
+  ok(nd.state === "pushing", "NORDO departure: green flashing = push back and taxi");
+  run(sim, 1500, () => nd.state === "holding");
+  ok(nd.state === "holding", "reached the holding point under light signals: " + nd.state);
+  sim.respond(nd, parse(`${nd.cs} light green steady`, sim.ac).ins, { text: "" });
+  ok(nd.toClr && ["lineup", "lining", "roll"].includes(nd.state), "green steady at the holding point = cleared for takeoff: " + nd.state);
+  run(sim, 300, () => nd.state === "airborne");
+  ok(nd.state === "airborne", "departed");
+  const nd2 = ifr(sim); nd2.nordo = true; nd2.squawk = "7600"; run(sim, 40, () => nd2.state === "clr_req");
+  sim.respond(nd2, parse(`${nd2.cs} light green flashing`, sim.ac).ins, { text: "" });
+  run(sim, 400, () => nd2.state === "taxi");
+  sim.respond(nd2, parse(`${nd2.cs} light white flashing`, sim.ac).ins, { text: "" });
+  ok(nd2.state === "taxi" && nd2.taxiTo === "stand", "white flashing: returns to the stand");
+  run(sim, 1500, () => nd2.state === "parked");
+  ok(nd2.state === "parked" && nd2.returned, "back on a stand: " + nd2.state);
+  // follow-me
+  sim = new Sim(apt, { onRadio: (m) => rad2.push(m), onAlert: () => {} }); sim.setRunway("26"); sim.nextDep = sim.nextArr = 1e9;
+  const nb = ifrArr(sim); nb.nordo = true; nb.squawk = "7600"; nb.landClr = true;
+  run(sim, 900, () => nb.state === "vacated");
+  sim.respond(nb, parse(`${nb.cs} send follow-me`, sim.ac).ins, { text: "" });
+  ok(nb.followMe && nb.followMe.veh && nb.followMe.cs === "FOLLOWME1" && nb.followMe.state === "toAircraft", "follow-me car dispatched: " + (nb.followMe && nb.followMe.cs));
+  run(sim, 900, () => nb.followMe.state === "leading");
+  ok(nb.followMe.state === "leading" && nb.leader === nb.followMe && nb.state === "taxi", "car reached the aircraft and leads it: " + nb.followMe.state);
+  run(sim, 2400, () => nb.state === "parked");
+  ok(nb.state === "parked", "aircraft followed the car onto the stand: " + nb.state);
+  run(sim, 600, () => nb.followMe.gone);
+  ok(nb.followMe.gone, "follow-me returned to base and left");
+  ok(!sim.ac.some(a => a.veh), "no vehicle left behind");
+  // a normal aircraft also complies with a light signal and acknowledges
+  const nc = ifr(sim); nc.state = "holding"; nc.depEnd = sim.depEnd; nc.ifr = true;
+  const rr = sim.respond(nc, parse(`${nc.cs} light red steady`, sim.ac).ins, { text: "" });
+  ok(rr && /roger/i.test(rr.d) && nc.holdPos, "pilot with a radio acknowledges a light signal: " + (rr && rr.d));
+}
 
 console.log(fails ? `\n${fails}/${n} FAILED` : `\nALL ${n} PASSED`);
 process.exit(fails ? 1 : 0);

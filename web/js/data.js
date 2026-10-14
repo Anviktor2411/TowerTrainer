@@ -139,6 +139,12 @@ export const CTR_NAME = { EE: "Tallinn", EF: "Helsinki", EV: "Riga", EY: "Vilniu
   ED: "Langen", EK: "Copenhagen", ES: "Sweden", EN: "Norway", LF: "Paris", EH: "Amsterdam", LO: "Wien",
   LS: "Swiss", LE: "Madrid", LI: "Roma", EP: "Warszawa", OM: "Emirates", RJ: "Tokyo", YS: "Melbourne" };
 
+// ICAO location prefix -> nationality of the airport's own staff (controllers, drivers)
+export const COUNTRY_NAT = { EE: "EE", EF: "FI", EV: "LV", EY: "LT", ED: "DE", LF: "FR", EG: "GB", EI: "IE", ES: "SE", EN: "NO",
+  EK: "DK", EP: "PL", LE: "ES", LI: "IT", EH: "NL", LT: "TR", LO: "AT", LS: "CH", EB: "BE", LK: "CZ", LH: "HU", LP: "PT",
+  LR: "RO", OM: "AE", K: "US", C: "CA", Y: "AU", P: "US", Z: "CN", V: "IN", W: "SG", F: "ZA", N: "NZ" };
+export const controllerNat = (icao) => COUNTRY_NAT[String(icao).slice(0, 2)] || COUNTRY_NAT[String(icao)[0]] || "GB";
+
 export const rnd = (a) => a[Math.floor(Math.random() * a.length)];
 export function weighted(list) {
   const tot = list.reduce((s, x) => s + x[1], 0);

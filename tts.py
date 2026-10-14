@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 import urllib.request
@@ -152,7 +153,7 @@ class EdgeEngine(Engine):
             import edge_tts  # noqa: F401
             return True, "unofficial endpoint — may stop working"
         except ImportError:
-            return False, "pip install edge-tts"
+            return False, f"pip install edge-tts  (for {sys.executable})"
 
     def voices(self):
         cache = self.mgr.cache_dir / "edge_voices.json"
@@ -204,7 +205,7 @@ class PiperEngine(Engine):
         try:
             import piper  # noqa: F401
         except ImportError:
-            return False, "pip install piper-tts"
+            return False, f"pip install piper-tts  (for {sys.executable})"
         return (True, "") if self.models() else (False, "no Piper voice downloaded (Settings → Voices)")
 
     def voices(self):
@@ -331,6 +332,7 @@ class TTSManager:
         self._catalog_t = 0
         self.downloads = {}
         self.stats = {"hits": 0, "misses": 0}
+        self.last_engine = None       # name of the engine that rendered the last clip
 
     # ---- config / secrets (local file only, never logged) ----
     def load(self):
@@ -377,10 +379,13 @@ class TTSManager:
             ok, why = e.usable()
             out.append({"name": e.name, "available": ok, "reason": why, "error": e.last_error})
         neural = any(x["available"] for x in out)
-        return {"engines": out, "neural": neural, "config": self.public_config(), "cache": self.stats,
+        py = sys.executable
+        return {"engines": out, "neural": neural, "config": self.public_config(), "cache": self.stats, "python": py,
+                "speaking": self.last_engine,
                 "banner": None if neural else "No neural voice engine — pilots would sound robotic. One-minute setup: "
-                          "`pip install piper-tts` and download a voice in Settings → Voices (offline), or enter an Azure "
-                          "Speech key (free tier), or `pip install edge-tts` (unofficial)."}
+                          f"`\"{py}\" -m pip install edge-tts` (free, unofficial) or `pip install piper-tts` and download a voice in "
+                          "Settings → Voices (offline), or enter an Azure Speech key (free tier). The package must be installed for "
+                          "the Python that runs server.py (shown here), not another one on this PC."}
 
     def catalog(self, refresh=False):
         with self.lock:
@@ -461,6 +466,7 @@ class TTSManager:
             LOG.warning("TTS engine %s failed: %s", engine.name, type(e).__name__)
             raise LookupError(engine.last_error)
         (self.cache_dir / f"{h}.{'mp3' if mime == 'audio/mpeg' else 'wav'}").write_bytes(data)
+        self.last_engine = engine.name
         return data, mime
 
     # ---- Piper voice downloads ----

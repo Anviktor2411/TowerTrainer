@@ -3,6 +3,9 @@ import { PHONETIC, DIGIT_WORDS } from "./data.js";
 import { abbreviatedCallsign } from "./phrase.js";
 
 const RWY = "(\\d{1,2}[lrc]?)";
+let KNOWN_TAXIWAYS = null;
+/** Taxiway / taxilane names of the loaded airport, so "via" accepts apron lane names like "L3A" too. */
+export function setTaxiNames(set) { KNOWN_TAXIWAYS = set ? new Set([...set].map(x => String(x).toUpperCase())) : null; }
 const STOP_WORDS = new Set(["hold", "holding", "cross", "contact", "monitor", "runway", "and", "then", "behind",
   "give", "way", "line", "cleared", "expect", "short", "of", "to", "stand", "gate", "squawk", "climb", "via", "for"]);
 
@@ -64,8 +67,9 @@ function viaList(s, from) {
   for (const w of m[1].split(/[\s,]+/)) {
     if (!w) continue;
     if (STOP_WORDS.has(w)) break;
-    if (!/^[a-z]{1,2}\d{0,2}$/.test(w)) break;
-    out.push(w.toUpperCase());
+    const W = w.toUpperCase();
+    if (!(KNOWN_TAXIWAYS && KNOWN_TAXIWAYS.has(W)) && !/^[a-z]{1,2}\d{0,2}$/.test(w)) break;
+    out.push(W);
   }
   return out;
 }
@@ -139,6 +143,11 @@ export function parseInstructions(s) {
   add(/\binformation ([a-z])\b(?: is| now)*(?: current)?/, (m) => /current/.test(s) ? { t: "atis", letter: m[1] } : null);
   add(/\bcleared (?:for )?(?:the )?(?:ils|rnav|rnp|vor|visual)(?: approach)?/, () => ({ t: "approach" }));
   add(/\bidentified\b/, () => ({ t: "identified" }));
+  // Tower light signals (ICAO Annex 2, appendix 1): "light green flashing", "flashing green", "red steady light"
+  const LMODE = (w) => /^(steady|continuous|solid)$/.test(w) ? "steady" : "flashing";
+  add(/\b(?:light(?:s|[ -]?gun|[ -]?signal)?\s+)?(green|red|white)\s+(steady|continuous|solid|flashing|flash|flashes|blinking)\b(?:\s+light)?/, (m) => ({ t: "light", color: m[1], mode: LMODE(m[2]) }));
+  add(/\b(steady|continuous|solid|flashing|flash|blinking)\s+(green|red|white)\b(?:\s+light)?/, (m) => ({ t: "light", color: m[2], mode: LMODE(m[1]) }));
+  add(/\b(?:send(?: the| a)? )?follow[ -]?me(?: (?:car|vehicle|van))?(?: (?:is )?(?:on (?:its|the) way|coming))?\b/, () => ({ t: "followMe" }));
   if (!isClearance) add(/\b(climb|descend)(?: and maintain| to)* (?:(?:flight level|fl) ?(\d{2,3})|(\d{3,5})(?: feet| ft)?)/, (m) =>
     ({ t: "alt", verb: m[1], ft: m[2] ? +m[2] * 100 : +m[3], fl: !!m[2] }));
 

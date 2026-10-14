@@ -11,6 +11,9 @@ import { coach, coachHints } from "./coach.js";
 import { Bridges } from "./bridges.js";
 import { Guide } from "./guide.js";
 import { NAT_NAME } from "./data.js";
+import { suggestSid, procLines } from "./procs.js";
+import { nextExpected, callsignText } from "./advisor.js";
+import { statePhrase, issueMarkers } from "./labels.js";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -22,10 +25,11 @@ const params = new URLSearchParams(location.search);
 const POPOUT = params.get("popout");
 const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("towertrainer") : null;
 const POS_ORDER = ["DEL", "GND", "TWR", "APP", "CTR"];
-const DEFAULT_VIEW = { ALL: "GND", DEL: "GND", GND: "GND", TWR: "TWR", APP: "APP", CTR: "CTR" };
+const DEFAULT_VIEW = { ALL: "GND", DEL: "DEL", GND: "GND", TWR: "TWR", APP: "APP", CTR: "CTR" };
+const PRESET_EFFECT = { clean: 0, good: 0.85, distant: 1, old: 0.95 };
 
 const DEFAULTS = {
-  accents: "natural", rate: 1, effect: 0.6, voices: true, blocked: true, rbErr: 4, sayAgain: 2, oldAtis: 10, events: false,
+  accents: "natural", rate: 1, effect: 0.85, preset: "good", voices: true, blocked: true, rbErr: 4, sayAgain: 2, oldAtis: 10, events: false,
   dep: 10, arr: 8, coach: false, lang: "en", graph: false,
   staff: { mode: "combined", keys: ["TWR"] },
   xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false },
@@ -44,17 +48,18 @@ function bootMain() {
   settings.xr = { ...DEFAULTS.xr, ...(settings.xr || {}) };
   const save = () => store.set("tt.settings", settings);
   const radio = new Radio();
-  let sim = null, apt = null, positions = null, metar = null, speed = 1, selectedId = null;
+  let sim = null, apt = null, positions = null, metar = null, speed = 1, selectedId = null, procs = null, navInfo = null;
   let activePos = "ALL";
   const logs = {};                 // pos -> [{cls, html}]
   const unread = {};
+  const history = {};              // callsign -> [{t, who, text}] (radio history for the info panel)
   const coachLog = [];
   const coachStats = {};           // pos -> {tx, warn}
   let guideRestore = null;
   const app = {};                  // API used by the guide
 
   const applyRadioSettings = () => {
-    Object.assign(radio, { accents: settings.accents, rate: +settings.rate, effect: +settings.effect, tts: settings.voices, blocked: settings.blocked });
+    Object.assign(radio, { accents: settings.accents, rate: +settings.rate, effect: +settings.effect, tts: settings.voices, blocked: settings.blocked, preset: settings.preset });
     radio.voiceCache.clear();
   };
   applyRadioSettings();
@@ -77,17 +82,26 @@ function bootMain() {
     box.parentElement.scrollTop = box.parentElement.scrollHeight;
   }
   const sysLog = (text) => addLog(activePos, "sys", esc(text));
+  function remember(cs, who, text) {
+    if (!cs) return;
+    const h = (history[cs] ||= []);
+    h.push({ t: sim ? fmtClock(sim) : "", who, text });
+    if (h.length > 40) h.shift();
+  }
 
   radio.on((m) => {
-    if (m.from === "voices") { if ($("settings").open) renderVoiceTable(); return; }
+    if (m.from === "voices") { if ($("settings").open) renderVoiceTable(); renderVoicePill(); return; }
+    if (m.from === "engine") { radio.lastEngine = m; renderVoicePill(); return; }
     if (m.from === "blocked") { addLog(m.pos, "blk", `⟿ blocked transmission${m.ac ? " (" + esc(m.ac.cs) + (m.rival ? " + " + esc(m.rival.cs) : "") + ")" : ""}`); return; }
+    if (m.from === "stuck") { addLog(m.pos, "blk", `⟿ stuck microphone on the frequency${m.ac ? " (" + esc(m.ac.cs) + ")" : ""} — ${m.on ? "nobody can get through" : "cleared"}`); return; }
     if (m.from === "atc") {
       const who = m.ai ? `${esc(posCs(m.pos))} (AI)` : "ATC";
       addLog(m.pos, m.ai ? "ai" : "atc", `<b>${who}</b> ${esc(m.text)}`);
+      if (sim) { const pp = parse(m.text, sim.ac, null); if (pp.ac) remember(pp.ac.cs, m.ai ? "ai" : "me", m.text); }
       return;
     }
-    if (m.ac) m.ac.callingUntil = Date.now() + 3500;
-    addLog(m.pos, `pilot ${m.ac && m.ac.human ? "human" : m.ac ? m.ac.kind : ""}`, `<b>${esc(m.ac ? m.ac.cs : "?")}</b> ${esc(m.text)}`);
+    if (m.ac) { m.ac.callingUntil = Date.now() + 3500; remember(m.ac.cs, "pilot", m.text); }
+    addLog(m.pos, `pilot ${m.ac && m.ac.human ? "human" : m.ac && m.ac.veh ? "veh" : m.ac ? m.ac.kind : ""}`, `<b>${esc(m.ac ? m.ac.cs : "?")}</b> ${esc(m.text)}`);
   });
   const posCs = (k) => (positions && positions[k] ? positions[k].cs : k);
 
@@ -119,6 +133,7 @@ function bootMain() {
     $("aptIcao").value = icao;
     positions = buildPositions(apt);
     $("aptName").textContent = `${apt.name}${apt.edges.length ? "" : " — no taxi routes in Gateway data"}`;
+    radio.airport = apt.icao;
     radar.setAirport(apt);
     const sel = $("rwySel"); sel.innerHTML = "";
     for (const r of apt.runways) for (const e of r.ends) sel.add(new Option(e.name, e.name));
@@ -133,12 +148,41 @@ function bootMain() {
       POS_ORDER.map(k => `${k} ${p[k].freq}`).join(" · "));
     renderAtis();
     channel && channel.postMessage({ type: "airport", icao });
+    loadProcedures(icao);
+  }
+
+  /** SIDs/STARs from local navdata (CIFP / EuroScope sector files) for Delivery suggestions and the radar. */
+  async function loadProcedures(icao) {
+    procs = null; navInfo = null;
+    try {
+      const r = await fetch(`/api/procedures/${icao}`);
+      if (r.ok) procs = await r.json();
+      const n = await fetch(`/api/navdata`); if (n.ok) navInfo = await n.json();
+    } catch { /* remote player: procedures are host-only */ }
+    applyProcs();
+  }
+  function applyProcs() {
+    if (!sim || !apt) return;
+    const rwy = sim.depEnd.name;
+    sim.suggest = (a) => suggestSid(procs, rwy, { lat: apt.d.lat, lon: apt.d.lon, icao: apt.icao }, a.other, sim.region);
+    radar.setProcs(procs ? procLines(procs, rwy) : []);
+    const src = procs && procs.source ? procs.source : null;
+    const pill = $("navPill");
+    pill.classList.remove("hidden");
+    if (src && src.kind !== "fallback") {
+      const old = navInfo && navInfo.outdated;
+      pill.textContent = `NAV: ${src.kind === "navigraph" ? "Navigraph" : src.kind === "xplane" ? "X-Plane" : src.kind === "euroscope" ? "EuroScope" : src.kind}${src.airac ? " " + src.airac : ""}${old ? " (old)" : ""}`;
+      pill.className = "pill" + (old ? " err" : " on");
+      pill.title = `${src.label}${navInfo && navInfo.current ? " · current cycle " + navInfo.current : ""} — SIDs ${procs.sids.length}, STARs ${procs.stars.length}, approaches ${procs.apps.length}`;
+    } else { pill.textContent = "NAV: none"; pill.className = "pill"; pill.title = (src && src.label) || "No procedures found — generic suggestions (point X-Plane/Navigraph CIFP or a sector file in Settings)"; }
+    $("delNav").textContent = src ? `· ${src.label}` : "";
   }
 
   function createSim() {
     radio.reset();
     for (const k of Object.keys(logs)) delete logs[k];
     for (const k of Object.keys(unread)) delete unread[k];
+    for (const k of Object.keys(history)) delete history[k];
     const split = settings.staff.mode === "split";
     const staffing = split ? new Set(settings.staff.keys.length ? settings.staff.keys : ["TWR"]) : new Set(["ALL"]);
     sim = new Sim(apt, {
@@ -152,24 +196,31 @@ function bootMain() {
     sim.depPerHour = +settings.dep; sim.arrPerHour = +settings.arr;
     if (metar && typeof metar.wdir === "number") sim.wind = { dir: metar.wdir, spd: metar.wspd || 0 };
     if ($("rwySel").value) sim.setRunway($("rwySel").value);
+    radio.onFrequency = (pos) => (sim ? sim.onFrequency(pos) : []);
     selectedId = null;
     activePos = split ? [...staffing].sort((a, b) => POS_ORDER.indexOf(a) - POS_ORDER.indexOf(b))[0] : "ALL";
     radio.audible = split ? new Set([...staffing]) : null;
     setView(DEFAULT_VIEW[activePos]);
-    renderTabs(); renderLog(); renderPosHead();
+    renderTabs(); renderLog(); renderPosHead(); renderInfo();
+    applyProcs();
   }
 
   function onSimEvent(e) {
     if (e.type === "atis") { renderAtis(); sysLog(`ATIS information ${e.letter} is now current.`); }
     if (e.type === "readbackCorrected") addLog(e.ac.freq, "sys", `✓ readback corrected (${esc(e.ac.cs)})`);
-    if (e.type === "emergency") alertBox(`${e.ac.cs} squawking ${e.code}${e.code === "7600" ? " — radio failure" : " — emergency"}`);
-    if (e.type === "gone" && e.ac.id === selectedId) selectedId = null;
+    if (e.type === "emergency") { alertBox(`${e.ac.cs} squawking ${e.code}${e.code === "7600" ? " — radio failure (RCF): use light signals or the follow-me" : e.code === "7500" ? " — unlawful interference" : " — emergency"}`); renderInfo(); }
+    if (e.type === "gone" && e.ac.id === selectedId) { selectedId = null; renderInfo(); }
+    if (e.type === "light") addLog(e.ac.freq, "sys", `💡 light gun → ${esc(e.ac.cs)}: ${e.color} ${e.mode}${e.effect ? " — " + esc(e.effect) : " — no effect in this situation"}`);
+    if (e.type === "nordoWants" && e.ac.lastWantAt !== e.ac._lastShown) { e.ac._lastShown = e.ac.lastWantAt; addLog(e.ac.freq, "sys", `(${esc(e.ac.cs)} has no radio — would say: “${esc(e.text)}”)`); }
+    if (e.type === "followMeSent") addLog(e.ac.freq, "sys", `🚗 ${esc(e.veh.cs)} dispatched to ${esc(e.ac.cs)}`);
+    if (e.type === "followMe") addLog(e.ac.freq, "sys", `🚗 ${esc(e.veh.cs)} leading ${esc(e.ac.cs)} to stand ${esc(e.ac.stand ? e.ac.stand.name : "")}`);
   }
 
   function bestRunway() {
     let best = apt.runways[0].ends[0], bs = -Infinity;
     const wdir = metar && typeof metar.wdir === "number" ? metar.wdir : null, wspd = metar ? (metar.wspd || 0) : 0;
     for (const r of apt.runways) for (const e of r.ends) {
+      if (!apt.entries(e).length && apt.runways.some(o => apt.entries(o.ends[0]).length)) continue;   // no taxiway to it
       let s = r.len / 1000;
       if (wdir !== null) s += Math.cos((wdir - e.hdg) * Math.PI / 180) * Math.max(wspd, 1) * 10;
       if (s > bs) { bs = s; best = e; }
@@ -211,11 +262,17 @@ function bootMain() {
       : `<b>${esc(apt.icao)}_TWR</b> · combined DEL/GND/TWR · <b>${apt.freq.tower ? fmtFreq(apt.freq.tower.mhz) : "—"}</b>`;
     $("txOn").textContent = sim.split ? `TX ${txPos} ${positions[txPos].freq}` : "TX";
     $("logTitle").textContent = `Frequency ${sim.split ? (activePos === "ALL" ? "" : positions[activePos].freq) : ""}`;
-    $("delPanel").classList.toggle("hidden", !(activePos === "DEL" || (!sim.split)));
+    $("delPanel").classList.toggle("hidden", !(radar.view === "DEL" || activePos === "DEL"));
   }
   function txPosition() { if (!sim || !sim.split) return "ALL"; return sim.userWorks(activePos) ? activePos : staffedKeys()[0]; }
   function setActive(k) { activePos = k; unread[k] = 0; setView(DEFAULT_VIEW[k] || "GND"); renderTabs(); renderLog(); }
-  function setView(v) { radar.setView(v); $("wxPanel").classList.toggle("hidden", v !== "TWR"); renderTabs && $("viewTabs") && ($("viewTabs").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.view === v))); }
+  function setView(v) {
+    radar.setView(v);
+    $("wxPanel").classList.toggle("hidden", v !== "TWR");
+    $("viewTabs").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.view === v));
+    if (sim) renderPosHead();
+    renderDel();
+  }
 
   $("posTabs").addEventListener("click", (e) => {
     const pop = e.target.closest("[data-pop]");
@@ -267,40 +324,115 @@ function bootMain() {
       onSelect: (id) => select(sim.ac.find(a => a.id === id)),
       onMove: (id, bay) => stripAction({ id, bay }), onEdit: (id, field, value) => stripAction({ id, field, value }) });
   }
+
+  // ---------- Delivery view ----------
+  function suggestionFor(a) {
+    const sg = sim.suggestDeparture(a);
+    const code = (a.stripData && a.stripData.sq) || a.assignedSq || sim.squawks.peek(sim.t);
+    return { ...sg, code };
+  }
   function renderDel() {
     if (!sim || $("delPanel").classList.contains("hidden")) return;
-    const req = sim.ac.filter(a => a.kind === "dep" && !a.ga && ["clr_req", "parked"].includes(a.state) && a.lastCall != null);
-    $("clrList").innerHTML = req.length ? req.map(a => `<div class="strip${a.id === selectedId ? " sel" : ""}" data-id="${a.id}"><span class="cs">${esc(a.cs)}</span>` +
-      `<span>${esc(a.type)}</span><span>→${esc(a.other[0])} ${esc(a.other[1])}</span><span>${esc(a.stand ? a.stand.name : "")}</span><span class="st">${Math.round(sim.t - a.lastCall)}s</span></div>`).join("")
-      : `<div class="muted small">No pending requests.</div>`;
+    const req = sim.ac.filter(a => a.kind === "dep" && !a.ga && ["clr_req", "parked", "cleared"].includes(a.state) && (a.lastCall != null || a.state === "cleared"));
+    $("clrList").innerHTML = req.length ? req.map(a => {
+      const sg = suggestionFor(a);
+      const waiting = a.state === "cleared" ? "cleared" : `${Math.round(sim.t - (a.reqAt ?? a.lastCall ?? sim.t))}s`;
+      return `<div class="clr${a.id === selectedId ? " sel" : ""}" data-id="${a.id}"><span class="cs">${esc(a.cs)}</span>` +
+        `<span>${esc(a.type)}/${a.wtc} → ${esc(a.other[0])} ${esc(a.other[1])} · stand ${esc(a.stand ? a.stand.name : "")}</span><span class="st">${waiting}</span>` +
+        `<span class="sg">${sg.sid ? "SID " + esc(sg.sid) : "no SID (radar vectors)"} · climb ${sg.climb} ft · squawk ${esc(sg.code)} ${a.state !== "cleared" ? `<button data-read="${a.id}" title="Put the clearance in the command line">Read clearance</button>` : ""}</span></div>`;
+    }).join("") : `<div class="muted small">No pending requests.</div>`;
     const a = sim.ac.find(x => x.id === selectedId);
     const ed = document.activeElement && $("fpEditor").contains(document.activeElement);
     if (ed) return;
     if (!a || a.kind !== "dep") { $("fpEditor").innerHTML = "Select a departure."; return; }
     const d = a.stripData || {};
+    const sg = suggestionFor(a);
     $("fpEditor").innerHTML = `<span>Callsign</span><b>${esc(a.cs)} (${esc(a.nat ? NAT_NAME[a.nat] || a.nat : "")})</b>` +
       `<span>Type</span><span>${esc(a.type)}/${a.wtc}</span><span>Route</span><span>${esc(apt.icao)} → ${esc(a.other[0])} ${esc(a.other[1])}</span>` +
-      `<span>SID</span><input data-f="sid" value="${esc(d.sid ?? a.sid ?? "")}" placeholder="flight planned route">` +
-      `<span>CFL</span><input data-f="cfl" value="${esc(d.cfl ?? (a.cfl || 5000))}">` +
-      `<span>Squawk</span><input data-f="sq" value="${esc(d.sq ?? a.assignedSq ?? "")}" placeholder="Assign squawk">`;
+      `<span>SID</span><input data-f="sid" value="${esc(d.sid ?? a.sid ?? "")}" placeholder="${esc(sg.sid ? sg.sid + " (suggested)" : "flight planned route")}">` +
+      `<span>CFL</span><input data-f="cfl" value="${esc(d.cfl ?? (a.cfl || sg.climb || 5000))}">` +
+      `<span>Squawk</span><input data-f="sq" value="${esc(d.sq ?? a.assignedSq ?? "")}" placeholder="${esc(sg.code)} (next free)">` +
+      `<span></span><span class="muted small">${esc(sg.note || "")}</span>`;
   }
   $("fpEditor").addEventListener("change", (e) => { const f = e.target.dataset.f; if (f) stripAction({ id: selectedId, field: f, value: e.target.value.trim() }); });
-  $("clrList").addEventListener("click", (e) => { const s = e.target.closest("[data-id]"); if (s) select(sim.ac.find(a => a.id === +s.dataset.id)); });
+  $("clrList").addEventListener("click", (e) => {
+    const b = e.target.closest("[data-read]");
+    if (b) { const a = sim.ac.find(x => x.id === +b.dataset.read); if (a) { select(a); $("cmd").value = clearanceText(a); $("cmd").focus(); } return; }
+    const s = e.target.closest("[data-id]"); if (s) select(sim.ac.find(a => a.id === +s.dataset.id));
+  });
 
+  // ---------- aircraft info panel ----------
   function select(a) {
     selectedId = a ? a.id : null;
-    if (a) { $("cmd").value = `${a.ga ? (a.abbrev ? a.cs : a.tel) : a.tel + " " + a.num} `; $("cmd").focus(); }
-    renderBoard(); renderDel();
+    if (a) { $("cmd").value = `${callsignText(a)} `; $("cmd").focus(); }
+    renderBoard(); renderDel(); renderInfo();
   }
   radar.onSelect = (id) => select(sim && sim.ac.find(a => a.id === id));
+
+  function renderInfo() {
+    const el = $("acInfo");
+    const a = sim && sim.ac.find(x => x.id === selectedId);
+    if (!a) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+    if (el.contains(document.activeElement) && document.activeElement.tagName === "BUTTON") return;
+    el.classList.remove("hidden");
+    const pos = txPosition();
+    const nx = nextExpected(sim, a, pos);
+    const kv = (rows) => `<div class="kv">${rows.filter(r => r[1] != null && r[1] !== "").map(([k, v]) => `<span>${esc(k)}</span><b>${v}</b>`).join("")}</div>`;
+    const voice = a.cast && a.cast[0] && a.cast[0].id ? a.cast[0].id.replace(/^(\w+):/, "$1 · ") : (radio.useServer() ? "casting…" : "browser voice");
+    const crew = a.crew && a.crew[0] ? `${a.nat ? NAT_NAME[a.nat] || a.nat : "?"}${a.crew[0].gender === "F" ? " ♀" : ""}` : "";
+    const iss = issueMarkers(a, sim.t);
+    const h = (history[a.cs] || []).slice(-8);
+    const lights = `<div class="sec">Light gun (ICAO Annex 2)</div><div class="btns">` +
+      (a.onGround
+        ? `<button class="g" data-cmd="light green flashing" title="cleared to taxi / cross">green flashing</button><button class="g" data-cmd="light green steady" title="cleared for takeoff">green steady</button>` +
+          `<button class="r" data-cmd="light red steady" title="stop">red steady</button><button class="r" data-cmd="light red flashing" title="taxi clear of the landing area">red flashing</button><button class="w" data-cmd="light white flashing" title="return to your starting point">white flashing</button>`
+        : `<button class="g" data-cmd="light green steady" title="cleared to land">green steady</button><button class="g" data-cmd="light green flashing" title="return for landing">green flashing</button>` +
+          `<button class="r" data-cmd="light red steady" title="give way, continue circling">red steady</button><button class="r" data-cmd="light red flashing" title="aerodrome unsafe, do not land">red flashing</button>`) +
+      (a.onGround && !a.veh ? `<button data-cmd="send follow-me" title="dispatch the follow-me car">🚗 Send follow-me</button>` : "") + `</div>`;
+    el.innerHTML = `<h3><span>${esc(a.cs)} <span class="muted">${esc(a.type)}${a.wtc && !a.veh ? "/" + a.wtc : ""}</span>${a.nordo ? ' <span class="alertline">RCF 7600</span>' : ""}${a.mayday ? ' <span class="alertline">MAYDAY</span>' : ""}</span><span class="x" data-close title="Close">✕</span></h3>` +
+      `<div class="sec">${esc(statePhrase(a))}</div>` +
+      (a.veh ? kv([["Vehicle", esc(a.vtype)], ["Task", esc(statePhrase(a))], ["Frequency", esc(a.freq)]]) :
+      kv([
+        ["Flight plan", a.kind === "arr" ? `${esc(a.other[0])} → ${esc(apt.icao)}` : a.kind === "ovf" ? `${esc(a.other[0])} → ${esc(a.other[1])}` : `${esc(apt.icao)} → ${esc(a.other[0])} ${esc(a.other[1])}${a.ga ? " (VFR)" : ""}`],
+        ["Clearance", a.kind === "dep" ? (a.ifr && a.assignedSq ? `cleared${a.sid ? " via " + esc(a.sid) : ""}, ${a.cfl >= 6000 ? "FL" + a.cfl / 100 : a.cfl + " ft"}, sq ${esc(a.assignedSq)}` : a.ga ? "VFR" : "not yet") : a.kind === "arr" ? (a.landClr ? "cleared to land " + esc(a.end.name) : a.appCleared ? "ILS " + esc(a.end.name) : "—") : ""],
+        ["Squawk", `${esc(a.squawk || "")}${a.assignedSq && a.assignedSq !== a.squawk ? ` <span class="warnline">(assigned ${esc(a.assignedSq)})</span>` : ""} ${a.xpdr === "C" ? "mode C" : a.xpdr === "S" ? "standby" : a.xpdr === "A" ? "mode A" : ""}`],
+        ["Ground", a.onGround ? `${a.stand ? "stand " + esc(a.stand.name) : a.standName ? "from " + esc(a.standName) : ""}${a.viaText ? " · via " + esc(a.viaText) : ""}${a.atStop && a.holdRwyName ? " · holding short " + esc(a.holdRwyName) : ""}${a.holdPos ? " · holding position" : ""}` : ""],
+        ["Tower", a.kind === "dep" ? `runway ${esc((a.depEnd || sim.depEnd).name)}${a.toClr ? " · cleared for takeoff" : ""}` : a.kind === "arr" ? `runway ${esc((a.end || sim.arrEnd).name)}${a.dthr != null || a.state === "final" ? " · " + (sim.distToThr(a) / 1852).toFixed(1) + " NM" : ""}` : ""],
+        ["Frequency", a.freq === "ALL" ? "combined" : a.freq === "LOST" ? "wrong frequency" : esc(a.freq)],
+        ["Crew", `${esc(crew)} · ${esc(voice)}`],
+        ["Waiting", a.reqAt != null ? `${Math.round(sim.t - a.reqAt)} s` : null],
+        ["Issues", iss.length ? iss.map(i => `<span class="${i.level}line">${esc(i.t)}</span>`).join(" ") : null],
+        ["No radio", a.nordo && a.lastWant ? `would say: “${esc(a.lastWant)}”` : null],
+      ])) +
+      `<div class="sec">Next expected</div>` +
+      (nx.pilot ? `<div class="small">pilot: ${esc(nx.pilot)}</div>` : "") +
+      (nx.atc ? `<div class="next" data-cmd="${esc(nx.atc)}" title="Click to put it in the command line">${esc(nx.atc)}</div>` : `<div class="small muted">${esc(nx.why || "nothing due")}</div>`) +
+      (nx.atc && nx.why ? `<div class="small muted">${esc(nx.why)}</div>` : "") +
+      (a.nordo || !a.onGround || a.kind !== "ovf" ? lights : "") +
+      `<div class="sec">Radio history</div><div class="hist">${h.length ? h.map(x => `<div class="${x.who}"><span class="t">${esc(x.t)}</span> ${esc(x.who === "pilot" ? a.cs : x.who === "ai" ? "AI" : "me")}: ${esc(x.text)}</div>`).join("") : '<div class="muted">nothing yet</div>'}</div>` +
+      (!a.veh && !a.human ? `<div class="btns"><button data-ev="7600" title="training: simulate a radio failure on this aircraft">simulate 7600</button><button data-ev="7700" title="training: simulate an emergency">simulate 7700</button></div>` : "");
+  }
+  $("acInfo").addEventListener("click", (e) => {
+    const a = sim && sim.ac.find(x => x.id === selectedId);
+    if (e.target.closest("[data-close]")) { selectedId = null; renderInfo(); renderBoard(); return; }
+    const c = e.target.closest("[data-cmd]");
+    if (c && a) {
+      const text = `${callsignText(a)} ${c.dataset.cmd}`;
+      if (c.classList.contains("next")) { $("cmd").value = text; $("cmd").focus(); } else transmit(text, undefined, "panel");
+      return;
+    }
+    const ev = e.target.closest("[data-ev]");
+    if (ev && a) { sim.triggerEvent(ev.dataset.ev, a); renderInfo(); }
+  });
 
   function clearanceText(a, code) {
     if (!a) return "";
     const d = a.stripData || {};
+    const sg = sim.suggestDeparture(a);
     code = code || d.sq || a.assignedSq || sim.squawks.peek(sim.t);
-    const cfl = d.cfl ?? a.cfl ?? 5000;
+    const cfl = d.cfl ?? a.cfl ?? sg.climb ?? 5000;
     const alt = String(cfl).toUpperCase().startsWith("F") ? `flight level ${String(cfl).slice(1)}` : `${cfl} feet`;
-    const sid = d.sid || a.sid;
+    const sid = d.sid || a.sid || sg.sid;
     const gnd = sim.split && positions.GND && !sim.userWorks("DEL") ? "" : sim.split && positions.GND ? `, contact Ground ${positions.GND.freq}` : "";
     return `${a.tel} ${a.num} cleared to ${a.other[1]} via ${sid ? sid + " departure" : "flight planned route"}, climb ${alt}, squawk ${code}${gnd}`;
   }
@@ -317,10 +449,19 @@ function bootMain() {
     text = String(text || "").trim();
     if (!text || !sim) return;
     pos = pos && pos !== "ALL" && sim.split ? pos : txPosition();
+    const pp = parse(text, sim.ac, sim.ac.find(a => a.id === selectedId));
+    const action = pp.ins.length && pp.ins.every(i => i.t === "light" || i.t === "followMe");
+    if (action) {
+      // a light-gun signal / dispatching the follow-me is not a radio call
+      if (!pp.ac) { sysLog("Light signal: which aircraft? Start with the callsign."); return; }
+      addLog(pos, "sys", `(${esc(source === "typed" ? "action" : source)}) ${esc(text)}`);
+      sim.respond(pp.ac, pp.ins, { text: pp.normalized, pos });
+      renderInfo();
+      return;
+    }
     radio.controller(text, pos);
     if (source !== "typed" && source !== "voice") addLog(pos, "sys", `(${esc(source)})`);
     bridges.transmission({ from: "atc", text, pos });
-    const pp = parse(text, sim.ac, sim.ac.find(a => a.id === selectedId));
     if (settings.coach) showCoach(coach({ text, parsed: pp, sim, pos, lang: settings.lang }), pos);
     countCoach(pos, pp);
     if (!pp.ac) { addLog(pos, "sys", "No aircraft answered (callsign not recognised)."); return; }
@@ -328,8 +469,9 @@ function bootMain() {
     if (!sim.hears(pp.ac, pos)) return; // not on this frequency: nobody answers
     if (!pp.explicit) addLog(pos, "sys", `(no callsign — assumed ${esc(pp.ac.cs)})`);
     const r = sim.respond(pp.ac, pp.ins, { text: pp.normalized, pos, abbrevUsed: pp.abbrev });
+    renderInfo();
     if (!r) return;
-    radio.enqueue({ from: "pilot", ac: pp.ac, text: r.d, say: r.s, pos: pp.ac.freq === "LOST" ? pos : pp.ac.freq, speaker: Math.random() < 0.8 ? 0 : 1 });
+    radio.enqueue({ from: "pilot", ac: pp.ac, text: r.d, say: r.s, pos: pp.ac.freq === "LOST" ? pos : pp.ac.freq, speaker: Math.random() < 0.8 ? 0 : 1, kind: "readback" });
     bridges.transmission({ from: "pilot", ac: pp.ac, text: r.d, pos });
   }
   function countCoach(pos, pp) {
@@ -353,7 +495,7 @@ function bootMain() {
   $("cmdForm").addEventListener("submit", (e) => {
     e.preventDefault(); transmit($("cmd").value);
     const a = sim && sim.ac.find(x => x.id === selectedId);
-    $("cmd").value = a ? `${a.ga ? a.tel : a.tel + " " + a.num} ` : "";
+    $("cmd").value = a ? `${callsignText(a)} ` : "";
   });
 
   // ---------- push-to-talk ----------
@@ -436,9 +578,81 @@ function bootMain() {
   function updateStaffBtn() { $("staffBtn").textContent = settings.staff.mode === "split" ? `Staffing: ${settings.staff.keys.join("+")}` : "Staffing: combined"; }
   updateStaffBtn();
 
+  // ---------- voices: server engines, banner, pill ----------
+  async function refreshVoices() {
+    const st = await radio.checkServer();
+    renderVoiceBanner(st); renderVoicePill();
+    if ($("settings").open) renderEngines(st);
+    return st;
+  }
+  function renderVoiceBanner(st) {
+    const b = $("voiceBanner");
+    if (!settings.voices) { b.classList.add("hidden"); return; }
+    if (st.neural) {
+      const avail = (st.engines || []).filter(e => e.available).map(e => e.name).join(", ");
+      b.className = "banner ok main-only"; b.innerHTML = `Neural voices ready: <b>${esc(avail)}</b> — pilots speak through the radio chain. <button type="button" data-open-settings>Voices…</button>`;
+      if (!radio.bannerSeen) { b.classList.remove("hidden"); setTimeout(() => b.classList.add("hidden"), 8000); radio.bannerSeen = true; } else b.classList.add("hidden");
+    } else {
+      b.className = "banner main-only";
+      b.innerHTML = `${esc(st.banner || "No neural voice engine — using the browser's voices.")} <button type="button" data-open-settings>Settings → Voices</button> <button type="button" data-recheck>Re-check</button>`;
+      b.classList.remove("hidden");
+    }
+  }
+  function renderVoicePill() {
+    const p = $("voicePill");
+    const s = radio.server;
+    const last = radio.lastEngine;
+    if (!settings.voices) { p.textContent = "Voices: off"; p.className = "pill main-only"; return; }
+    if (!s.checked) { p.textContent = "Voices: …"; p.className = "pill main-only"; return; }
+    const eng = last ? last.engine : (s.neural ? (s.engines || []).find(e => e.available)?.name : "browser");
+    p.textContent = `Voices: ${eng || "browser"}${last && last.voice ? " · " + last.voice.replace(/^\w+:/, "").slice(0, 26) : ""}`;
+    p.className = "pill main-only" + (s.neural && eng !== "browser" ? " on" : "");
+    p.title = s.neural ? `Engines available: ${(s.engines || []).filter(e => e.available).map(e => e.name).join(", ")}${last ? `\nLast transmission: ${last.engine} ${last.voice || ""}` : ""}` : (s.banner || "");
+  }
+  function renderEngines(st) {
+    st = st || radio.server;
+    const rows = (st.engines || []).map(e => `<tr><td class="${e.available ? "ok" : "no"}">${e.available ? "●" : "○"} ${esc(e.name)}</td><td>${esc(e.available ? (e.reason || "ready") : e.reason || "")}${e.error ? ` <span class="muted">(${esc(e.error)})</span>` : ""}</td></tr>`).join("");
+    $("voiceEngines").innerHTML = `<table>${rows || "<tr><td>voice server unreachable</td></tr>"}</table>` +
+      (st.cache ? `<div class="muted">cache hits ${st.cache.hits} · renders ${st.cache.misses}${radio.lastEngine ? " · last: " + esc(radio.lastEngine.engine) : ""}</div>` : "");
+    if (st.config) { $("azureRegion").value = st.config.azure_region || ""; $("azureKey").placeholder = st.config.azure_key ? "(key stored)" : "free tier key"; $("elevenKey").placeholder = st.config.eleven_key ? "(key stored)" : ""; }
+    renderPiper();
+  }
+  async function renderPiper() {
+    const el = $("piperList");
+    try {
+      const r = await fetch("/api/tts/piper/catalog"); const j = await r.json();
+      if (j.error) { el.innerHTML = `<span class="muted">${esc(j.error)}</span>`; return; }
+      const pick = (j.voices || []).filter(v => v.quality !== "x_low" && (v.installed || ["en_GB", "en_US", "et_EE", "fi_FI", "lv_LV", "lt_LT", "de_DE", "fr_FR", "sv_SE", "nb_NO", "da_DK", "pl_PL", "es_ES", "it_IT", "nl_NL"].includes(v.name.split("-")[0])));
+      el.innerHTML = pick.map(v => `<span>${esc(v.name)} <span class="muted">${v.size_mb} MB${v.speakers > 1 ? " · " + v.speakers + " voices" : ""}</span> ${v.installed ? '<span class="ok">installed</span>' : typeof v.progress === "number" && v.progress < 100 ? `${v.progress}%` : `<button type="button" data-piper="${esc(v.name)}">download</button>`}</span>`).join("");
+    } catch { el.innerHTML = ""; }
+  }
+  $("voiceBanner").addEventListener("click", (e) => {
+    if (e.target.closest("[data-open-settings]")) { fillSettings(); $("settings").showModal(); }
+    if (e.target.closest("[data-recheck]")) refreshVoices();
+  });
+  $("voiceRefresh").addEventListener("click", () => fetch("/api/tts/voices?refresh=1").catch(() => {}).then(refreshVoices));
+  $("saveKeys").addEventListener("click", async () => {
+    const body = { azure_region: $("azureRegion").value.trim() };
+    if ($("azureKey").value.trim()) body.azure_key = $("azureKey").value.trim();
+    if ($("elevenKey").value.trim()) body.eleven_key = $("elevenKey").value.trim();
+    await fetch("/api/tts/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+    $("azureKey").value = ""; $("elevenKey").value = "";
+    refreshVoices();
+  });
+  $("piperList").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-piper]"); if (!b) return;
+    await fetch("/api/tts/piper/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: b.dataset.piper }) }).catch(() => {});
+    const t = setInterval(async () => { await renderPiper(); if (!$("settings").open) clearInterval(t); }, 2000);
+    setTimeout(() => { clearInterval(t); refreshVoices(); }, 120000);
+  });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshVoices(); });
+  window.addEventListener("focus", () => refreshVoices());
+  setInterval(refreshVoices, 60000);
+  refreshVoices();
+
   // ---------- settings dialog ----------
   const bindings = [
-    ["setAccents", "accents"], ["setRate", "rate"], ["setEffect", "effect"], ["setVoices", "voices", "checked"], ["setBlocked", "blocked", "checked"],
+    ["setAccents", "accents"], ["setRate", "rate"], ["setEffect", "effect"], ["setPreset", "preset"], ["setVoices", "voices", "checked"], ["setBlocked", "blocked", "checked"],
     ["setRbErr", "rbErr"], ["setSayAgain", "sayAgain"], ["setOldAtis", "oldAtis"], ["setEvents", "events", "checked"],
     ["depRate", "dep"], ["arrRate", "arr"], ["setCoach", "coach", "checked"], ["setLang", "lang"], ["graph", "graph", "checked"],
   ];
@@ -450,10 +664,11 @@ function bootMain() {
     $("xrCs").value = x.cs || (apt ? `${apt.icao}_TWR` : ""); $("xrFreq").value = x.freq || (apt && apt.freq.tower ? fmtFreq(apt.freq.tower.mhz) : "");
     $("xrAi").checked = x.ai; $("xrHumans").checked = x.humans; $("xrText").checked = x.text; $("xrVoice").checked = x.voice;
     $("coachToggle").checked = settings.coach;
-    renderVoiceTable();
+    renderVoiceTable(); renderEngines();
   }
-  function readSettings() {
+  function readSettings(changedId) {
     for (const [id, k, prop] of bindings) { const v = $(id)[prop || "value"]; settings[k] = prop ? v : (isNaN(+v) || v === "" ? v : +v); }
+    if (changedId === "setPreset") { settings.effect = PRESET_EFFECT[settings.preset] ?? settings.effect; $("setEffect").value = settings.effect; }
     settings.xr = { enabled: $("xrEnabled").checked, host: $("xrHost").value.trim() || "127.0.0.1", port: +$("xrPort").value || 49100,
       password: $("xrPass").value, cs: $("xrCs").value.trim().toUpperCase(), freq: $("xrFreq").value.trim(), ai: $("xrAi").checked,
       humans: $("xrHumans").checked, text: $("xrText").checked, voice: $("xrVoice").checked };
@@ -462,24 +677,27 @@ function bootMain() {
       sim.rates = { readbackError: settings.rbErr / 100, sayAgain: settings.sayAgain / 100, oldAtis: settings.oldAtis / 100 };
       sim.events = settings.events; sim.depPerHour = +settings.dep; sim.arrPerHour = +settings.arr;
     }
-    radar.showGraph = settings.graph;
+    radar.showGraph = settings.graph; radar.staticKey = null;
     $("coachToggle").checked = settings.coach; renderCoach();
     $("setRateV").textContent = (+settings.rate).toFixed(2); $("setEffectV").textContent = Math.round(settings.effect * 100) + "%";
+    renderVoicePill();
   }
   function renderVoiceTable() {
     const rows = radio.voiceTable();
-    $("voiceTable").innerHTML = `<table><tr><th>Nationality</th><th>Voice</th><th></th></tr>` + rows.map(r =>
+    $("voiceTable").innerHTML = `<table><tr><th>Nationality</th><th>Browser voice</th><th></th></tr>` + rows.map(r =>
       `<tr><td>${esc(r.name)}</td><td>${esc(r.voice)} <span class="muted">${esc(r.lang)}</span></td>` +
       `<td class="${r.fallback ? "fb" : "nat"}">${r.english ? (r.fallback ? "English fallback" : "native English") : r.native ? (r.respell ? "native + respelling" : "native voice") : "fallback (English)"}</td></tr>`).join("") + "</table>";
   }
-  $("settingsBtn").addEventListener("click", () => { fillSettings(); $("settings").showModal(); });
+  $("settingsBtn").addEventListener("click", () => { fillSettings(); $("settings").showModal(); refreshVoices(); });
   $("settings").addEventListener("change", (e) => {
-    readSettings();
+    readSettings(e.target.id);
     if (e.target.id && e.target.id.startsWith("xr")) { xrErrShown = false; bridges.configureXr(settings.xr); }
     if (e.target.id === "setAccents") renderVoiceTable();
+    if (e.target.id === "setVoices") refreshVoices();
   });
-  $("settings").addEventListener("input", (e) => { if (e.target.type === "range") readSettings(); });
+  $("settings").addEventListener("input", (e) => { if (e.target.type === "range") readSettings(e.target.id); });
   $("testVoices").addEventListener("click", () => radio.testVoices(["GB", "US", "IE", "EE", "FI", "LV", "LT", "DE", "FR"]));
+  $("radioLab").addEventListener("click", () => radio.lab && radio.lab());
   $("coachToggle").addEventListener("change", (e) => { settings.coach = e.target.checked; save(); renderCoach(); });
   radar.showGraph = settings.graph;
 
@@ -507,7 +725,7 @@ function bootMain() {
 
   // ---------- misc controls ----------
   $("aptForm").addEventListener("submit", (e) => { e.preventDefault(); loadAirport($("aptIcao").value); });
-  $("rwySel").addEventListener("change", (e) => { if (sim) { sim.setRunway(e.target.value); renderAtis(); sysLog(`Runway in use: ${e.target.value}`); } });
+  $("rwySel").addEventListener("change", (e) => { if (sim) { sim.setRunway(e.target.value); renderAtis(); applyProcs(); sysLog(`Runway in use: ${e.target.value}`); } });
   $("speed").addEventListener("change", (e) => { speed = +e.target.value; });
   $("helpBtn").addEventListener("click", () => $("help").showModal());
   function setSpeed(n) { speed = n; $("speed").value = String(n); }
@@ -558,9 +776,9 @@ function bootMain() {
       slowT += dt; bcT += dt;
       if (slowT > 0.5) {
         slowT = 0;
-        renderBoard(); renderDel(); renderTabs(); renderCoach();
+        renderBoard(); renderDel(); renderTabs(); renderCoach(); renderInfo();
         const st = sim.stats;
-        $("status").textContent = `${fmtClock(sim)}  DEP ${st.departures}  ARR ${st.arrivals}  G/A ${st.goArounds}  ALERTS ${st.alerts}` +
+        $("status").textContent = `${fmtClock(sim)}  DEP ${st.departures}  ARR ${st.arrivals}  G/A ${st.goArounds}  ALERTS ${st.alerts}  AC ${sim.ac.length}` +
           (speed === 0 ? "  [PAUSED]" : speed > 1 ? `  [${speed}×]` : "");
       }
       if (bcT > 0.25) { bcT = 0; broadcast(false); }
@@ -570,8 +788,9 @@ function bootMain() {
   requestAnimationFrame(frame);
   loadAirport(params.get("icao") || store.get("tt.icao", "EETN"));
   // for debugging and automated tests
-  window.TT = { get sim() { return sim; }, get apt() { return apt; }, get positions() { return positions; }, transmit, parse, radio, guide, app,
-    settings, setActive, openDebrief, bridges, loadAirport, applyStaffing: (mode, keys) => { settings.staff = { mode, keys }; save(); updateStaffBtn(); createSim(); } };
+  window.TT = { get sim() { return sim; }, get apt() { return apt; }, get positions() { return positions; }, get procs() { return procs; }, transmit, parse, radio, radar, guide, app,
+    settings, setActive, setView, select: (id) => select(sim && sim.ac.find(a => a.id === id)), openDebrief, bridges, loadAirport, refreshVoices,
+    applyStaffing: (mode, keys) => { settings.staff = { mode, keys }; save(); updateStaffBtn(); createSim(); } };
 }
 
 function fmtClock(sim) {
@@ -595,7 +814,7 @@ async function bootPopout() {
     const d = await (await fetch(`/api/airport/${icao}`)).json();
     apt = new Airport(d);
     radar.setAirport(apt);
-    radar.setView(DEFAULT_VIEW[pos] || "GND");
+    radar.setView(DEFAULT_VIEW[pos] || VIEWS[pos] ? (VIEWS[pos] ? pos : DEFAULT_VIEW[pos]) : "GND");
   }
   if (params.get("icao")) await load(params.get("icao"));
   $("viewTabs").innerHTML = Object.keys(VIEWS).map(v => `<button data-view="${v}">${VIEWS[v]}</button>`).join("");
