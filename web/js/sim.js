@@ -1,7 +1,7 @@
 // Traffic simulation: aircraft state machines, ground movement, pilots' calls and readbacks,
 // ATC positions with handoffs, AI controllers for unstaffed positions, squawks, readback errors.
 import { KT, FT, dist, hdgOf, angDiff, vecFromHdg } from "./airport.js";
-import { AIRLINES, TYPES, GA_TYPES, REG_PREFIX, LETTER_WORD, DESTS, AIRLINE_NAT, REG_NAT, rnd, rint, distKm, weighted, controllerNat } from "./data.js";
+import { AIRLINES, TYPES, GA_TYPES, HELI_TYPES, REG_PREFIX, LETTER_WORD, DESTS, AIRLINE_NAT, AIRLINE_TYPES, CARGO_TYPES, HOUR_WAVE, REG_NAT, rnd, rint, distKm, weighted, controllerNat } from "./data.js";
 import { standKey, parse, normalize, setTaxiNames } from "./commands.js";
 import { regionOf, makeStyle, callsign, spokenType, pilotCall, readback, ph, greeting, signOff, localHour, cap, NEUTRAL_STYLE, sayNumbers } from "./phrase.js";
 import { makeCrew } from "./voices.js";
@@ -12,6 +12,9 @@ const TAXI_SPD = 18 * KT, TURN_SPD = 7 * KT, PUSH_SPD = 1.3;
 const FINAL_SPAWN = 14000;      // m from threshold (combined mode)
 const APP_SPAWN = 25 * 1852;    // m from threshold when an approach position exists
 const NM = 1852;
+const TYPE_INFO = Object.fromEntries(TYPES.map(t => [t[0], t]));
+const isCargoStand = (s) => s.op === "cargo" || /cargo|freight/i.test(s.name);
+const standFits = (s, t) => !s || !s.types || !s.types.length || s.types.includes(t[2]) || (t[2] === "heavy" && s.types.includes("jets") && s.size && s.size >= "D");
 
 let nextId = 1;
 
@@ -54,8 +57,46 @@ export class Sim {
     this.vehNo = {};         // vehicle callsign counters per type
     this.lightLog = [];      // light-gun signals given {t, cs, color, mode, effect}
     setTaxiNames(apt.taxiNames);
+    this.occupancy = opts.occupancy ?? 0.7;   // share of stands with an aircraft on them
+    this.waves = opts.waves ?? true;          // time-of-day traffic peaks
+    this.serviceVehicles = opts.serviceVehicles ?? Math.max(0, Math.min(24, Math.round(apt.stands.length / 6)));
+    this.mix = null;                           // real traffic mix (OpenFlights), see setTrafficMix()
+    this.populated = opts.populate === false;  // true = never populate (tests)
     this.stats = { departures: 0, arrivals: 0, goArounds: 0, alerts: 0, rbErrors: 0, rbCaught: 0, missedRb: 0,
       conflicts: 0, delays: [], tx: {} };
+  }
+
+  // ---------- real traffic mix (OpenFlights) ----------
+  /** data: /api/traffic result {airlines:[{icao,callsign,nat,routes}], dests:[{icao,city,name,lat,lon}], pairs:[[al,dest,n]], cargo:[]} */
+  setTrafficMix(data) {
+    if (!data || !data.airlines || !data.airlines.length) { this.mix = null; return; }
+    const known = Object.fromEntries(AIRLINES.map(a => [a[0], a[1]]));
+    const dests = new Map(data.dests.map(d => [d.icao, [d.icao, d.city || d.name, d.lat, d.lon]]));
+    const pairs = new Map();
+    for (const [al, de, n] of data.pairs || []) if (dests.has(de)) (pairs.get(al) || pairs.set(al, []).get(al)).push([de, n]);
+    const cargo = new Set(data.cargo || []);
+    const airlines = data.airlines.filter(a => a.icao && (a.callsign || known[a.icao]) && pairs.has(a.icao))
+      .map(a => ({ icao: a.icao, tel: known[a.icao] || a.callsign, nat: a.nat || "", routes: a.routes || 1, cargo: cargo.has(a.icao) }));
+    this.mix = airlines.length ? { airlines, dests, pairs, cargo } : null;
+  }
+
+  /** Aircraft type for an airline on a route of `km`, fitting the stand. */
+  pickType(icao, km, stand, cargo) {
+    const fit = (t) => standFits(stand, t);
+    let pool = (cargo ? CARGO_TYPES : (AIRLINE_TYPES[icao] || [])).map(c => TYPE_INFO[c]).filter(Boolean);
+    if (pool.length) {
+      const ok = pool.filter(fit).filter(t => km == null || t[1] !== "H" || km > 1800 || pool.every(x => x[1] === "H"));
+      if (ok.length) return rnd(ok);
+    }
+    pool = TYPES.filter(t => !cargo || CARGO_TYPES.includes(t[0])).filter(fit);
+    if (!pool.length) pool = TYPES.filter(t => t[2] === "jets");
+    if (km != null) {
+      const want = km < 1600 ? ["A320", "B738", "A20N", "E190", "A21N", "BCS3", "A319", "E195"] : km < 4500 ? ["A321", "B738", "A21N", "B38M", "A320"] : ["B789", "A359", "A333", "B77W", "A388"];
+      const w = pool.filter(t => want.includes(t[0]));
+      if (w.length) return rnd(w);
+    }
+    if (pool.some(t => t[1] === "M") && Math.random() < 0.85) pool = pool.filter(t => t[1] === "M");
+    return rnd(pool);
   }
 
   // ---------- positions / frequencies ----------
@@ -85,21 +126,12 @@ export class Sim {
   }
 
   // ---------- spawning ----------
-  freeStands(ofKinds = ["gate"], ga = false) {
+  freeStands(ofKinds = ["gate"], ga = false, cargo = false) {
     const used = new Set(this.ac.map(a => a.stand).filter(Boolean));
-    return this.apt.stands.filter(s => !used.has(s) && ofKinds.includes(s.kind) && s.op !== "cargo" &&
-      !/maint|hangar|fuel|de-?ic|wash|engine|run-?up|cargo|freight/i.test(s.name) &&
-      (ga ? (s.kind !== "gate" || s.op === "general_aviation" || s.types.every(t => t === "props")) : s.op !== "general_aviation") &&
-      !this.ac.some(a => a.onGround && dist(a.pos, s.pos) < 40));
-  }
-
-  /** Pick a free stand and whether the flight is a light GA aircraft. */
-  pickStand() {
-    const gates = this.freeStands();
-    const ga = this.freeStands(["tie_down", "hangar", "misc", "gate"], true);
-    if (gates.length && (!ga.length || Math.random() < 0.85)) return { stand: rnd(gates), ga: false };
-    if (ga.length) return { stand: rnd(ga), ga: true };
-    return { stand: null, ga: !this.apt.stands.some(s => s.kind === "gate") };
+    return this.apt.stands.filter(s => !used.has(s) && ofKinds.includes(s.kind) && (cargo ? isCargoStand(s) : !isCargoStand(s)) &&
+      !/maint|hangar|fuel|de-?ic|wash|engine|run-?up/i.test(s.name) &&
+      (ga ? (s.kind !== "gate" || s.op === "general_aviation" || s.types.every(t => t === "props" || t === "helos")) : s.op !== "general_aviation") &&
+      !this.ac.some(a => a.onGround && !a.veh && dist(a.pos, s.pos) < 40));
   }
 
   crewFor(f, nat) {
@@ -128,42 +160,175 @@ export class Sim {
     return this.crewFor(f, REG_NAT[p] || "US");
   }
 
-  makeFlight(standTypes, ga) {
+  makeFlight(standTypes, ga, { cargo = false, stand = null } = {}) {
     if (ga) return this.makeGA();
-    let al, num, cs;
-    do {
-      al = rnd(AIRLINES); num = String(rint(1, 9) * (Math.random() < 0.5 ? 100 : 10) + rint(0, 99));
-      cs = al[0] + num;
-    } while (this.ac.some(a => a.cs === cs));
-    let pool = TYPES.filter(t => !standTypes || standTypes.includes(t[2]));
-    if (!pool.length) pool = TYPES.filter(t => t[2] === "jets");
-    if (pool.some(t => t[1] === "M") && Math.random() < 0.85) pool = pool.filter(t => t[1] === "M");
-    const ty = rnd(pool);
-    const near = DESTS.filter(d => {
-      const k = distKm(this.apt.d.lat, this.apt.d.lon, d[2], d[3]);
-      return d[0] !== this.apt.icao && k > 150 && k < (ty[1] === "H" ? 12000 : 3500);
-    });
-    const dest = rnd(near.length ? near : DESTS.filter(d => d[0] !== this.apt.icao));
+    const st = stand || (standTypes ? { types: standTypes } : null);
+    let al, num, cs, dest, nat;
+    const flightNo = () => String(rint(1, 9) * (Math.random() < 0.5 ? 100 : 10) + rint(0, 99));
+    if (this.mix) {
+      const pool = this.mix.airlines.filter(a => a.cargo === cargo);
+      const list = (pool.length ? pool : this.mix.airlines).map(a => [a, a.routes]);
+      let tries = 0;
+      do { const a = weighted(list); al = [a.icao, a.tel]; nat = a.nat; num = flightNo(); cs = al[0] + num; } while (this.ac.some(x => x.cs === cs) && ++tries < 20);
+      const pairs = this.mix.pairs.get(al[0]);
+      dest = pairs && pairs.length ? this.mix.dests.get(weighted(pairs)) : null;
+      nat = AIRLINE_NAT[al[0]] ? weighted(AIRLINE_NAT[al[0]]) : (nat || "GB");
+    } else {
+      do { al = rnd(AIRLINES); num = flightNo(); cs = al[0] + num; } while (this.ac.some(a => a.cs === cs));
+      nat = weighted(AIRLINE_NAT[al[0]] || [["GB", 1]]);
+    }
+    const km = dest ? distKm(this.apt.d.lat, this.apt.d.lon, dest[2], dest[3]) : null;
+    const ty = this.pickType(al[0], km, st, cargo);
+    if (!dest) {
+      const near = DESTS.filter(d => {
+        const k = distKm(this.apt.d.lat, this.apt.d.lon, d[2], d[3]);
+        return d[0] !== this.apt.icao && k > 150 && k < (ty[1] === "H" ? 12000 : 3500);
+      });
+      dest = rnd(near.length ? near : DESTS.filter(d => d[0] !== this.apt.icao));
+    }
     const f = {
-      id: nextId++, cs, tel: al[1], num, type: ty[0], wtc: ty[1], appSpd: ty[3] * KT, other: dest,
+      id: nextId++, cs, tel: al[1], num, type: ty[0], wtc: ty[1], appSpd: ty[3] * KT, other: dest, cargo,
       crossOk: new Set(), log: [],
     };
-    return this.crewFor(f, weighted(AIRLINE_NAT[al[0]] || [["GB", 1]]));
+    return this.crewFor(f, nat);
   }
 
-  spawnDeparture() {
-    const { stand: st, ga } = this.pickStand();
-    if (!st) return null;
-    const f = this.makeFlight(st.types, ga);
+  /** Local hour at the airport for the simulated clock. */
+  localHourNow() { return localHour(this.clockUtc + this.t * 1000, this.apt.d.lon); }
+  /** Traffic multiplier for the time of day (morning/evening peaks). */
+  wave() { return this.waves ? HOUR_WAVE[Math.floor(this.localHourNow()) % 24] : 1; }
+
+  /**
+   * Put aircraft on a share of the stands (airline mix, type by stand size, cargo on cargo stands, GA on GA
+   * stands). They are the next departures: spawnDeparture() wakes them up in random order.
+   */
+  populate(fraction = this.occupancy) {
+    this.populated = true;
+    const used = new Set(this.ac.map(a => a.stand).filter(Boolean));
+    const stands = this.apt.stands.filter(s => !used.has(s) && s.node != null && ["gate", "tie_down", "hangar", "misc"].includes(s.kind) &&
+      !/maint|hangar|fuel|de-?ic|wash|engine|run-?up/i.test(s.name));
+    for (let i = stands.length - 1; i > 0; i--) { const j = rint(0, i); [stands[i], stands[j]] = [stands[j], stands[i]]; }
+    const n = Math.round(Math.max(0, Math.min(1, fraction)) * stands.length);
+    let made = 0;
+    for (const st of stands.slice(0, n)) {
+      const ga = st.kind !== "gate" || st.op === "general_aviation" || (st.types.length && st.types.every(t => t === "props" || t === "helos"));
+      const cargo = !ga && isCargoStand(st);
+      const f = this.makeFlight(st.types, ga, { cargo, stand: st });
+      if (ga && st.types.every(t => t === "helos")) { const h = rnd(HELI_TYPES); f.type = h[0]; f.appSpd = h[3] * KT; f.heli = true; }
+      this.placeParked(f, st, true);
+      made++;
+    }
+    return made;
+  }
+
+  /** Put a just-woken aircraft back to sleep on its stand (tests, scenario editors). */
+  putBack(a) { if (a && a.state === "parked" && a.kind === "dep") { a.dormant = true; a.callAt = Infinity; a.lastCall = null; } }
+
+  /** A departure sitting on its stand. dormant: waits for spawnDeparture() to wake it. */
+  placeParked(f, st, dormant) {
     const us = this.region === "US";
     Object.assign(f, {
       kind: "dep", state: "parked", stand: st, pos: [...st.pos], hdg: st.hdg, spd: 0, alt: 0, onGround: true,
-      squawk: ga ? (us ? "1200" : "7000") : "2000", xpdr: ga ? "C" : "S", assignedSq: null, ifr: ga,
-      callAt: this.t + rint(4, 25), freq: this.split ? (ga ? "GND" : "DEL") : "ALL", cfl: ga ? 1500 : 5000,
+      squawk: f.ga ? (us ? "1200" : "7000") : "2000", xpdr: f.ga ? "C" : "S", assignedSq: null, ifr: f.ga, dormant,
+      callAt: dormant ? Infinity : this.t + rint(4, 25), freq: this.split ? (f.ga ? "GND" : "DEL") : "ALL", cfl: f.ga ? 1500 : 5000,
+      parkedAt: this.t - rint(0, 1800), gear: null,
     });
     this.ac.push(f);
     this.onEvent({ type: "spawn", ac: f });
     return f;
+  }
+
+  /** Ground equipment around a parked aircraft (drawn by the radar): bridge/stairs, fuel, catering, bags, bus, tug. */
+  equipment(a) {
+    if (!a.onGround || a.veh || a.human) return null;
+    const s = a.state;
+    if (a.kind === "dep" && (s === "push_req" || s === "pushing")) return s === "pushing" ? ["tug"] : ["tug", "stairs"];
+    if (s !== "parked" || !a.stand) return null;
+    const age = this.t - (a.parkedAt ?? this.t);
+    if (a.kind === "arr" && age > 1500) return null;
+    if (a.dormant && (a.id * 2654435761 >>> 0) % 3 === 0) return null;      // some just sit there
+    const gate = a.stand.kind === "gate" && !a.ga;
+    const out = [gate && a.stand.size && a.stand.size >= "C" && !isCargoStand(a.stand) ? "bridge" : "stairs"];
+    if (!a.ga) { if (age < 1200 || a.dormant) out.push("fuel"); if (gate && !isCargoStand(a.stand) && age < 900) out.push("catering"); out.push("baggage"); if (out[0] === "stairs" && !a.ga && !isCargoStand(a.stand)) out.push("bus"); }
+    return out;
+  }
+
+  /** A landed aircraft becomes the next departure after a turnaround (or leaves when the apron is full). */
+  turnaround(a) {
+    const parked = this.ac.filter(o => o.state === "parked" && o.kind === "dep").length;
+    const stands = this.apt.stands.filter(s => s.kind === "gate" || s.kind === "tie_down").length;
+    if (parked > this.occupancy * stands + 2 || Math.random() < 0.15) { a.gone = true; return; }
+    if (a.assignedSq) this.squawks.release(a.assignedSq, this.t);
+    const al = a.cs.slice(0, 3);
+    const pairs = this.mix && this.mix.pairs.get(al);
+    const dest = a.ga ? a.other : pairs && pairs.length ? this.mix.dests.get(weighted(pairs)) : rnd(DESTS.filter(d => d[0] !== this.apt.icao));
+    let num; do { num = String(rint(1, 9) * (Math.random() < 0.5 ? 100 : 10) + rint(0, 99)); } while (this.ac.some(x => x !== a && x.cs === al + num));
+    if (!a.ga) { a.num = num; a.cs = al + num; }
+    Object.assign(a, { kind: "dep", state: "parked", dormant: true, ifr: !!a.ga, assignedSq: null, squawk: a.ga ? a.squawk : "2000", xpdr: a.ga ? "C" : "S",
+      other: dest || a.other, callAt: Infinity, sid: null, cfl: a.ga ? 1500 : 5000, landClr: false, end: null, depEnd: null, calledIn: false, greeted: {},
+      atisReported: null, exitName: "", viaText: "", path: null, rbError: null, reqAt: null, strip: null, stripData: null, prepared: null,
+      freq: this.split ? (a.ga ? "GND" : "DEL") : "ALL", lastCall: null, handedOff: false, askedFreq: false, toClr: false, parkedAt: this.t });
+    a.crossOk.clear();
+    this.onEvent({ type: "turnaround", ac: a });
+  }
+
+  // ---------- service vehicles on the service roads ----------
+  ensureServiceVehicles() {
+    const have = this.ac.filter(a => a.veh && a.onRoad).length;
+    const want = this.apt.roads.length ? this.serviceVehicles : 0;
+    const kinds = ["fuel", "baggage", "bus", "catering", "baggage", "fuel"];
+    for (let i = have; i < want; i++) {
+      const n = this.apt.nearestRoadNode(this.apt.stands.length ? rnd(this.apt.stands).pos : this.apt.towerPos());
+      if (n < 0) break;
+      const v = this.spawnVehicle({ vtype: kinds[i % kinds.length], pos: this.apt.nodes[n], maxSpd: 7 + Math.random() * 4 });
+      v.onRoad = true; v.quiet = true; v.state = "roam"; v.node = n; v.pauseUntil = this.t + rint(0, 60);
+    }
+    for (const v of this.ac.filter(a => a.veh && a.onRoad).slice(want)) v.gone = true;
+  }
+
+  roam(v, dt) {
+    if (this.t < (v.pauseUntil || 0)) { v.spd = 0; return; }
+    if (!v.path || v.pi >= v.path.length) {
+      const from = this.apt.nearestRoadNode(v.pos);
+      let route = null;
+      for (let k = 0; k < 6 && !route; k++) {
+        const goal = this.apt.nearestRoadNode(rnd(this.apt.stands.length && Math.random() < 0.7 ? this.apt.stands : [{ pos: this.apt.nodes[rnd([...this.apt.roadAdj.keys()].filter(i => this.apt.roadAdj[i].length))] }]).pos);
+        if (goal >= 0 && goal !== from) route = this.apt.roadRoute(from, goal);
+      }
+      if (!route || route.length < 2) { v.pauseUntil = this.t + 30; return; }
+      v.path = [[...v.pos, null], ...route.map(n => [...this.apt.nodes[n], null])]; v.pi = 1;
+      return;
+    }
+    if (this.followPath(v, dt)) { v.pauseUntil = this.t + rint(20, 120); v.path = null; }
+  }
+
+  spawnDeparture(opts = {}) {
+    // the apron is populated: wake a parked aircraft (cargo stands get cargo flights, GA stands GA); airline
+    // flights far more often than the light aircraft, whatever the stand count says
+    let dormant = this.ac.filter(a => a.dormant && a.state === "parked" && !a.human && (opts.ga == null || !!a.ga === !!opts.ga));
+    if (dormant.length) {
+      const f = weighted(dormant.map(a => [a, a.ga ? 0.15 : a.cargo ? 0.6 : 1]));
+      f.dormant = false; f.callAt = this.t + rint(4, 25);
+      f.freq = this.split ? (f.ga ? "GND" : "DEL") : "ALL";
+      this.onEvent({ type: "wake", ac: f });
+      return f;
+    }
+    let { stand: st, ga } = this.pickStand();
+    if (opts.ga === false && ga) { const g = this.freeStands(); if (!g.length) return null; st = rnd(g); ga = false; }
+    if (!st) return null;
+    const f = this.makeFlight(st.types, ga, { cargo: !ga && isCargoStand(st), stand: st });
+    return this.placeParked(f, st, false);
+  }
+
+  /** Cargo stands take cargo flights; GA stands GA. Occasionally a cargo departure from a free cargo stand. */
+  pickStand() {
+    const gates = this.freeStands();
+    const cargoStands = this.freeStands(["gate", "misc"], false, true);
+    const ga = this.freeStands(["tie_down", "hangar", "misc", "gate"], true);
+    if (cargoStands.length && this.mix && this.mix.airlines.some(a => a.cargo) && Math.random() < 0.15) return { stand: rnd(cargoStands), ga: false };
+    if (gates.length && (!ga.length || Math.random() < 0.85)) return { stand: rnd(gates), ga: false };
+    if (ga.length) return { stand: rnd(ga), ga: true };
+    return { stand: null, ga: !this.apt.stands.some(s => s.kind === "gate") };
   }
 
   spawnArrival() {
@@ -174,7 +339,7 @@ export class Sim {
     const last = this.ac.filter(a => a.kind === "arr" && !a.onGround && a.state !== "goaround")
       .map(a => this.distToThr(a)).reduce((m, d) => Math.max(m, d), -1e9);
     if (last > spawnD - 5500) return null;
-    const f = this.makeFlight(stand ? stand.types : null, ga);
+    const f = this.makeFlight(stand ? stand.types : null, ga, { cargo: !!stand && !ga && isCargoStand(stand), stand });
     const pos = [e.thr[0] - e.v[0] * spawnD, e.thr[1] - e.v[1] * spawnD];
     const sq = ga ? (this.region === "US" ? "1200" : "7000") : this.squawks.next(this.t);
     Object.assign(f, {
@@ -305,14 +470,17 @@ export class Sim {
   // ---------- main loop ----------
   step(dt) {
     this.t += dt;
+    if (!this.populated) { this.populate(); this.ensureServiceVehicles(); }
+    const wave = Math.max(0.1, this.wave());
     if (this.t >= this.nextDep) {
       this.spawnDeparture();
-      this.nextDep = this.t + 3600 / Math.max(1, this.depPerHour) * (0.6 + Math.random() * 0.8);
+      this.nextDep = this.t + 3600 / Math.max(1, this.depPerHour * wave) * (0.6 + Math.random() * 0.8);
     }
     if (this.t >= this.nextArr) {
-      if (this.spawnArrival()) this.nextArr = this.t + 3600 / Math.max(1, this.arrPerHour) * (0.6 + Math.random() * 0.8);
+      if (this.spawnArrival()) this.nextArr = this.t + 3600 / Math.max(1, this.arrPerHour * wave) * (0.6 + Math.random() * 0.8);
       else this.nextArr = this.t + 20;
     }
+    if (Math.floor(this.t / 30) !== Math.floor((this.t - dt) / 30)) this.ensureServiceVehicles();
     if (this.overflights && this.t >= this.nextOvf) {
       this.spawnOverflight();
       this.nextOvf = this.t + 3600 / Math.max(1, this.ovfPerHour) * (0.6 + Math.random() * 0.8);
@@ -347,7 +515,8 @@ export class Sim {
     if (s === "circuit") {
       this.circuitMove(a, dt);
     } else if (a.kind === "dep") {
-      if (s === "parked" && this.t >= a.callAt && a.ga) {
+      if (s === "parked" && a.dormant) { /* waiting on the stand for its slot */ }
+      else if (s === "parked" && this.t >= a.callAt && a.ga) {
         this.call(a, "gaTaxi", { dest: a.other[1] }, "GND");
         a.state = "taxi_req";
       } else if (s === "parked" && this.t >= a.callAt) {
@@ -443,7 +612,8 @@ export class Sim {
         this.call(a, "stillWaitingGeneric", { what: `request taxi to stand ${a.stand ? a.stand.name : ""}`, greet: "" }, "GND");
         a.callAt = this.t + 120;
       } else if (s === "parked" && this.t - a.parkedAt > 45) {
-        a.gone = true; this.stats.arrivals++;
+        if (!a.counted) { a.counted = true; this.stats.arrivals++; }
+        if (this.t - a.parkedAt > rint(1500, 2400)) this.turnaround(a);
       }
     }
     // generic: stopped at a runway crossing while taxiing
@@ -670,6 +840,7 @@ export class Sim {
   updateVehicle(v, dt) {
     const t = v.target;
     if (v.state === "idle") return;
+    if (v.state === "roam") { this.roam(v, dt); return; }
     if (v.state === "toAircraft") {
       const done = this.followPath(v, dt);
       this.vehicleHoldCall(v);
@@ -890,6 +1061,8 @@ export class Sim {
     const v = vecFromHdg(a.hdg);
     for (const o of this.ac) {
       if (o === a || !o.onGround) continue;
+      if (o.onRoad && !a.onRoad) continue;           // service roads run next to the taxiways; vehicles there do not block aircraft
+      if (o.state === "parked" && o.stand && dist(o.pos, o.stand.pos) < 5) continue;   // aircraft on their stands are passed by
       if (a.veh && o === a.target) continue;        // the car drives up to its aircraft, and its follower is behind it
       if (o.leader === a) continue;
       if (a.leader === o && o.state !== "leading") continue;   // the car has stepped aside at the stand
@@ -1062,7 +1235,7 @@ export class Sim {
         }
       }
     }
-    const g = this.ac.filter(o => o.onGround);
+    const g = this.ac.filter(o => o.onGround && !o.onRoad && !(o.state === "parked"));
     for (let i = 0; i < g.length; i++) for (let j = i + 1; j < g.length; j++) {
       if (g[i].leader === g[j] || g[j].leader === g[i] || (g[i].veh && g[i].serving === g[j]) || (g[j].veh && g[j].serving === g[i])) continue;
       if (dist(g[i].pos, g[j].pos) < 30 && (g[i].spd > 0.5 || g[j].spd > 0.5) && !this.alerted.has(`gc${g[i].cs}${g[j].cs}`)) {
@@ -1603,6 +1776,7 @@ export class Sim {
       dthr: a.kind === "arr" && a.state === "final" ? this.distToThr(a) : null, strip: a.strip || null,
       stripData: a.stripData || null, callingUntil: a.callingUntil || 0, vfr: !!a.ga && a.kind !== "arr",
       veh: !!a.veh, vtype: a.vtype || "", targetCs: a.targetCs || "", standTo: a.standTo || "", leader: a.leader ? a.leader.cs : "",
+      quiet: !!a.quiet, onRoad: !!a.onRoad, dormant: !!a.dormant, cargo: !!a.cargo, gear: this.equipment(a), standKind: a.stand ? a.stand.kind : "",
       via: a.viaText || "", exit: a.exitName || "", holdRwy: a.holdRwyName || "", landClr: !!a.landClr, toClr: !!a.toClr, taxiTo: a.taxiTo || "",
       atStop: !!a.atStop, holdPos: !!a.holdPos, nordo: !!a.nordo, mayday: !!a.mayday, circuitLeg: a.circuitLeg || "", returned: !!a.returned,
       waiting: a.reqAt != null ? Math.round(this.t - a.reqAt) : null, rb: a.rbError && !a.rbError.fixed ? { label: a.rbError.label, missed: !!a.rbError.missed, wrong: a.rbError.wrong, right: a.rbError.right } : null,
@@ -1612,7 +1786,7 @@ export class Sim {
   }
 
   /** The aircraft on a position's frequency (for voice casting: no two identical voices on one frequency). */
-  onFrequency(pos) { return this.ac.filter(a => !a.veh ? this.hears(a, pos) : a.freq === pos || !this.split); }
+  onFrequency(pos) { return this.ac.filter(a => !a.quiet && (!a.veh ? this.hears(a, pos) : a.freq === pos || !this.split)); }
 }
 
 const capFirstObj = (r) => ({ d: cap(r.d), s: cap(r.s) });

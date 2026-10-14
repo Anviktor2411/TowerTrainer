@@ -15,6 +15,7 @@ import { suggestSid, procLines } from "./procs.js";
 import { nextExpected, callsignText } from "./advisor.js";
 import { statePhrase, issueMarkers } from "./labels.js";
 import { buildAtis, parseMetar, atisSummary } from "./atis.js";
+import { daylight } from "./daylight.js";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -31,7 +32,7 @@ const PRESET_EFFECT = { clean: 0, good: 0.85, distant: 1, old: 0.95 };
 
 const DEFAULTS = {
   accents: "natural", rate: 1, effect: 0.85, preset: "good", voices: true, blocked: true, rbErr: 4, sayAgain: 2, oldAtis: 10, events: false,
-  dep: 10, arr: 8, coach: false, lang: "en", graph: false, monitor: [],
+  dep: 10, arr: 8, coach: false, lang: "en", graph: false, monitor: [], occupancy: 70, vehicles: -1, waves: true, osm: true, realMix: true, nightAuto: true,
   staff: { mode: "combined", keys: ["TWR"] },
   xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false },
 };
@@ -151,7 +152,52 @@ function bootMain() {
     renderAtis();
     channel && channel.postMessage({ type: "airport", icao });
     loadProcedures(icao);
+    loadTraffic(icao);
+    loadOsm(icao);
   }
+
+  /** Airlines and destinations that really serve the airport (OpenFlights, cached by the server). */
+  let trafficMix = null;
+  async function loadTraffic(icao) {
+    trafficMix = null;
+    try { trafficMix = await (await fetch(`/api/traffic/${icao}`)).json(); } catch { trafficMix = null; }
+    if (!sim || apt.icao !== icao) return;
+    applyTraffic();
+  }
+  function applyTraffic() {
+    if (!sim) return;
+    sim.setTrafficMix(settings.realMix ? trafficMix : null);
+    if (sim.mix) {
+      const top = sim.mix.airlines.slice(0, 6).map(a => a.tel).join(", ");
+      sysLog(`Traffic mix from OpenFlights: ${sim.mix.airlines.length} airlines, ${sim.mix.dests.size} destinations (${top}…).`);
+    } else if (settings.realMix && trafficMix && trafficMix.error) sysLog(`Traffic mix: ${trafficMix.error} — using the built-in airline list.`);
+  }
+  /** Terminals, hangars and the tower from OpenStreetMap (cached by the server; nothing when offline). */
+  async function loadOsm(icao) {
+    radar.setOsm(null); radar.credit = "";
+    if (!settings.osm) return;
+    try {
+      const d = await (await fetch(`/api/osm/${icao}`)).json();
+      if (!apt || apt.icao !== icao) return;
+      if (d && d.buildings && d.buildings.length) {
+        radar.setOsm(d); radar.credit = d.credit || "© OpenStreetMap contributors (ODbL)";
+        if (d.tower) apt._tower = d.tower;
+        sysLog(`${d.buildings.length} buildings from OpenStreetMap (${d.credit}).`);
+      } else if (d && d.error) sysLog(`OpenStreetMap buildings unavailable (${d.error.split(":")[0]}) — map without buildings.`);
+    } catch { /* offline */ }
+  }
+  /** Day/night from the simulated clock and the weather tint from the METAR, re-evaluated every few seconds. */
+  function updateSky() {
+    if (!sim || !apt) return;
+    const dl = settings.nightAuto ? daylight(apt.d.lat, apt.d.lon, sim.clockUtc + sim.t * 1000) : "day";
+    const night = dl === "night" || (dl === "dusk" && sim.t % 2 < 1 && false);
+    if (radar.night !== night) { radar.night = night; radar.staticKey = null; sysLog(night ? "Night: runway and taxiway lighting on." : "Daylight."); }
+    const dec = parseMetar(metar && metar.rawOb ? metar.rawOb : "");
+    const codes = dec.wx.flatMap(w => w.codes);
+    radar.wx = { vis: dec.cavok ? 10000 : dec.vis, fog: codes.includes("FG") || codes.includes("BR") || (dec.vis != null && dec.vis < 1500),
+      rain: codes.some(c => ["RA", "DZ", "SH", "TS"].includes(c)), snow: codes.some(c => ["SN", "SG", "PL"].includes(c)), lvp: !!sim.lvp };
+  }
+  setInterval(updateSky, 3000);
 
   /** SIDs/STARs from local navdata (CIFP / EuroScope sector files) for Delivery suggestions and the radar. */
   async function loadProcedures(icao) {
@@ -191,11 +237,15 @@ function bootMain() {
       positions: split ? positions : null, staffing,
       rates: { readbackError: settings.rbErr / 100, sayAgain: settings.sayAgain / 100, oldAtis: settings.oldAtis / 100 },
       events: settings.events, clockUtc: Date.now(),
+      occupancy: (+settings.occupancy || 0) / 100, waves: !!settings.waves,
+      serviceVehicles: +settings.vehicles >= 0 ? +settings.vehicles : undefined,
       onRadio: (m) => { radio.enqueue(m); bridges.transmission(m); },
       onAlert: alertBox,
       onEvent: onSimEvent,
     });
     sim.depPerHour = +settings.dep; sim.arrPerHour = +settings.arr;
+    sim.setTrafficMix(settings.realMix ? trafficMix : null);
+    updateSky();
     if (metar && typeof metar.wdir === "number") sim.wind = { dir: metar.wdir, spd: metar.wspd || 0 };
     if ($("rwySel").value) sim.setRunway($("rwySel").value);
     radio.onFrequency = (pos) => (sim ? sim.onFrequency(pos) : []);
@@ -704,10 +754,13 @@ function bootMain() {
     ["setAccents", "accents"], ["setRate", "rate"], ["setEffect", "effect"], ["setPreset", "preset"], ["setVoices", "voices", "checked"], ["setBlocked", "blocked", "checked"],
     ["setRbErr", "rbErr"], ["setSayAgain", "sayAgain"], ["setOldAtis", "oldAtis"], ["setEvents", "events", "checked"],
     ["depRate", "dep"], ["arrRate", "arr"], ["setCoach", "coach", "checked"], ["setLang", "lang"], ["graph", "graph", "checked"],
+    ["setOccupancy", "occupancy"], ["setVehicles", "vehicles"], ["setWaves", "waves", "checked"], ["setOsm", "osm", "checked"], ["setRealMix", "realMix", "checked"], ["setNight", "nightAuto", "checked"],
   ];
   function fillSettings() {
     for (const [id, k, prop] of bindings) $(id)[prop || "value"] = settings[k];
     $("setRateV").textContent = (+settings.rate).toFixed(2); $("setEffectV").textContent = Math.round(settings.effect * 100) + "%";
+    $("setOccupancyV").textContent = settings.occupancy + "%";
+    if (+settings.vehicles < 0 && sim) $("setVehicles").value = sim.serviceVehicles;
     const x = settings.xr;
     $("xrEnabled").checked = x.enabled; $("xrHost").value = x.host; $("xrPort").value = x.port; $("xrPass").value = x.password;
     $("xrCs").value = x.cs || (apt ? `${apt.icao}_TWR` : ""); $("xrFreq").value = x.freq || (apt && apt.freq.tower ? fmtFreq(apt.freq.tower.mhz) : "");
@@ -725,7 +778,14 @@ function bootMain() {
     if (sim) {
       sim.rates = { readbackError: settings.rbErr / 100, sayAgain: settings.sayAgain / 100, oldAtis: settings.oldAtis / 100 };
       sim.events = settings.events; sim.depPerHour = +settings.dep; sim.arrPerHour = +settings.arr;
+      sim.waves = !!settings.waves; sim.occupancy = (+settings.occupancy || 0) / 100;
+      if (+settings.vehicles >= 0) sim.serviceVehicles = +settings.vehicles;
+      if (changedId === "setRealMix") applyTraffic();
+      if (changedId === "setOccupancy" && sim.occupancy > sim.ac.filter(a => a.state === "parked").length / Math.max(1, apt.stands.length)) sim.populate(sim.occupancy - sim.ac.filter(a => a.state === "parked").length / Math.max(1, apt.stands.length));
     }
+    if (changedId === "setOsm" && apt) loadOsm(apt.icao);
+    if (changedId === "setNight") updateSky();
+    $("setOccupancyV").textContent = settings.occupancy + "%";
     radar.showGraph = settings.graph; radar.staticKey = null;
     $("coachToggle").checked = settings.coach; renderCoach();
     $("setRateV").textContent = (+settings.rate).toFixed(2); $("setEffectV").textContent = Math.round(settings.effect * 100) + "%";

@@ -25,6 +25,8 @@ from socketserver import ThreadingMixIn
 import aptdat
 import fsd
 import navdata
+import openflights
+import osm
 from urllib.parse import parse_qs, urlparse
 
 FSD = None       # fsd.FSDServer
@@ -268,6 +270,14 @@ class Handler(BaseHTTPRequestHandler):
             m = re.fullmatch(r"/api/airport/([A-Za-z0-9]{3,7})", path)
             if m:
                 return self.send(200, load_airport(m.group(1)))
+            m = re.fullmatch(r"/api/osm/([A-Za-z0-9]{3,7})", path)
+            if m:   # buildings from OpenStreetMap (cached; empty when offline)
+                apt = load_airport(m.group(1))
+                pts = [s["pos"] for s in apt["stands"]] + [e["pos"] for r in apt["runways"] for e in r["ends"]]
+                return self.send(200, osm.load(m.group(1), apt["lat"], apt["lon"], CACHE, refresh=q.get("refresh") == "1", points=pts))
+            m = re.fullmatch(r"/api/traffic/([A-Za-z0-9]{3,7})", path)
+            if m:   # airlines and destinations that really serve the airport (OpenFlights, cached; empty when offline)
+                return self.send(200, openflights.load(m.group(1), CACHE, refresh=q.get("refresh") == "1"))
             m = re.fullmatch(r"/api/metar/([A-Za-z0-9]{3,7})", path)
             if m:
                 try:

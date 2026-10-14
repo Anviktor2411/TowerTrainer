@@ -22,7 +22,7 @@ try {
   await p.eval(`TT.applyStaffing("split", ["TWR"])`);
   ok(await p.eval(`TT.sim.split && TT.sim.userWorks("TWR") && !TT.sim.userWorks("GND")`), "split staffing: TWR is mine, GND is AI");
   ok(await p.eval(`document.querySelectorAll("#posTabs .tab").length === 5 && !!document.querySelector('#posTabs .tab.ai[data-pos="GND"]')`), "five position tabs, AI ones marked");
-  await p.eval(`(() => { const s = TT.sim; s.nextDep = s.nextArr = 1e9; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture(); if (d && !d.ga) { window.dep = d; break; } } window.dep.callAt = s.t + 1; for (let i = 0; i < 25000 && !(window.dep.freq === "TWR" && window.dep.state === "holding"); i++) s.step(0.1); })()`);
+  await p.eval(`(() => { const s = TT.sim; s.nextDep = s.nextArr = 1e9; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture({ ga: false }); if (d && !d.ga) { window.dep = d; break; } if (d) s.putBack(d); } window.dep.callAt = s.t + 1; for (let i = 0; i < 25000 && !(window.dep.freq === "TWR" && window.dep.state === "holding"); i++) s.step(0.1); })()`);
   ok(await p.eval(`dep.freq === "TWR" && dep.state === "holding"`), "AI Delivery+Ground brought the departure to my Tower frequency");
   await p.eval(`TT.setActive("GND")`);
   ok(await p.waitFor(`/AI/.test(document.getElementById("log").innerText) && /taxi to holding point/.test(document.getElementById("log").innerText)`, 40000), "Ground tab shows the AI controller's taxi instruction");
@@ -37,7 +37,7 @@ try {
   const pop = await br.newPage("http://localhost:8780/?popout=GND&icao=EETN");
   ok(await pop.waitFor("window.TT && TT.state && TT.state.ac.length > 0", 15000), "pop-out receives the sim state " + (p.errors.join(" | ") || "") + (pop.errors.join(" | ") || ""));
   ok(await pop.waitFor(`document.getElementById("posHead").innerText.includes("EETN_GND")`), "pop-out shows the Ground position");
-  const d2 = await p.eval(`(() => { const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture(); if (d && !d.ga) { d.freq = "GND"; d.state = "push_req"; d.ifr = true; return d.tel + " " + d.num; } } })()`);
+  const d2 = await p.eval(`(() => { const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture({ ga: false }); if (d && !d.ga) { d.freq = "GND"; d.state = "push_req"; d.ifr = true; return d.tel + " " + d.num; } if (d) s.putBack(d); } })()`);
   await pop.eval(`document.getElementById("cmd").value = ${JSON.stringify(d2 + " push and start approved")}; document.getElementById("cmdForm").requestSubmit();`);
   ok(await p.waitFor(`TT.sim.ac.some(a => a.tel + " " + a.num === ${JSON.stringify(d2)} && a.state === "pushing")`, 5000), "transmission typed in the pop-out is applied by the main window");
   await sleep(600);
@@ -49,7 +49,7 @@ try {
   // ---- Delivery view, plain-language labels, info panel, light signals, voice status ----
   await p.eval(`TT.setView("DEL")`); await sleep(500);
   ok(await p.eval(`!document.getElementById("delPanel").classList.contains("hidden") && document.querySelectorAll("#viewTabs button").length === 5`), "Delivery view tab shows the clearance panel");
-  await p.eval(`(() => { TT.app.setSpeed(0); const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture(); if (d && !d.ga) { d.callAt = s.t + 1; window.delAc = d; break; } } for (let i = 0; i < 25; i++) s.step(0.1); })()`);
+  await p.eval(`(() => { TT.app.setSpeed(0); const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture({ ga: false }); if (d && !d.ga) { d.callAt = s.t + 1; window.delAc = d; break; } if (d) s.putBack(d); } for (let i = 0; i < 25; i++) s.step(0.1); })()`);
   await p.waitFor(`/squawk [0-9]{4}/.test(document.getElementById("clrList").innerText)`, 5000);
   ok(await p.eval(`/squawk [0-9]{4}/.test(document.getElementById("clrList").innerText) && /climb [0-9]{4} ft/.test(document.getElementById("clrList").innerText)`), "clearance list shows SID/climb/next squawk suggestions: " + (await p.eval(`JSON.stringify({ st: delAc.state, ga: delAc.ga, kind: delAc.kind, lc: delAc.lastCall, t: TT.sim.t, n: TT.sim.ac.length, view: TT.radar.view })`)) + " " + (await p.eval(`document.getElementById("clrList").innerText.split("\\n").slice(0, 2).join(" | ")`)));
   await p.eval(`TT.select(delAc.id)`); await sleep(300);

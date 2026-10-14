@@ -97,6 +97,7 @@ export class Radar {
     this.links = line(apt.standLinks.map(([a, b]) => [apt.nodes[a], apt.nodes[b]]));
     this.roads = line(apt.roads.map(e => [apt.nodes[e.a], apt.nodes[e.b]]));
     this.centrePts = (d.lines || []).flatMap(l => l.filter((q, i) => i % 2 === 0));   // taxiway centreline lights at night
+    this.edgePts = (d.edgeLines || []).flatMap(l => l.filter((q, i) => i % 3 === 0));   // blue taxiway edge lights at night
     this.labels = [];
     for (const e of apt.edges) {
       if (!e.name || e.runway || e.len < 30 || e.generated) continue;
@@ -278,9 +279,11 @@ export class Radar {
       if (k > 0.1) { ctx.strokeStyle = C.lead; ctx.lineWidth = 0.9 / k; ctx.stroke(this.leadLines); }
       ctx.strokeStyle = C.hold; ctx.lineWidth = 1.5 / k; ctx.stroke(this.holdLines);
       ctx.strokeStyle = C.ilsHold; ctx.lineWidth = 1.5 / k; ctx.setLineDash([4 / k, 2 / k]); ctx.stroke(this.ilsHoldLines); ctx.setLineDash([]);
-      if (this.night && k > 0.12) {            // green taxiway centreline lights
+      if (this.night && k > 0.12) {            // green taxiway centreline lights, blue edge lights
         ctx.fillStyle = "#4dff7a"; const px = Math.max(0.7, 1.2 / k);
         for (const q of this.centrePts) ctx.fillRect(q[0] - px / 2, q[1] - px / 2, px, px);
+        ctx.fillStyle = "#4f7dff";
+        for (const q of this.edgePts) ctx.fillRect(q[0] - px / 2, q[1] - px / 2, px, px);
       }
     }
     if (this.showGraph) {
@@ -505,9 +508,30 @@ export class Radar {
     ctx.globalAlpha = a._dim || 1;
     ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1.5;
     if (a.veh) this.drawVehicle(a, col);
-    else if (this.useSilhouette(a)) this.drawSilhouette(a, col);
+    else if (this.useSilhouette(a)) { if (a.gear && a.gear.length && this.scale > 0.3) this.drawEquipment(a); this.drawSilhouette(a, col); }
     else this.drawRadarSymbol(a, col);
     if (blink) { ctx.beginPath(); ctx.arc(0, 0, 12, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.restore();
+  }
+
+  /** Turnaround equipment around a parked aircraft (metres, in the aircraft's frame): jet bridge or stairs at the
+   *  left front door, fuel truck under the right wing, catering at the right front door, baggage carts behind the
+   *  left wing, a bus by the stairs, the pushback tug at the nose. */
+  drawEquipment(a) {
+    const ctx = this.ctx, k = this.scale;
+    const [S, L, shape] = AC_DIM[a.type] || [35, 38, "airliner"];
+    const fw = shape === "widebody" ? 6 : shape === "ga" ? 1.3 : 4;
+    ctx.save(); ctx.rotate(a.hdg * Math.PI / 180); ctx.scale(k, k);
+    const box = (x, y, w, h, col, border) => { ctx.fillStyle = col; ctx.fillRect(x - w / 2, y - h / 2, w, h); if (border) { ctx.strokeStyle = border; ctx.lineWidth = 0.3; ctx.strokeRect(x - w / 2, y - h / 2, w, h); } };
+    for (const g of a.gear) {
+      if (g === "bridge") { box(-fw / 2 - 9, -L * 0.3, 18, 3.6, this.night ? "#2a3240" : "#3f4b5c", "#6a7a8e"); box(-fw / 2 - 18, -L * 0.3, 4, 6, "#4b5869"); }
+      else if (g === "stairs") box(-fw / 2 - 2.6, -L * 0.3, 4.2, 2.2, "#aab4bf");
+      else if (g === "fuel") box(S * 0.22, L * 0.08, 9, 2.8, "#d9a53d");
+      else if (g === "catering") box(fw / 2 + 2.8, -L * 0.3, 7, 2.6, "#b0e07a");
+      else if (g === "baggage") { for (let i = 0; i < 3; i++) box(-S * 0.18, L * 0.14 + i * 3.4, 3, 1.6, "#c8c8c8"); box(-S * 0.18, L * 0.14 - 3.6, 3.6, 2, "#8c96a0"); }
+      else if (g === "bus") box(-S * 0.3, -L * 0.46, 11, 2.6, "#7fc7ff");
+      else if (g === "tug") box(0, -L / 2 - 3.2, 2.6, 4.4, "#ffd04a", "#111");
+    }
     ctx.restore();
   }
 
@@ -601,6 +625,8 @@ export class Radar {
     const kt = Math.round(a.spd / 0.5144);
     const lines = [{ t: `${a.cs}${a.wtc && a.wtc !== "L" && !a.veh ? "/" + a.wtc : ""}${a.human ? " LIVE" : ""}`, col, font: FB }];
     const hovered = this.hover && this.hover.id === a.id;
+    if (a.quiet && !sel && !hovered) return [];      // service vehicles: name on hover only
+    if (a.state === "parked" && !sel && !hovered && !a.nordo && !a.mayday && (this.scale < 0.25 || a.dormant)) return this.scale > 0.08 ? [lines[0]] : [];
     // parked / ground targets on a radar picture or a zoomed-out ground picture: callsign only, like a real label filter
     if (!sel && !hovered && a.onGround && (this.radarView || this.scale < 0.05) && !a.nordo && !a.mayday && !(a.warn && a.warn.length)) return lines;
     const compact = this.scale < 0.05 && !sel && !this.radarView;
@@ -652,6 +678,7 @@ export class Radar {
       if (!chosen) {
         for (const off of LABEL_OFFSETS) { const b = this.boxFor(v.s, off, lines); if (!overlaps(b)) { chosen = off; v.box = b; break; } }
       }
+      if (!chosen && (a.state === "parked" || a.quiet) && !sel) { v.lines = []; v.off = prev || LABEL_OFFSETS[0]; v.box = { x: 0, y: 0, w: 0, h: 0 }; continue; }   // no room: a parked aircraft keeps quiet
       if (!chosen) { chosen = prev || LABEL_OFFSETS[0]; v.box = this.boxFor(v.s, chosen, lines); }
       this.autoOff.set(a.id, chosen);
       v.off = chosen; placed.push(v.box);
@@ -662,7 +689,7 @@ export class Radar {
   drawLabel(a, s, sel) {
     const ctx = this.ctx, C = this.C;
     const v = this._layout && this._layout.get(a.id);
-    if (!v) return;
+    if (!v || !v.lines.length) return;
     const { off, lines, box } = v;
     const x = s[0] + off[0], y = s[1] + off[1];
     ctx.save(); ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);

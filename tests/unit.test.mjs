@@ -251,6 +251,51 @@ ok(notes.some(x => /kutsung/i.test(x.msg)), "coach in Estonian");
   ok(/130\/7 · 10km\+ · -RA · 9\/8 · Q1015/.test(atisSummary(mt)), "summary line: " + atisSummary(mt));
 }
 
+// ---------- a living apron: parked aircraft, real traffic mix, turnaround, waves, service vehicles ----------
+{
+  sim = new Sim(apt, { onRadio: () => {}, onAlert: () => {}, occupancy: 0.6 }); sim.setRunway("26"); sim.nextDep = sim.nextArr = 1e9;
+  sim.setTrafficMix({ airlines: [{ icao: "BTI", callsign: "Airbaltic", nat: "LV", routes: 8 }, { icao: "RYR", callsign: "Ryanair", nat: "IE", routes: 4 }, { icao: "DHK", callsign: "World Express", nat: "GB", routes: 1 }, { icao: "ZZZ", callsign: "", routes: 9 }],
+    dests: [{ icao: "EVRA", city: "Riga", lat: 56.92, lon: 23.97 }, { icao: "EGSS", city: "Stansted", lat: 51.88, lon: 0.23 }, { icao: "EDDP", city: "Leipzig", lat: 51.43, lon: 12.24 }],
+    pairs: [["BTI", "EVRA", 5], ["BTI", "EGSS", 1], ["RYR", "EGSS", 4], ["DHK", "EDDP", 1]], cargo: ["DHK"] });
+  ok(sim.mix && sim.mix.airlines.length === 3 && sim.mix.airlines.find(a => a.icao === "BTI").tel === "Air Baltic", "traffic mix loaded; known airlines keep their telephony (" + sim.mix.airlines.map(a => a.tel).join(", ") + ")");
+  sim.step(0.1);
+  const parked = sim.ac.filter(a => a.state === "parked" && a.dormant);
+  const eligible = apt.stands.filter(s => ["gate", "tie_down", "hangar", "misc"].includes(s.kind) && !/maint|hangar|fuel|de-?ic|wash|engine|run-?up/i.test(s.name)).length;
+  ok(Math.abs(parked.length - Math.round(0.6 * eligible)) <= 1, `60 % of ${eligible} stands populated: ${parked.length} parked aircraft`);
+  ok(parked.every(a => a.stand && dist(a.pos, a.stand.pos) < 1 && Math.abs(a.hdg - a.stand.hdg) < 0.5), "parked aircraft sit on their stands facing the stand heading");
+  const airlines = new Set(parked.filter(a => !a.ga).map(a => a.cs.slice(0, 3)));
+  ok([...airlines].every(c => ["BTI", "RYR", "DHK"].includes(c)) && airlines.has("BTI"), "airlines from the mix only: " + [...airlines].join(","));
+  ok(parked.filter(a => !a.ga).every(a => ["EVRA", "EGSS", "EDDP"].includes(a.other[0])), "destinations from the mix");
+  ok(parked.filter(a => a.cs.startsWith("BTI")).every(a => a.type === "BCS3"), "airBaltic flies the A220 (fleet table)");
+  const cargoStands = apt.stands.filter(s => s.op === "cargo" || /cargo|freight/i.test(s.name));
+  const cargoAc = parked.filter(a => a.cargo);
+  ok(!cargoStands.length || cargoAc.every(a => a.stand && (a.stand.op === "cargo" || /cargo/i.test(a.stand.name)) && a.cs.startsWith("DHK")), `cargo flights only on the ${cargoStands.length} cargo stands (${cargoAc.length})`);
+  const vehs = sim.ac.filter(a => a.veh && a.onRoad);
+  ok(vehs.length === sim.serviceVehicles && vehs.length > 0, `${vehs.length} service vehicles on the roads`);
+  run(sim, 120);
+  ok(vehs.some(v => v.spd > 0 || v.path), "service vehicles drive around");
+  ok(vehs.every(v => !apt.runways.some(r => apt.onRunway(v.pos, r, 2))), "service vehicles never on a runway");
+  // the next departure is one of the parked aircraft
+  const before = sim.ac.length;
+  const w = sim.spawnDeparture();
+  ok(w && !w.dormant && parked.includes(w) && sim.ac.length === before, "spawnDeparture wakes a parked aircraft instead of inventing one: " + w.cs);
+  run(sim, 40, () => w.state === "clr_req" || w.state === "taxi_req");
+  ok(w.state === "clr_req" || w.state === "taxi_req", "the woken aircraft calls: " + w.state);
+  // an arrival parks, then turns round into a dormant departure with a new flight number
+  const arr2 = ifrArr(sim); arr2.landClr = true; const oldCs = arr2.cs;
+  run(sim, 900, () => arr2.state === "vacated");
+  sim.respond(arr2, parse(`${arr2.cs} taxi to stand ${arr2.stand.name}`, sim.ac).ins, { text: "" });
+  run(sim, 2400, () => arr2.state === "parked");
+  ok(arr2.state === "parked", "arrival parked: " + arr2.state);
+  run(sim, 2700, () => arr2.kind === "dep" || arr2.gone);
+  ok((arr2.kind === "dep" && arr2.dormant && arr2.cs !== oldCs && arr2.cs.startsWith(oldCs.slice(0, 3))) || arr2.gone, `turnaround: ${oldCs} became ${arr2.gone ? "(left, apron full)" : arr2.cs + " waiting for its slot"}`);
+  // time-of-day waves
+  sim.waves = true; sim.clockUtc = Date.UTC(2026, 5, 20, 5, 0); sim.t = 0;        // ~07 local at EETN (UTC+1.65 solar)
+  const peak = sim.wave(); sim.clockUtc = Date.UTC(2026, 5, 20, 0, 0); const night = sim.wave();
+  ok(peak > 1.2 && night < 0.4, `morning peak ${peak} vs night ${night}`);
+  sim.waves = false; ok(sim.wave() === 1, "waves off = flat rate");
+}
+
 // ---------- NORDO (7600): light signals, circuit rejoin, follow-me ----------
 {
   const rad2 = [];
@@ -317,7 +362,7 @@ ok(notes.some(x => /kutsung/i.test(x.msg)), "coach in Estonian");
   ok(nb.state === "parked", "aircraft followed the car onto the stand: " + nb.state + (crossings.length ? " (crossed runway " + crossings.join(", ") + " on the car's clearance)" : ""));
   run(sim, 600, () => nb.followMe.gone);
   ok(nb.followMe.gone, "follow-me returned to base and left");
-  ok(!sim.ac.some(a => a.veh), "no vehicle left behind");
+  ok(!sim.ac.some(a => a.veh && !a.onRoad), "no follow-me left behind (" + sim.ac.filter(a => a.veh && a.onRoad).length + " service vehicles roam the roads)");
   // a normal aircraft also complies with a light signal and acknowledges
   const nc = ifr(sim); nc.state = "holding"; nc.depEnd = sim.depEnd; nc.ifr = true;
   const rr = sim.respond(nc, parse(`${nc.cs} light red steady`, sim.ac).ins, { text: "" });

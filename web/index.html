@@ -115,6 +115,14 @@
       <label>Departures/h <input id="depRate" type="number" min="0" max="40"></label>
       <label>Arrivals/h <input id="arrRate" type="number" min="0" max="40"></label>
     </fieldset>
+    <fieldset><legend>Airport &amp; traffic</legend>
+      <label>Stands occupied <input id="setOccupancy" type="range" min="0" max="100" step="5"> <span id="setOccupancyV"></span></label>
+      <label>Service vehicles <input id="setVehicles" type="number" min="0" max="40"></label>
+      <label><input type="checkbox" id="setWaves"> Time-of-day traffic peaks</label>
+      <label><input type="checkbox" id="setRealMix"> Real airlines &amp; destinations (OpenFlights, ODbL)</label>
+      <label><input type="checkbox" id="setOsm"> Buildings from OpenStreetMap (ODbL)</label>
+      <label><input type="checkbox" id="setNight"> Day/night from the clock</label>
+    </fieldset>
     <fieldset><legend>Training</legend>
       <label><input type="checkbox" id="setCoach"> Coach mode</label>
       <label>Guide / coach language <select id="setLang"><option value="en">English</option><option value="et">Eesti</option></select></label>

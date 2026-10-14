@@ -13,16 +13,38 @@ export const AIRLINES = [
 
 // type, wake category, stand types it fits, approach speed kt
 export const TYPES = [
-  ["A320", "M", "jets", 135], ["A20N", "M", "jets", 135], ["A21N", "M", "jets", 140],
-  ["B738", "M", "jets", 145], ["B38M", "M", "jets", 145], ["A319", "M", "jets", 130],
-  ["E190", "M", "jets", 130], ["E195", "M", "jets", 135], ["CRJ9", "M", "jets", 140],
-  ["BCS3", "M", "jets", 135], ["AT76", "M", "turboprops", 115], ["DH8D", "M", "turboprops", 120],
-  ["B77W", "H", "heavy", 150], ["A359", "H", "heavy", 145], ["B789", "H", "heavy", 145],
-  ["A333", "H", "heavy", 140],
+  ["A320", "M", "jets", 135], ["A20N", "M", "jets", 135], ["A21N", "M", "jets", 140], ["A321", "M", "jets", 140],
+  ["B738", "M", "jets", 145], ["B38M", "M", "jets", 145], ["A319", "M", "jets", 130], ["B737", "M", "jets", 140],
+  ["E190", "M", "jets", 130], ["E195", "M", "jets", 135], ["CRJ9", "M", "jets", 140], ["E75L", "M", "jets", 130],
+  ["BCS3", "M", "jets", 135], ["BCS1", "M", "jets", 130], ["AT76", "M", "turboprops", 115], ["DH8D", "M", "turboprops", 120], ["AT45", "M", "turboprops", 110],
+  ["B77W", "H", "heavy", 150], ["A359", "H", "heavy", 145], ["B789", "H", "heavy", 145], ["B788", "H", "heavy", 145],
+  ["A333", "H", "heavy", 140], ["A332", "H", "heavy", 140], ["B763", "H", "heavy", 140], ["B748", "H", "heavy", 150], ["A388", "J", "heavy", 140],
+  ["B77F", "H", "heavy", 150], ["B744", "H", "heavy", 150], ["A306", "H", "heavy", 140], ["MD11", "H", "heavy", 150],
 ];
+// Realistic fleets per airline ICAO code (first entries most common); anything else is picked by route distance.
+export const AIRLINE_TYPES = {
+  RYR: ["B738", "B738", "B38M"], RUK: ["B738"], MAY: ["B738"], BTI: ["BCS3"], WZZ: ["A21N", "A320", "A21N"], WUK: ["A21N", "A320"],
+  DLH: ["A320", "A21N", "A319", "A20N", "A359"], CLH: ["CRJ9", "E190"], EWG: ["A320", "A319"], FIN: ["A320", "A319", "A321", "E190", "A359", "AT76"],
+  SAS: ["A20N", "A320", "CRJ9", "A21N", "E195"], NOZ: ["B738", "B38M"], NSZ: ["B738"], NAX: ["B738"], DAT: ["AT76", "A320"], ELL: ["AT76", "CRJ9"],
+  EZY: ["A320", "A20N", "A319", "A21N"], EZS: ["A320", "A20N"], EJU: ["A320", "A20N"], BAW: ["A320", "A21N", "A319", "B789", "B77W"], CFE: ["E190"],
+  KLM: ["B738", "B737", "E195", "E190", "B789"], KLC: ["E190", "E195"], AFR: ["A320", "A321", "A319", "BCS3", "B789", "A359"], HOP: ["E190", "CRJ9"],
+  LOT: ["E195", "E190", "B738", "B788", "B789", "DH8D"], AUA: ["A320", "A321", "E195", "B763"], SWR: ["A320", "BCS3", "BCS1", "A21N", "A333"],
+  THY: ["A21N", "B738", "A320", "A333", "B789"], PGT: ["A21N", "B738"], UAE: ["B77W", "A388"], QTR: ["A359", "B789", "A333", "B77W"], ETD: ["B789", "A21N"],
+  IBE: ["A320", "A321", "A333", "A359"], VLG: ["A320", "A321", "A20N"], TAP: ["A320", "A21N", "A319", "A332"], EIN: ["A320", "A21N", "A333"],
+  AAL: ["B738", "A321", "B789", "B77W"], DAL: ["B738", "A321", "A320", "B763", "A333"], UAL: ["B738", "A320", "B789", "B77W"], JBU: ["A320", "A21N", "BCS3"],
+  SWA: ["B738", "B38M", "B737"], ASA: ["B738", "B38M", "E75L"], ACA: ["A21N", "A320", "B789", "B77W", "E75L"], WJA: ["B738", "B38M"],
+  SIA: ["A359", "B77W", "A388"], CPA: ["A359", "B77W"], ANA: ["B789", "B77W"], JAL: ["B789", "B77W"], QFA: ["B789", "A388"], VIR: ["B789", "A359", "A333"],
+  CSA: ["A320", "AT76"], TRA: ["B738"], TVS: ["B738", "B38M"], SXS: ["B738", "A21N"], AEE: ["A320", "A21N"], RJA: ["A320", "E195"],
+  AFL: ["A320", "B738", "A321"], FDX: ["B77F", "MD11", "B763"], UPS: ["B748", "B763", "MD11"], BCS: ["B763", "A306"], GEC: ["B77F"], CLX: ["B748"],
+  BOX: ["B77F"], ABW: ["B748"], DHK: ["B763", "A306"], ICE: ["B38M", "B763"], LGL: ["DH8D", "B738"], AZA: ["A320", "A321", "A332"], ITY: ["A320", "A21N", "A332"],
+};
+export const CARGO_TYPES = ["B77F", "B748", "B763", "MD11", "A306"];
 
 // light aircraft for GA fields (and tie-down stands)
-export const GA_TYPES = [["C172", "L", "props", 65], ["PA28", "L", "props", 70], ["SR22", "L", "props", 80], ["DA40", "L", "props", 70]];
+export const GA_TYPES = [["C172", "L", "props", 65], ["PA28", "L", "props", 70], ["SR22", "L", "props", 80], ["DA40", "L", "props", 70], ["C182", "L", "props", 70], ["DA42", "L", "props", 80]];
+export const HELI_TYPES = [["H145", "L", "helos", 60], ["EC35", "L", "helos", 60], ["R44", "L", "helos", 50], ["AS50", "L", "helos", 60]];
+// time-of-day traffic waves: multiplier per local hour (0..23)
+export const HOUR_WAVE = [0.25, 0.2, 0.15, 0.15, 0.3, 0.7, 1.4, 1.5, 1.3, 1.0, 0.9, 1.0, 1.0, 0.9, 1.0, 1.2, 1.4, 1.3, 1.1, 1.0, 0.9, 0.7, 0.5, 0.35];
 // registration prefix by ICAO region (first 2 letters, then 1)
 export const REG_PREFIX = { EG: "G", ED: "D", EE: "ES", EF: "OH", ES: "SE", EN: "LN", EK: "OY", EH: "PH", EB: "OO",
   EI: "EI", EP: "SP", EV: "YL", EY: "LY", LF: "F", LE: "EC", LI: "I", LO: "OE", LS: "HB", LK: "OK", LH: "HA",
@@ -103,17 +125,24 @@ export const TYPE_SPOKEN = {
   AT76: ["ATR seventy-two", "ATR"], DH8D: ["Dash eight", "Q four hundred"], B77W: ["triple seven", "Boeing seven seven seven"],
   A359: ["A three fifty", "Airbus three fifty"], B789: ["seven eight seven", "Dreamliner"], A333: ["A three thirty", "Airbus three thirty"],
   C172: ["Cessna one seventy-two", "Cessna"], PA28: ["Piper Cherokee", "Piper"], SR22: ["Cirrus", "Cirrus SR twenty-two"],
-  DA40: ["Diamond forty", "Diamond Star"],
+  DA40: ["Diamond forty", "Diamond Star"], C182: ["Cessna one eighty-two", "Cessna"], DA42: ["Diamond forty-two", "Twin Star"], P28A: ["Piper", "Cherokee"],
+  A321: ["Airbus three twenty-one", "A three twenty-one"], B737: ["Boeing seven three seven", "seven thirty-seven"], BCS1: ["A two twenty", "Airbus two twenty"],
+  E75L: ["Embraer one seventy-five", "E one seventy-five"], AT45: ["ATR forty-two", "ATR"], B788: ["seven eight seven", "Dreamliner"], A332: ["A three thirty", "Airbus three thirty"],
+  B763: ["seven six seven", "Boeing seven six seven"], B748: ["seven four seven eight", "seven forty-seven"], B744: ["seven four seven", "jumbo"], A388: ["A three eighty", "Airbus three eighty"],
+  B77F: ["triple seven freighter", "seven seven seven"], MD11: ["M D eleven", "MD eleven"], A306: ["Airbus three hundred", "A three hundred"],
+  H145: ["helicopter H one forty-five", "helicopter"], EC35: ["helicopter E C one thirty-five", "helicopter"], R44: ["Robinson forty-four", "helicopter"], AS50: ["Squirrel", "helicopter"],
 };
 // Real dimensions for drawing: type -> [wingspan m, length m, silhouette]
 export const AC_DIM = {
-  A320: [35.8, 37.6, "airliner"], A20N: [35.8, 37.6, "airliner"], A21N: [35.8, 44.5, "airliner"], A319: [35.8, 33.8, "airliner"],
-  B738: [35.8, 39.5, "airliner"], B38M: [35.9, 39.5, "airliner"], BCS3: [35.1, 38.7, "airliner"],
-  E190: [28.7, 36.2, "regional"], E195: [28.7, 38.7, "regional"], CRJ9: [24.9, 36.2, "regional"],
-  AT76: [27.1, 27.2, "turboprop"], DH8D: [28.4, 32.8, "turboprop"],
-  B77W: [64.8, 73.9, "widebody"], A359: [64.8, 66.8, "widebody"], B789: [60.1, 62.8, "widebody"], A333: [60.3, 63.7, "widebody"],
-  C172: [11.0, 8.3, "ga"], PA28: [10.7, 7.3, "ga"], SR22: [11.7, 7.9, "ga"], DA40: [11.9, 8.1, "ga"],
-  H145: [11.0, 13.6, "heli"], EC35: [10.2, 12.2, "heli"],
+  A320: [35.8, 37.6, "airliner"], A20N: [35.8, 37.6, "airliner"], A21N: [35.8, 44.5, "airliner"], A321: [35.8, 44.5, "airliner"], A319: [35.8, 33.8, "airliner"],
+  B738: [35.8, 39.5, "airliner"], B38M: [35.9, 39.5, "airliner"], B737: [35.8, 33.6, "airliner"], BCS3: [35.1, 38.7, "airliner"], BCS1: [35.1, 35.0, "airliner"],
+  E190: [28.7, 36.2, "regional"], E195: [28.7, 38.7, "regional"], E75L: [28.7, 31.7, "regional"], CRJ9: [24.9, 36.2, "regional"],
+  AT76: [27.1, 27.2, "turboprop"], AT45: [24.6, 22.7, "turboprop"], DH8D: [28.4, 32.8, "turboprop"],
+  B77W: [64.8, 73.9, "widebody"], B77F: [64.8, 63.7, "widebody"], A359: [64.8, 66.8, "widebody"], B789: [60.1, 62.8, "widebody"], B788: [60.1, 56.7, "widebody"],
+  A333: [60.3, 63.7, "widebody"], A332: [60.3, 58.8, "widebody"], B763: [47.6, 54.9, "widebody"], B748: [68.4, 76.3, "widebody"], B744: [64.4, 70.7, "widebody"],
+  A388: [79.8, 72.7, "widebody"], A306: [44.8, 54.1, "widebody"], MD11: [51.7, 61.2, "widebody"],
+  C172: [11.0, 8.3, "ga"], PA28: [10.7, 7.3, "ga"], SR22: [11.7, 7.9, "ga"], DA40: [11.9, 8.1, "ga"], C182: [11.0, 8.8, "ga"], DA42: [13.4, 8.6, "ga"], P28A: [10.7, 7.3, "ga"],
+  H145: [11.0, 13.6, "heli"], EC35: [10.2, 12.2, "heli"], R44: [10.1, 11.7, "heli"], AS50: [10.7, 12.9, "heli"],
 };
 export const TYPE_MAKER ={ C172: "Cessna", PA28: "Piper", SR22: "Cirrus", DA40: "Diamond" };
 
