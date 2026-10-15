@@ -100,6 +100,8 @@ keeps the record. `python server.py` on another PC does not expose the wizard.
 
 ## SimBrief: your real flight plan in the trainer
 
+![the OFP panel with the route on the map](docs/screenshots/EETN-ofp.png)
+
 Settings → SimBrief: your SimBrief username or Pilot ID (kept in this browser only) and the units. The **OFP**
 button opens the panel: *Fetch latest OFP* asks SimBrief's documented API for your latest flight
 (`xml.fetcher.php?username=…&json=1`; HTTP 400 means an unknown user or no flight planned yet, and the panel
@@ -123,6 +125,8 @@ EOBT and equipment, and goes into EuroScope's `$FP` with the `SIMBRIEF` remark. 
 (squawk, SID, level) shows up in XRadio next to the pilot's plan, with differences marked.
 
 ## AI controllers for your own flight
+
+![the debrief of a pilot's flight](docs/screenshots/EETN-debrief.png)
 
 Fly the SimBrief plan yourself: file it from XRadio (Flight plan → Import from SimBrief → File) and the
 positions nobody staffs in TowerTrainer answer you -- Delivery with the clearance built from the filed
@@ -201,4 +205,5 @@ python tests/sector_test.py                   # generated EuroScope .sct/.ese/.a
 python tests/setup_test.py                    # the setup wizard on a temporary folder, dry runs, its HTTP API
 python tests/towerlink_test.py                # the X-Plane tower link: hello, airport line, claims, transmissions, ops
 python tests/simbrief_test.py                 # the SimBrief OFP parser on a made-up fixture, fetch errors, cache, plan links
+node tests/aiatc.test.mjs                     # S5: a scripted XRadio pilot flown EETN → EVRA by the AI controllers, end to end (XRADIO_DIR or ../xradio-main)
 ```

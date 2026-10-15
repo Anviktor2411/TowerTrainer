@@ -119,6 +119,8 @@ with tempfile.TemporaryDirectory() as tmp:
     check(r["ok"] and "host = 192.168.1.5" in txt and "callsign = ESXYZ" in txt, "xradio.cfg created with the keys")
     cfg.write_text("# XRadio configuration\nhost = old\nvolume = 0.5\n", "utf-8")
     wiz.xradio_settings(str(xp), {"host": "new", "password": "pw"})
+    r = wiz.xradio_settings(str(xp), {"simbriefuser": "tester"})
+    check(r["ok"] and "simbriefuser = tester" in (xp / "Output" / "preferences" / "xradio.cfg").read_text("utf-8"), "the SimBrief username goes into xradio.cfg (S5)")
     txt = cfg.read_text("utf-8")
     check("host = new" in txt and "volume = 0.5" in txt and "password = pw" in txt and txt.count("host =") == 1, "existing keys replaced in place, others kept")
 

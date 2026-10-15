@@ -344,7 +344,7 @@ def install_xradio(xp_dir: str, source: str, tag: str = "", backup: bool = True,
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-XR_KEYS = {"host", "port", "callsign", "actype", "password", "showai", "aimax", "shareweather", "followweather", "atccue", "autoconnect"}
+XR_KEYS = {"host", "port", "callsign", "actype", "password", "showai", "aimax", "shareweather", "followweather", "atccue", "autoconnect", "simbriefuser"}
 
 
 def xradio_settings(xp_dir: str, values: dict, dry_run: bool = False) -> dict:

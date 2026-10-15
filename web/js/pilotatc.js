@@ -178,8 +178,8 @@ export class PilotAtc {
       if (!a.tx && F.txWas && F.txAt != null && sim.t - F.txAt > 0.8 && !F.textAt) this.heard(a.cs, "", null, true, true);
       if (!a.tx && F.txWas) F.textAt = false;
       F.txWas = !!a.tx;
-      if (this.works(F.pos)) continue;                       // a human controller has them
       this.watch(F);
+      if (this.works(F.pos)) continue;                       // a human controller has them: nothing to say
       if (F.pending && sim.t - F.pending.askedAt > 25 && !F.pending.nudged) {
         F.pending.nudged = true;
         this.say(F, F.pos, `${a.cs}, confirm you copied: ${F.pending.items.map(itemText).join(", ")}`);
@@ -190,10 +190,24 @@ export class PilotAtc {
     for (const [cs, F] of this.flights) if (!sim.ac.includes(F.a) || F.a.gone) { if (!F.done) { this.note(F, "left the flight"); this.finish(F, "left"); } }
   }
 
-  /** The real position against what was cleared. */
+  /** A human controller handed the pilot to an AI position: the phase follows the situation, not our bookkeeping. */
+  resync(F) {
+    const a = F.a, pos = F.pos;
+    if (F.dir === "dep") {
+      if (!a.onGround) { if (pos === "APP" && F.phase !== "climb") F.phase = "to_app"; else if (pos === "CTR" && F.phase !== "cruise") F.phase = "to_ctr"; else if (pos === "TWR") F.phase = "airborne"; return; }
+      if (pos === "TWR" && ["cleared", "push", "taxi"].includes(F.phase)) F.phase = "holding";
+      else if (pos === "GND" && ["filed", "clr_given"].includes(F.phase) && a.fpStatus && a.fpStatus !== "filed") { F.phase = "cleared"; F.squawk = F.squawk || a.assignedSq || null; }
+    } else {
+      if (pos === "TWR" && !a.onGround && F.phase !== "final") { F.phase = "final"; F.checkedIn = false; }
+      else if (pos === "GND" && a.onGround && !["to_stand"].includes(F.phase)) F.phase = "vacated";
+    }
+  }
+
+  /** The real position against what was cleared; the phase follows the physics even where a human works the position. */
   watch(F) {
     const sim = this.sim, a = F.a, t = sim.t;
-    const once = (key, every = 60) => { if (F.warnedAt[key] != null && t - F.warnedAt[key] < every) return false; F.warnedAt[key] = t; return true; };
+    const quiet = this.works(F.pos);   // a human controller: no warnings from us, the phase is still followed
+    const once = (key, every = 60) => { if (quiet) return false; if (F.warnedAt[key] != null && t - F.warnedAt[key] < every) return false; F.warnedAt[key] = t; return true; };
     const rwy = a.onGround ? this.onRunway(a) : null;
     if (F.dir === "dep") {
       if (["filed", "clr_given", "cleared", "push"].includes(F.phase) && a.onGround && F.origin && dist(a.pos, F.origin) > 60 && a.spd > 2 * KT) {
@@ -217,8 +231,8 @@ export class PilotAtc {
         this.note(F, `entered runway ${sim.depEnd.name} without clearance`, "warn");
         this.say(F, F.pos, `${a.cs}, stop immediately, you are entering runway ${sim.depEnd.name} without clearance`);
       }
-      if ((F.phase === "holding" || F.phase === "lined_up") && !a.onGround) {
-        if (!F.takeoff) this.note(F, "took off without a takeoff clearance", "warn");
+      if ((F.phase === "holding" || F.phase === "lined_up" || F.phase === "taxi") && !a.onGround) {
+        if (!F.takeoff && !quiet) this.note(F, "took off without a takeoff clearance", "warn");
         F.phase = "airborne"; F.times.airborne = t; this.note(F, "airborne");
       }
       if (F.phase === "airborne" && a.alt > 700) {
@@ -247,7 +261,7 @@ export class PilotAtc {
         if (F.checkedIn && d < 6 * NM && free && !this.sim.closedRunways.has(e.rwy)) { F.landClr = true; this.say(F, F.pos, `${a.cs}, runway ${e.name}, cleared to land${this.sim.windTxt()}`, [{ k: "rwy", v: e.name }, { k: "word", v: "cleared to land" }]); }
         else if (d < 1.2 * NM && once("goaround", 30)) { this.note(F, "not cleared to land inside 1.2 NM: go around", "warn"); this.say(F, F.pos, `${a.cs}, go around, I say again, go around`); F.landClr = false; }
       }
-      if ((F.phase === "final" || F.phase === "approach") && a.onGround) { F.phase = "landed"; F.times.landed = t; this.note(F, F.landClr ? "landed" : "landed without a landing clearance", F.landClr ? "note" : "warn"); }
+      if ((F.phase === "final" || F.phase === "approach") && a.onGround) { F.phase = "landed"; F.times.landed = t; this.note(F, F.landClr || quiet ? "landed" : "landed without a landing clearance", F.landClr || quiet ? "note" : "warn"); }
       if (F.phase === "landed" && !rwy && a.spd < 30 * KT) {
         const gnd = this.firstPos(ORDER_ARR, "TWR");
         if (gnd && gnd !== F.pos) { if (this.works(gnd)) { F.pos = gnd; F.phase = "vacated"; } else if (this.say(F, F.pos, `${a.cs}, ${this.contact(gnd)}`)) { F.pos = gnd; F.phase = "vacated"; } }
@@ -269,7 +283,7 @@ export class PilotAtc {
     if (!F || F.done) return null;
     if (!voiceOnly) F.textAt = this.sim.t;
     const tuned = this.posOf(khz);
-    if (tuned && tuned !== F.pos) { this.note(F, `calls on ${tuned}`); F.pos = tuned; }
+    if (tuned && tuned !== F.pos) { this.note(F, `calls on ${tuned}`); F.pos = tuned; this.resync(F); }
     if (this.works(F.pos)) return null;                      // the human controller answers
     const sim = this.sim, t = sim.t;
     F.events.push({ t, clock: this.hooks.clock ? this.hooks.clock() : "", pos: F.pos, kind: "pilot", text: text || (voice ? "(voice, no transcript)" : "") });

@@ -1650,6 +1650,7 @@ function bootMain() {
   }, 100);
   loadAirport(params.get("icao") || store.get("tt.icao", "EETN"));
   // for debugging and automated tests
+  window.__errors = window.__errors || []; window.addEventListener("error", (e) => window.__errors.push(String(e.message || e)));
   window.TT = { get sim() { return sim; }, get pilotAtc() { return pilotAtc; }, get apt() { return apt; }, get positions() { return positions; }, get procs() { return procs; }, transmit, parse, radio, radar, guide, app,
     settings, setActive, setView, select: (id) => select(sim && sim.ac.find(a => a.id === id)), openDebrief, bridges, loadAirport, refreshVoices, get mp() { return mp; }, broadcast,
     scenarios: { start: startScenario, end: endScenario, list: allScenarios, get current() { return scenario; } }, recorder, replay, openReplay, closeReplay, renderScen, get coachStats() { return coachStats; },

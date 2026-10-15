@@ -86,6 +86,7 @@ export class Bridges {
         atc_cs: cfg.cs || "", freq_khz: Math.round((parseFloat(cfg.freq) || 0) * 1000), ai_traffic: !!cfg.ai, real_pilots: !!cfg.humans,
         text: !!cfg.text, voice: !!cfg.voice, weather: cfg.weather || "off", transcribe: !!cfg.transcribe, ai_voice: cfg.aiVoice !== false,
         atis_voice: !!cfg.atisVoice, icao: apt ? apt.icao : "" };
+      this.xr.aiAtc = cfg.aiAtc !== false;   // S4/S5: the AI-run positions are stations in the flight too
       const r = await fetch("/api/xradio/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
       this.xrStatus = await r.json();
       this.onXrStatus(this.xrStatus);
@@ -99,7 +100,7 @@ export class Bridges {
     const center = { lat: apt.d.lat, lon: apt.d.lon, elev_m: (apt.d.elevation || 0) * FT_M };
     const positions = [];
     if (sim.split) {
-      for (const p of Object.values(sim.positions)) if (sim.userWorks(p.key)) positions.push({ cs: p.key === "TWR" && this.xr.cs ? this.xr.cs : p.cs, khz: Math.round(p.mhz * 1000) });
+      for (const p of Object.values(sim.positions)) if (sim.userWorks(p.key) || this.xr.aiAtc !== false) positions.push({ cs: p.key === "TWR" && this.xr.cs ? this.xr.cs : p.cs, khz: Math.round(p.mhz * 1000) });
     } else {
       const mhz = parseFloat(this.xr.freq) || (apt.freq.tower ? apt.freq.tower.mhz : 118.1);
       positions.push({ cs: this.xr.cs || `${apt.icao}_TWR`, khz: Math.round(mhz * 1000) });
