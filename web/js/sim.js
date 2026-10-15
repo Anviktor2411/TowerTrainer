@@ -7,6 +7,11 @@ import { regionOf, makeStyle, callsign, spokenType, pilotCall, readback, ph, gre
 import { makeCrew } from "./voices.js";
 import { SquawkAllocator, validCode } from "./squawk.js";
 import { positionFor, fmtFreq } from "./positions.js";
+import { installOps } from "./ops.js";
+import { installVfr } from "./vfr.js";
+import { installEvents, CHECKLISTS } from "./events.js";
+import { wakeDepSeconds, ctotStatus } from "./flow.js";
+export { CHECKLISTS };
 
 const TAXI_SPD = 18 * KT, TURN_SPD = 7 * KT, PUSH_SPD = 1.3;
 const FINAL_SPAWN = 14000;      // m from threshold (combined mode)
@@ -14,7 +19,10 @@ const APP_SPAWN = 25 * 1852;    // m from threshold when an approach position ex
 const NM = 1852;
 const TYPE_INFO = Object.fromEntries(TYPES.map(t => [t[0], t]));
 const isCargoStand = (s) => s.op === "cargo" || /cargo|freight/i.test(s.name);
-const standFits = (s, t) => !s || !s.types || !s.types.length || s.types.includes(t[2]) || (t[2] === "heavy" && s.types.includes("jets") && s.size && s.size >= "D");
+// a stand takes its own category and anything smaller (a heavy stand takes an A220; a jets stand a turboprop)
+const CAT_RANK = { heavy: 4, jets: 3, turboprops: 2, props: 1, helos: 0 };
+const standFits = (s, t) => !s || !s.types || !s.types.length || s.types.includes(t[2]) || s.types.some(k => (CAT_RANK[k] ?? -1) >= (CAT_RANK[t[2]] ?? 9) && t[2] !== "helos") ||
+  (t[2] === "heavy" && s.types.includes("jets") && s.size && s.size >= "D");
 
 let nextId = 1;
 
@@ -62,6 +70,14 @@ export class Sim {
     this.serviceVehicles = opts.serviceVehicles ?? Math.max(0, Math.min(24, Math.round(apt.stands.length / 6)));
     this.mix = null;                           // real traffic mix (OpenFlights), see setTrafficMix()
     this.populated = opts.populate === false;  // true = never populate (tests)
+    this.recat = !!opts.recat;                 // RECAT-EU wake categories instead of ICAO H/M/L
+    this.lvp = false; this.lvpManual = false;  // low visibility procedures
+    this.closedRunways = new Set();            // runway ids closed (inspection, FOD, snow)
+    this.blockedEdges = new Set();             // taxi edges blocked by a broken-down aircraft
+    this.abnormals = { on: !!opts.abnormals, perHour: opts.abnormalRate ?? 2 };
+    this.vfrPerHour = opts.vfrPerHour ?? 2;    // VFR inbound flights per hour (where the field has GA stands)
+    this.nextVfr = 240;
+    this.fod = null;
     this.stats = { departures: 0, arrivals: 0, goArounds: 0, alerts: 0, rbErrors: 0, rbCaught: 0, missedRb: 0,
       conflicts: 0, delays: [], tx: {} };
   }
@@ -86,6 +102,8 @@ export class Sim {
     let pool = (cargo ? CARGO_TYPES : (AIRLINE_TYPES[icao] || [])).map(c => TYPE_INFO[c]).filter(Boolean);
     if (pool.length) {
       const ok = pool.filter(fit).filter(t => km == null || t[1] !== "H" || km > 1800 || pool.every(x => x[1] === "H"));
+      const exact = ok.filter(t => stand && stand.types && stand.types.includes(t[2]));   // a heavy stand prefers the fleet's heavies
+      if (exact.length) return rnd(exact);
       if (ok.length) return rnd(ok);
     }
     pool = TYPES.filter(t => !cargo || CARGO_TYPES.includes(t[0])).filter(fit);
@@ -151,12 +169,15 @@ export class Sim {
     } while (this.ac.some(a => a.cs === cs));
     const tel = [...cs].map(c => /\d/.test(c) ? c : LETTER_WORD[c][0].toUpperCase() + LETTER_WORD[c].slice(1))
       .join(" ").replace(/(\d) (?=\d)/g, "$1");
-    const ty = rnd(GA_TYPES);
+    const heli = Math.random() < 0.12;
+    const ty = heli ? rnd(HELI_TYPES) : rnd(GA_TYPES);
     const dir = rnd(["north", "south", "east", "west"]);
     const f = {
-      id: nextId++, cs, tel, num: "", ga: true, type: ty[0], wtc: ty[1], appSpd: ty[3] * KT, other: ["VFR", `the ${dir}`],
+      id: nextId++, cs, tel, num: "", ga: true, heli, type: ty[0], wtc: ty[1], appSpd: ty[3] * KT, other: ["VFR", `the ${dir}`],
       crossOk: new Set(), log: [],
+      wantCircuits: !heli && Math.random() < 0.35 ? rint(1, 3) : 0,   // stays in the circuit for touch-and-goes
     };
+    if (f.wantCircuits) f.other = ["VFR", "circuits"];
     return this.crewFor(f, REG_NAT[p] || "US");
   }
 
@@ -310,6 +331,7 @@ export class Sim {
       const f = weighted(dormant.map(a => [a, a.ga ? 0.15 : a.cargo ? 0.6 : 1]));
       f.dormant = false; f.callAt = this.t + rint(4, 25);
       f.freq = this.split ? (f.ga ? "GND" : "DEL") : "ALL";
+      this.assignSlot(f);
       this.onEvent({ type: "wake", ac: f });
       return f;
     }
@@ -317,7 +339,9 @@ export class Sim {
     if (opts.ga === false && ga) { const g = this.freeStands(); if (!g.length) return null; st = rnd(g); ga = false; }
     if (!st) return null;
     const f = this.makeFlight(st.types, ga, { cargo: !ga && isCargoStand(st), stand: st });
-    return this.placeParked(f, st, false);
+    const placed = this.placeParked(f, st, false);
+    if (placed) this.assignSlot(placed);
+    return placed;
   }
 
   /** Cargo stands take cargo flights; GA stands GA. Occasionally a cargo departure from a free cargo stand. */
@@ -481,6 +505,10 @@ export class Sim {
       else this.nextArr = this.t + 20;
     }
     if (Math.floor(this.t / 30) !== Math.floor((this.t - dt) / 30)) this.ensureServiceVehicles();
+    if (this.t >= this.nextVfr) {
+      if (this.vfrPerHour > 0 && this.freeStands(["tie_down", "hangar", "misc", "gate"], true).length) this.spawnVfrInbound();
+      this.nextVfr = this.t + 3600 / Math.max(0.2, this.vfrPerHour * wave) * (0.6 + Math.random() * 0.8);
+    }
     if (this.overflights && this.t >= this.nextOvf) {
       this.spawnOverflight();
       this.nextOvf = this.t + 3600 / Math.max(1, this.ovfPerHour) * (0.6 + Math.random() * 0.8);
@@ -495,6 +523,8 @@ export class Sim {
     if (Math.floor(this.t) !== Math.floor(this.t - dt)) {
       this.checkConflicts();
       this.checkReadbacks();
+      this.opsTick();
+      this.eventsTick();
       if (this.split) this.aiTick();
       if (this.events && this.t >= this.nextEvent) this.scriptedEvent();
     }
@@ -512,11 +542,16 @@ export class Sim {
     if (a.veh) { this.updateVehicle(a, dt); if (a.removeAt && this.t >= a.removeAt) a.gone = true; return; }
     this.transponder(a);
 
-    if (s === "circuit") {
+    if (s === "circuit" || (s === "inbound" && a.wps && a.wpi < a.wps.length)) {
       this.circuitMove(a, dt);
+    } else if (s === "inbound") {
+      /* at the reporting point, waiting for joining instructions (vfrInboundTick) */
     } else if (a.kind === "dep") {
       if (s === "parked" && a.dormant) { /* waiting on the stand for its slot */ }
-      else if (s === "parked" && this.t >= a.callAt && a.ga) {
+      else if (s === "parked" && this.t >= a.callAt && a.heli) {
+        this.call(a, "stillWaitingGeneric", { what: `helicopter on the apron, request departure from present position, VFR to ${a.other[1]}` }, "GND");
+        a.state = "taxi_req"; a.callAt = this.t + 150;
+      } else if (s === "parked" && this.t >= a.callAt && a.ga) {
         this.call(a, "gaTaxi", { dest: a.other[1] }, "GND");
         a.state = "taxi_req";
       } else if (s === "parked" && this.t >= a.callAt) {
@@ -548,7 +583,7 @@ export class Sim {
         this.callPrepared(a, "taxi", {}, "GND");
         a.state = "taxi_req"; a.callAt = this.t + 150;
       } else if (s === "taxi_req" && this.t >= a.callAt) {
-        this.call(a, "stillWaitingGeneric", { what: "ready to taxi", greet: "" }, "GND");
+        this.call(a, "stillWaitingGeneric", { what: a.heli ? "ready for departure from present position" : "ready to taxi", greet: "" }, "GND");
         a.callAt = this.t + 150;
       } else if (s === "taxi" || s === "lineup") {
         const done = this.followPath(a, dt);
@@ -564,22 +599,28 @@ export class Sim {
           a.state = "lining";
         }
       } else if (s === "holding" && this.t >= a.callAt) {
-        this.call(a, "stillWaitingGeneric", { what: `holding point runway ${a.depEnd.name}, ready for departure`, greet: "" }, "TWR");
+        if (a.rwyChanged) this.call(a, "stillWaitingGeneric", { what: `holding point runway ${a.depEnd.name}, we understand the runway has changed, request taxi to runway ${this.depEnd.name}`, greet: "" }, "TWR");
+        else if (this.hotExpired(a)) this.call(a, "stillWaitingGeneric", { what: `holding point runway ${a.depEnd.name}, our holdover time has expired, request taxi back for de-icing`, greet: "" }, "TWR");
+        else this.call(a, "stillWaitingGeneric", { what: `holding point runway ${a.depEnd.name}, ready for departure`, greet: "" }, "TWR");
         a.callAt = this.t + 120;
+      } else if (s === "cond_lineup") {
+        if (this.condMet(a)) { a.cond = null; this.lineUp(a, !!a.condTakeoff); }
       } else if (s === "lining") {
-        // align with the runway centreline
+        // align with the runway centreline (an immediate takeoff rolls as soon as it is roughly straight)
         const e = a.depEnd;
         const d = angDiff(a.hdg, e.hdg);
         a.hdg = (a.hdg + Math.sign(d) * Math.min(Math.abs(d), 30 * dt) + 360) % 360;
         const cross = (a.pos[0] - e.pos[0]) * e.v[1] - (a.pos[1] - e.pos[1]) * e.v[0];
         const sh = Math.sign(cross) * Math.min(Math.abs(cross), 6 * dt);
         a.pos = [a.pos[0] - e.v[1] * sh, a.pos[1] + e.v[0] * sh];
-        if (Math.abs(d) < 1 && Math.abs(cross) < 0.5) {
+        if ((Math.abs(d) < 1 && Math.abs(cross) < 0.5) || (a.toClr && a.immediate && Math.abs(d) < 12 && Math.abs(cross) < 4)) {
           a.hdg = e.hdg; a.state = a.toClr ? "roll" : "lined_up";
           if (a.state === "roll") this.startRoll(a);
         }
       } else if (s === "roll" || s === "airborne") {
         this.takeoffMove(a, dt);
+      } else if (s === "rto" || s === "broken" || s === "towed" || s === "deicing") {
+        /* handled by the ops / events ticks */
       }
     } else if (a.kind === "ovf") {
       a.pos = [a.pos[0] + Math.sin(a.hdg * Math.PI / 180) * a.spd * dt, a.pos[1] + Math.cos(a.hdg * Math.PI / 180) * a.spd * dt];
@@ -777,10 +818,76 @@ export class Sim {
     if (d < Math.max(120, a.spd * 3.5) || passed || this.t - a.circuitStart > 900) {
       a.circuitLeg = wp.leg; a.wpi++;
       this.onEvent({ type: "circuitLeg", ac: a, leg: wp.leg });
-      if (wp.leg === "downwind" && a.reports?.downwind !== false && !a.nordo) this.call(a, "circuitReport", { leg: "downwind", rwy: a.end.name, greet: "" }, "TWR");
+      if (wp.leg === "downwind" && a.reports?.downwind !== false && !a.nordo && !a.circuitHold) this.call(a, "circuitReport", { leg: `${a.circuitSide === "right" ? "right " : ""}downwind${a.touchGo ? ", touch and go" : a.fullStop && a.circuits ? ", full stop" : ""}`, rwy: a.end.name, greet: "" }, "TWR");
       if (wp.leg === "base" && !a.nordo && a.reports?.base) this.call(a, "circuitReport", { leg: "base", rwy: a.end.name, greet: "" }, "TWR");
-      if (a.wpi >= a.wps.length) this.joinFinal(a);
+      if (a.wpi >= a.wps.length) {
+        if (a.missed && a.onMissedEnd) { a.onMissedEnd(); return; }
+        if (a.circuitHold && a.onCircuitEnd) { a.circuitHold = false; a.onCircuitEnd(); return; }
+        if (a.state === "inbound") return;     // reached the reporting point: vfrInboundTick calls in and orbits there
+        this.joinFinal(a);
+      }
     }
+  }
+
+  /** Conditional clearance: is the traffic in the condition past? */
+  condMet(a) {
+    const c = a.cond;
+    if (!c || !c.ac) return true;
+    const o = c.ac;
+    if (o.gone) return true;
+    if (c.phase === "departing" || c.phase === "next") return o.state === "airborne" || !o.onGround || (o.state === "roll" && o.spd > 40 * KT);
+    // landing / arriving: it has touched down and rolled past our entry (or vacated)
+    if (o.kind === "arr") {
+      if (["vacating", "vacated", "holding_short", "taxi", "parked"].includes(o.state)) return true;
+      if (o.state === "rollout") {
+        const e = o.end, along = (o.pos[0] - e.pos[0]) * e.v[0] + (o.pos[1] - e.pos[1]) * e.v[1];
+        const mine = (a.pos[0] - e.pos[0]) * e.v[0] + (a.pos[1] - e.pos[1]) * e.v[1];
+        return along > mine + 60;
+      }
+      return false;
+    }
+    return !o.onGround;
+  }
+
+  /** Find the traffic a condition refers to ("the landing A320", "Finnair 321"). */
+  findSubject(a, cond, phase) {
+    const sub = (cond.subject || "").toLowerCase().trim();
+    const cands = this.ac.filter(o => o !== a && !o.veh && !o.gone);
+    const generic = /^(the )?(traffic|aircraft|one|airplane|aeroplane)$/.test(sub);
+    // a callsign ("Finnair 321", "Echo Bravo Charlie") names the traffic directly
+    if (!generic && (/\d/.test(sub) || sub.split(" ").length >= 2)) { const p = parse(sub, cands, null); if (p.ac && p.explicit) return p.ac; }
+    const words = sub.split(" ").filter(w => w.length > 2 && !["the", "that", "traffic", "aircraft"].includes(w));
+    const typeMatch = (o) => { const t = spokenType(o.type).toLowerCase(); return (sub.includes(o.type.toLowerCase()) && o.type.length > 2) || words.some(w => t.includes(w) || (o.tel || "").toLowerCase().includes(w)); };
+    const ph = cond.phase || phase || "";
+    const rwy = a.depEnd || a.end || this.depEnd;
+    if (ph === "departing" || ph === "next") {
+      const deps = cands.filter(o => o.kind === "dep" && ["lined_up", "lining", "lineup", "roll", "holding", "cond_lineup"].includes(o.state) && (o.depEnd || rwy).rwy === rwy.rwy).sort((p, q) => (p.state === "roll" ? -1 : 1) - (q.state === "roll" ? -1 : 1));
+      return deps.find(typeMatch) || deps[0] || null;
+    }
+    if (ph === "taxiing" || ph === "crossing" || ph === "preceding" || (!ph && a.onGround)) {
+      const ground = cands.filter(o => o.onGround && ["taxi", "holding", "pushing", "pushed", "lineup", "vacating", "holding_short", "vacated", "cond_lineup", "lining", "lined_up"].includes(o.state)).sort((p, q) => dist(p.pos, a.pos) - dist(q.pos, a.pos));
+      return ground.find(typeMatch) || ground[0] || null;
+    }
+    // landing / arriving: still airborne first (nearest to the threshold), then the one rolling out
+    const air = cands.filter(o => o.kind === "arr" && o.state === "final" && o.end.rwy === rwy.rwy).sort((p, q) => this.distToThr(p) - this.distToThr(q));
+    const roll = cands.filter(o => o.kind === "arr" && o.state === "rollout" && o.end.rwy === rwy.rwy);
+    const finals = [...air, ...roll];
+    return finals.find(typeMatch) || finals[0] || null;
+  }
+
+  /** A lit stop bar on the path before the runway? */
+  litBarAhead(a) {
+    const p = a.path;
+    if (!p) return null;
+    for (let j = Math.max(0, a.pi - 1); j < p.length - 1; j++) {
+      const n1 = p[j][2], n2 = p[j + 1][2];
+      if (n1 == null || n2 == null) continue;
+      const bar = this.apt.stopBarOnEdge(n1, n2);
+      if (bar && bar.lit) return bar;
+      const here = j === a.pi - 1 && dist(a.pos, p[j]) < 10 ? this.apt.stopBarAtNode(n1) : null;
+      if (here && here.lit) return here;
+    }
+    return null;
   }
 
   joinFinal(a) {
@@ -841,6 +948,7 @@ export class Sim {
     const t = v.target;
     if (v.state === "idle") return;
     if (v.state === "roam") { this.roam(v, dt); return; }
+    if (v.pauseUntil && this.t < v.pauseUntil) { v.spd = 0; return; }   // told to stop / waiting
     if (v.state === "toAircraft") {
       const done = this.followPath(v, dt);
       this.vehicleHoldCall(v);
@@ -967,7 +1075,27 @@ export class Sim {
   stopIndex(a) {
     const p = a.path;
     for (let j = Math.max(0, a.pi - 1); j < p.length - 1; j++) {
+      // "hold short of taxiway X": stop at the intersection
+      if (a.holdShortIdx != null && j >= a.holdShortIdx) return { j: a.holdShortIdx, rwy: null, twy: a.holdShortTwy };
+      const n1 = p[j][2], n2 = p[j + 1][2];
+      // a lit stop bar is never crossed, clearance or not (stop at the bar's node, or before a mid-segment bar);
+      // a bar at the node we are standing on counts too, but not one we have already rolled past
+      if (n1 != null && n2 != null) {
+        const bar = this.apt.stopBarOnEdge(n1, n2);
+        if (bar && bar.lit) return { j: bar.node === n2 ? j + 1 : j, rwy: bar.rwy, bar };
+        const here = j === a.pi - 1 && dist(a.pos, p[j]) < 10 ? this.apt.stopBarAtNode(n1) : null;
+        if (here && here.lit) return { j, rwy: here.rwy, bar: here };
+      }
       const z = this.edgeZones(p, j), zPrev = j > 0 ? this.edgeZones(p, j - 1) : new Set();
+      // low visibility: hold at the CAT II/III holding position, further back than the normal one
+      if (this.lvp && n2 != null && !a.onRunway) {
+        for (const h of this.apt.ilsHolds) {
+          if (dist(h.p, p[j + 1]) < 25) {
+            const r = this.apt.nearestRunway(h.p);
+            if (r >= 0 && !a.crossOk.has(r) && !zPrev.has(r)) return { j: j + 1, rwy: r, cat: true };
+          }
+        }
+      }
       for (const r of z) {
         if (zPrev.has(r) || a.crossOk.has(r)) continue;
         // a departure may pass through its own runway's zone (e.g. behind the threshold) if it leaves it again
@@ -1067,6 +1195,7 @@ export class Sim {
       if (o.leader === a) continue;
       if (a.leader === o && o.state !== "leading") continue;   // the car has stepped aside at the stand
       if (o.veh && o.serving === a) continue;                                // ground equipment at our stand
+      if (o.veh && (o.state === "idle" || o.standby)) continue;             // parked beside the taxiway (fire station, ops)
       const dx = o.pos[0] - a.pos[0], dy = o.pos[1] - a.pos[1];
       const along = dx * v[0] + dy * v[1], cross = Math.abs(dx * v[1] - dy * v[0]);
       if (along > 0 && along < 90 && cross < 25) {
@@ -1079,10 +1208,12 @@ export class Sim {
   startRoll(a) {
     a.state = "roll"; a.rollStart = this.t;
     const prev = this.lastTakeoff;
-    if (prev && prev.wtc === "H" && a.wtc !== "H" && this.t - prev.t < 120) {
-      this.alert(`Wake turbulence: ${a.cs} (${a.wtc}) departed ${Math.round(this.t - prev.t)} s after ${prev.cs} (heavy); 2 min required.`, "wake" + a.cs);
+    if (prev && prev.rwy === a.depEnd.rwy) {
+      const need = wakeDepSeconds(prev, a, this.recat), gap = this.t - prev.t;
+      if (need > 60 && gap < need) this.alert(`Wake turbulence: ${a.cs} (${a.wtc}) departed ${Math.round(gap)} s after ${prev.cs} (${prev.wtc}); ${Math.round(need / 60)} min required.`, "wake" + a.cs);
     }
-    this.lastTakeoff = { t: this.t, wtc: a.wtc, cs: a.cs };
+    this.lastTakeoff = { t: this.t, wtc: a.wtc, cs: a.cs, type: a.type, rwy: a.depEnd.rwy };
+    this.ctotCheck(a);
   }
 
   takeoffMove(a, dt) {
@@ -1096,6 +1227,14 @@ export class Sim {
       const top = this.split ? a.cfl : Infinity;
       if (a.alt < top) a.alt = Math.min(top, a.alt + (a.ga ? 700 : 2500) / 60 * dt);
       const onTwr = !this.split ? !a.handedOff : a.freq === "TWR" || a.freq === "ALL";
+      if (a.wantCircuits && a.alt > 500 && !a.inCircuit) {   // VFR: stays in the circuit for touch-and-goes
+        a.inCircuit = true; a.touchGo = true; a.fullStop = false; a.reports = { downwind: true, final: true }; a.circuits = 0;
+        const gs = this.freeStands(["tie_down", "hangar", "misc", "gate"], true);
+        if (gs.length) { a.stand = rnd(gs); a.stand.reserved = a; }
+        this.startCircuit(a, e, { side: "left" });
+        this.onEvent({ type: "circuitJoin", ac: a });
+        return;
+      }
       if (a.alt > (a.ga ? 1500 : 2500) && onTwr && !a.askedFreq) {
         a.askedFreq = true;
         this.call(a, "freqChange", { alt: `${Math.round(a.alt / 100) * 100} feet`, greet: "" }, "TWR");
@@ -1133,17 +1272,28 @@ export class Sim {
       a.spd = this.split && !a.ga && d > 15000 ? Math.max(a.appSpd, 200 * KT - (46000 - d) * 0.0005) : a.appSpd;
       if (this.split && !a.ga && d <= 15000) a.spd = a.appSpd + Math.max(0, (d - 6000) / 9000) * 40 * KT;
       const occupied = this.runwayOccupants(e.rwy, a).length > 0;
-      if (d < 600 && ((!a.landClr && !a.nordo) || occupied)) {
-        this.goAround(a, a.landClr || a.nordo ? "runway occupied" : a.freq !== "TWR" && this.split ? `no landing clearance (still on ${a.freq})` : "no landing clearance");
+      // "land after …": the clearance becomes effective once the preceding traffic is clear
+      if (a.landAfter && !a.landClr && this.condMet({ cond: a.landAfter, pos: a.pos })) { a.landClr = true; a.landAfter = null; }
+      // gusty wind: an occasional unstable approach
+      const gust = this.wind && this.wind.gust ? this.wind.gust - (this.wind.spd || 0) : 0;
+      if (gust > 12 && d < 2.5 * NM && d > 0.8 * NM && Math.random() < dt * 0.0025 * (gust - 10) && !a.nordo) { this.goAround(a, `gusts ${Math.round(gust)} kt, unstable approach`); return; }
+      const gaDist = a.contApp ? 300 : 600;
+      if (d < gaDist && ((!a.landClr && !a.nordo) || occupied || this.closedRunways.has(e.rwy))) {
+        this.goAround(a, this.closedRunways.has(e.rwy) ? "runway closed" : a.landClr || a.nordo ? "runway occupied" : a.freq !== "TWR" && this.split ? `no landing clearance (still on ${a.freq})` : "no landing clearance");
         return;
       }
       a.pos = [a.pos[0] + e.v[0] * a.spd * dt, a.pos[1] + e.v[1] * a.spd * dt];
-      if (d < -350) { a.state = "rollout"; a.onGround = true; a.alt = 0; a.crossOk.add(e.rwy); }
+      if (d < -350) {
+        if (a.touchGo) { this.goAgain(a); return; }
+        a.state = "rollout"; a.onGround = true; a.alt = 0; a.crossOk.add(e.rwy); a.contApp = false;
+        if (a.landClr) this.stats.landings = (this.stats.landings || 0) + 1;
+      }
     } else {
       a.alt += 1800 / 60 * dt;
       a.spd = Math.min(a.spd + 1 * dt, 180 * KT);
       a.pos = [a.pos[0] + e.v[0] * a.spd * dt, a.pos[1] + e.v[1] * a.spd * dt];
       if (a.rejoin && a.alt > (a.ga ? 900 : 1400)) { a.rejoin = false; this.startCircuit(a, e); }
+      else if (!a.rejoin && a.alt > 1400 && !a.missed && this.flyMissed(a)) { /* flying the published missed approach */ }
       else if (!a.rejoin && a.alt > 3000) a.gone = true;
     }
   }
@@ -1332,6 +1482,18 @@ export class Sim {
       return null;
     }
     if (a.veh) {
+      // vehicles that asked for something (D6): runway entry for an inspection, the fire service, a tow
+      if (a.wants === "enter" && a.task && (pos === "TWR" || pos === "GND")) {
+        const r = apt.runways[a.task.rwy];
+        if (this.runwayFree(r.id, a) && r.ends.every(x => this.nearestArrival(x) > 6 * NM) && !this.ac.some(o => o.kind === "dep" && ["lining", "lined_up", "roll", "lineup"].includes(o.state) && o.depEnd.rwy === r.id)) {
+          a.wants = null; a.crossOk.add(r.id); a.holdPos = false; if (a.pi >= (a.path || []).length) this.inspectionNext(a);
+          return `${cs}, enter runway ${r.ends[0].name}, report vacated`;
+        }
+        return null;
+      }
+      if (a.wants === "proceed" && pos === "TWR") { a.wants = null; return `${cs}, proceed, ${a.rescueLevel === "full" ? "cross runway " + (this.depEnd.name) + " approved" : "hold at the fire station"}`; }
+      if (a.wants === "report" && (pos === "TWR" || pos === "GND")) { a.wants = null; if (a.task) this.closedRunways.delete(a.task.rwy); return `${cs}, roger, runway ${apt.runways[a.task ? a.task.rwy : this.depEnd.rwy].label} open`; }
+      if (a.wants === "tow" && a.task && a.task.kind === "tow" && (pos === "GND" || pos === "TWR")) { a.towOk = true; a.wants = null; a.holdPos = false; if (a.pi >= (a.path || []).length) this.towNext(a); return `${cs}, tow approved, report complete`; }
       if (a.atStop && a.blockedRwy != null && (pos === "GND" || pos === "TWR")) {
         const r = apt.runways[a.blockedRwy];
         if (this.runwayFree(r.id, a) && r.ends.every(x => this.nearestArrival(x) > 3 * NM)) return `${cs}, cross runway ${r.ends[0].name}`;
@@ -1339,11 +1501,19 @@ export class Sim {
       return null;
     }
     if (pos === "GND") {
-      if (a.kind === "dep" && s === "push_req") return `${cs}, push and start approved`;
+      if (a.kind === "dep" && s === "push_req") return this.deiceNeeded && !a.deiced ? `${cs}, de-icing approved on stand, report when complete` : `${cs}, push and start approved`;
+      if (a.kind === "dep" && a.heli && s === "taxi_req") {
+        // a helicopter lifts from the apron: Ground sends it to Tower, Tower clears it from present position
+        if (this.split && this.positions.TWR && !this.userWorks("TWR") && pos === "GND" && this.hasPos("TWR")) { if (a.toldTwr) return null; a.toldTwr = true; return `${cs}, ${this.contactPhrase("TWR")}`; }
+        return `${cs}, cleared for takeoff from present position${this.windTxt()}`;
+      }
       if (a.kind === "dep" && s === "taxi_req") {
         const via = this.viaNames(a);
         return `${cs}, taxi to holding point runway ${this.depEnd.name}${via.length ? " via " + via.join(" ") : ""}`;
       }
+      if (a.veh && a.wants === "tow" && a.task && a.task.kind === "tow") return `${cs}, tow approved, report complete`;
+      if (a.kind === "dep" && s === "broken") { if (!this.vehicleOf("tug")?.task) this.towRequest(a); return null; }
+      if (a.kind === "dep" && a.rwyChanged && (s === "taxi" || s === "holding")) { a.rwyChanged = false; const via = this.viaNames(a); return `${cs}, runway change, taxi to holding point runway ${this.depEnd.name}${via.length ? " via " + via.join(" ") : ""}`; }
       if ((a.state === "taxi" || a.state === "lineup") && a.atStop && a.blockedRwy != null && !(a.kind === "dep" && a.blockedRwy === a.depEnd.rwy)) {
         const r = apt.runways[a.blockedRwy];
         const busy = !this.runwayFree(r.id, a) || r.ends.some(e => this.nearestArrival(e) < 3 * NM);
@@ -1364,12 +1534,20 @@ export class Sim {
     }
     if (pos === "TWR") {
       const e = a.depEnd || this.depEnd;
+      // emergencies and VFR joins
+      if ((a.mayday || a.pan || a.priority) && a.kind === "arr" && s === "final" && !a.priorityAck) { a.priorityAck = true; if (a.mayday) this.rescueRespond(a, "full"); else if (a.pan) this.rescueRespond(a, "local"); return `${cs}, roger ${a.mayday ? "mayday" : a.pan ? "pan pan" : ""}, runway ${a.end.name}, number one, ${a.mayday || a.pan ? "fire service alerted, " : ""}report final`; }
+      if (a.kind === "arr" && a.calledIn && !a.joined && (s === "inbound" || (s === "circuit" && a.circuitHold))) {
+        return this.svfrNeeded() && !a.svfr ? `${cs}, cleared special VFR, join left downwind runway ${this.arrEnd.name}, report downwind` : `${cs}, join left downwind runway ${this.arrEnd.name}, report downwind`;
+      }
+      if (a.kind === "dep" && s === "rto" && a.rtoCalled && !a.rtoAck) { a.rtoAck = true; this.rescueRespond(a, "local"); return `${cs}, roger, vacate the runway when able, fire service on the way`; }
       if (a.kind === "dep" && (s === "holding" || s === "lined_up")) {
+        if (a.rwyChanged) return null;                 // Ground re-clears it to the new runway
         const arr = this.nearestArrival(e);
         const gap = this.lastTakeoff ? this.t - this.lastTakeoff.t : 999;
-        const need = this.lastTakeoff && this.lastTakeoff.wtc === "H" && a.wtc !== "H" ? 125 : 70;
-        if (this.runwayFree(e.rwy, a) && arr > 4 * NM && gap >= need) return `${cs}, runway ${e.name}, cleared for takeoff${this.windTxt()}`;
-        if (s === "holding" && this.runwayFree(e.rwy, a) && arr > 5 * NM) return `${cs}, runway ${e.name}, line up and wait`;
+        const need = this.lastTakeoff && this.lastTakeoff.rwy === e.rwy ? this.depSpacingS(this.lastTakeoff, a) : 0;
+        if (this.closedRunways.has(e.rwy) || this.hotExpired(a)) return null;
+        if (this.runwayFree(e.rwy, a) && arr > (this.lvp ? 6 : 4) * NM && gap >= need) return `${cs}, runway ${e.name}, cleared for takeoff${this.windTxt()}`;
+        if (s === "holding" && this.runwayFree(e.rwy, a) && arr > 5 * NM && !this.lvp) return `${cs}, runway ${e.name}, line up and wait`;
         return null;
       }
       if (a.kind === "dep" && s === "airborne" && a.alt > 700) {
@@ -1383,9 +1561,9 @@ export class Sim {
       }
       if (a.kind === "arr" && s === "final") {
         const d = this.distToThr(a);
-        if (!a.landClr && d < 6 * NM && this.runwayFree(a.end.rwy, a) &&
+        if (!a.landClr && d < 6 * NM && this.runwayFree(a.end.rwy, a) && !this.closedRunways.has(a.end.rwy) &&
           !this.ac.some(o => o.kind === "dep" && ["lining", "lined_up", "roll"].includes(o.state) && o.depEnd.rwy === a.end.rwy))
-          return `${cs}, runway ${a.end.name}, cleared to land${this.windTxt()}`;
+          return a.touchGo ? `${cs}, runway ${a.end.name}, cleared touch and go${this.windTxt()}` : `${cs}, runway ${a.end.name}, cleared to land${this.windTxt()}`;
         if (!a.landClr && d < 1.2 * NM && !a.nordo) return `${cs}, go around`;
       }
       if (a.kind === "arr" && (s === "vacated" || s === "vacating") && this.positions.GND && !a.toldGnd && s === "vacated") {
@@ -1614,38 +1792,166 @@ export class Sim {
         a.crossOk.add(e.rwy); a.calledHold = false;
         return `cross runway ${i.rwy}`;
       }
-      case "hold": a.holdPos = true; return "holding position";
-      case "continue": a.holdPos = false; return "continue taxi";
+      case "hold": {
+        if (a.veh && a.task && a.task.kind === "incursion") { a.spd = 0; a.task = null; a.onDone = null; a.crossOk.clear(); a.pauseUntil = this.t + 25; this.vehicleHome(a); this.alert(`${a.cs} stopped.`, "stopped" + a.cs, false); return "stopping"; }
+        a.holdPos = true; if (a.leader && a.leader.veh) a.leader.holdPos = true;
+        return a.state === "rto" ? "holding position on the runway" : "holding position";
+      }
+      case "continue": {
+        a.holdPos = false; if (a.leader && a.leader.veh) a.leader.holdPos = false;
+        if (a.holdShortIdx != null) { a.holdShortIdx = null; a.holdShortTwy = null; a.calledHold = false; }
+        if (a.giveWay) a.giveWay = null;
+        return "continue taxi";
+      }
+      case "holdShortTwy": {
+        if (!a.onGround || !a.path) return { unable: "Say again" };
+        const idx = a.path.findIndex((p, k) => k >= a.pi && k + 1 < a.path.length && p[2] != null && a.path[k + 1][2] != null && (this.apt.edgeBetween(p[2], a.path[k + 1][2]) || {}).name === i.twy);
+        if (idx < 0) return { unable: `Say again, we don't cross taxiway ${i.twy} on our route` };
+        a.holdShortIdx = idx; a.holdShortTwy = i.twy; a.calledHold = false;
+        return `hold short of taxiway ${i.twy}`;
+      }
+      case "contApp": {
+        if (a.kind !== "arr" || a.state !== "final") return { unable: "Say again" };
+        a.contApp = true;
+        return "continue approach";
+      }
+      case "expect": {
+        const m = i.what.match(/^(?:runway )?(\d{2}[lrc]?)$/i);
+        const what = m ? `runway ${m[1].toUpperCase()}` : i.what;
+        a.expect = what;
+        if (m && a.kind === "dep" && apt.findRunwayEnd(m[1]) && a.onGround && !a.path) a.depEnd = apt.findRunwayEnd(m[1]);
+        return `expecting ${what}`;
+      }
+      case "report": {
+        a.reports = { ...(a.reports || {}), [i.what]: true };
+        if (/passing|reaching/.test(i.what)) { const m = i.what.match(/(\d{3,5})/); if (m) a.reportAlt = +m[1]; }
+        return `wilco, report ${i.what}`;
+      }
+      case "giveWay": {
+        const o = this.findSubject(a, i, i.phase || "taxiing");
+        if (!o) return { unable: "Say again the traffic" };
+        a.giveWay = { ac: o }; a.holdPos = true;
+        return `giving way to the ${spokenType(o.type)}`;
+      }
+      case "follow": {
+        const o = this.findSubject(a, i, i.phase || "taxiing");
+        if (!o || !o.onGround) return { unable: "Say again the traffic" };
+        a.leader = o;                       // taxis behind it once it has its own taxi clearance
+        a.holdPos = false;
+        return `following the ${spokenType(o.type)}`;
+      }
       case "lineup": {
-        if (a.kind !== "dep" || !["holding", "taxi"].includes(a.state)) return { unable: "Say again" };
+        if (a.kind !== "dep" || !["holding", "taxi", "cond_lineup"].includes(a.state)) return { unable: "Say again" };
         if (i.rwy && apt.findRunwayEnd(i.rwy) !== a.depEnd) return { unable: `Confirm runway, we are at holding point ${a.depEnd.name}` };
+        if (this.litBarAhead(a)) return { unable: "Unable, the stop bar is still lit" };
+        if (this.closedRunways.has(a.depEnd.rwy)) return { unable: `Confirm, we understood runway ${a.depEnd.name} is closed?` };
         this.serviced(a, "ready");
+        if (i.cond) {
+          const o = this.findSubject(a, i.cond, i.cond.phase || "landing");
+          if (!o) return { unable: "Say again the traffic" };
+          a.cond = { ...i.cond, ac: o }; a.condTakeoff = false; a.state = "cond_lineup";
+          return `behind the ${i.cond.phase || "landing"} ${spokenType(o.type)}, line up and wait runway ${a.depEnd.name} behind`;
+        }
         this.lineUp(a, false);
         return `line up and wait runway ${a.depEnd.name}`;
       }
       case "takeoff": {
-        if (a.kind !== "dep" || !["holding", "taxi", "lineup", "lining", "lined_up"].includes(a.state)) return { unable: "Say again" };
+        if (a.heli && a.onGround && ["parked", "taxi_req", "clr_req", "cleared"].includes(a.state)) { this.heliLift(a); return "cleared for takeoff from present position"; }
+        if (a.kind !== "dep" || !["holding", "taxi", "lineup", "lining", "lined_up", "cond_lineup"].includes(a.state)) return { unable: "Say again" };
         if (i.rwy && apt.findRunwayEnd(i.rwy) !== a.depEnd) return { unable: `Confirm runway, we are at ${a.depEnd.name}` };
+        if (this.hotExpired(a)) return { unable: "Unable, our holdover time has expired, request taxi back for de-icing" };
+        if (this.closedRunways.has(a.depEnd.rwy)) return { unable: `Confirm, we understood runway ${a.depEnd.name} is closed?` };
+        if (a.state !== "lined_up" && this.litBarAhead(a)) return { unable: "Unable, the stop bar is still lit" };
+        const refuse = this.windRefusal(a, a.depEnd);
+        if (refuse && !a.acceptedWind) { const best = this.bestEndForWind(); a.acceptedWind = true; return { unable: `Unable runway ${a.depEnd.name}, ${refuse}${best && best !== a.depEnd ? ", request runway " + best.name : ""}` }; }
         const occupied = !this.runwayFree(a.depEnd.rwy, a);
         if (occupied && !a.confirmTO && !i.affirm) { a.confirmTO = true; return { special: "confirmTakeoff" }; }
         a.confirmTO = false;
         this.serviced(a, "ready");
-        a.toClr = true;
+        a.toClr = true; a.immediate = !!i.immediate;
+        if (i.cond && a.state !== "lined_up") {
+          const o = this.findSubject(a, i.cond, i.cond.phase || "landing");
+          if (!o) return { unable: "Say again the traffic" };
+          a.cond = { ...i.cond, ac: o }; a.condTakeoff = true; a.state = "cond_lineup";
+          return `behind the ${i.cond.phase || "landing"} ${spokenType(o.type)}, cleared for takeoff runway ${a.depEnd.name} behind`;
+        }
         if (a.state === "lined_up") this.startRoll(a);
-        else if (a.state === "holding" || a.state === "taxi") this.lineUp(a, true);
-        return `cleared for takeoff runway ${a.depEnd.name}`;
+        else if (["holding", "taxi", "cond_lineup"].includes(a.state)) this.lineUp(a, true);
+        return `cleared for ${i.immediate ? "immediate " : ""}takeoff runway ${a.depEnd.name}`;
+      }
+      case "cancelTakeoff": {
+        if (a.kind !== "dep") return { unable: "Say again" };
+        if (["lineup", "lining", "lined_up", "cond_lineup"].includes(a.state) && a.toClr) { a.toClr = false; a.condTakeoff = false; if (a.state === "cond_lineup") a.state = "holding"; return "cancel takeoff clearance, holding"; }
+        if (a.state === "roll") {
+          if (a.spd < 80 * KT) { this.rejectTakeoff(a, "takeoff clearance cancelled"); return "stopping"; }
+          return { unable: "Unable, we are committed, continuing" };
+        }
+        return { unable: "Say again" };
+      }
+      case "option": case "touchGo": {
+        if (a.state !== "final" && a.state !== "circuit") return { unable: "Say again" };
+        if (i.rwy && apt.findRunwayEnd(i.rwy) !== a.end) return { unable: `Confirm runway, we are for ${a.end.name}` };
+        this.touchAndGo(a); this.serviced(a, "land");
+        return `cleared ${i.t === "option" ? "for the option" : "touch and go"} runway ${a.end.name}`;
+      }
+      case "fullStop": { this.fullStop(a); return "full stop"; }
+      case "landAfter": {
+        if (a.kind !== "arr" || a.state !== "final") return { unable: "Say again" };
+        const o = this.findSubject(a, i, i.phase || "landing");
+        if (!o) return { unable: "Say again the traffic" };
+        a.landAfter = { ...i, ac: o };
+        return `land after the ${i.phase} ${spokenType(o.type)}, runway ${a.end.name}`;
       }
       case "land": {
-        if (a.kind !== "arr" || a.state !== "final") return { unable: "Say again" };
+        if (a.kind !== "arr" || (a.state !== "final" && a.state !== "circuit")) return { unable: "Say again" };
         if (i.rwy && apt.findRunwayEnd(i.rwy) !== a.end) return { unable: `Confirm runway, we are established ${a.end.name}` };
+        if (this.closedRunways.has(a.end.rwy)) return { unable: `Confirm, we understood runway ${a.end.name} is closed?` };
         this.serviced(a, "land");
-        a.landClr = true;
+        a.landClr = true; a.fullStop = true; a.touchGo = false;
         return `cleared to land runway ${a.end.name}`;
       }
       case "goaround": {
-        if (a.kind !== "arr" || a.state !== "final") return { unable: "Say again" };
+        if (a.kind !== "arr" || (a.state !== "final" && a.state !== "circuit")) return { unable: "Say again" };
         this.goAround(a, "instructed");
         return null;
+      }
+      case "join": {
+        if (a.kind !== "arr" || !["inbound", "circuit", "final", "goaround"].includes(a.state)) return { unable: "Say again" };
+        a.joined = true; a.circuitHold = false;
+        return this.joinCircuit(a, i);
+      }
+      case "extend": return this.extendDownwind(a) ? "extending downwind" : { unable: "Say again" };
+      case "orbit": return this.orbit(a, i.side) ? `orbit ${i.side}` : { unable: "Say again" };
+      case "svfr": { a.svfr = true; return "cleared special VFR"; }
+      case "remainOutside": { if (a.state === "inbound" || a.circuitHold) { a.remainOutside = true; return "remaining outside the control zone"; } return { unable: "Say again" }; }
+      case "lift": { return this.heliLift(a) ? "lifting" : { unable: "Say again" }; }
+      case "deice": {
+        if (a.kind !== "dep" || !a.onGround || !["push_req", "cleared", "parked", "taxi_req", "pushed"].includes(a.state)) return { unable: "Say again" };
+        this.serviced(a, "deice");
+        this.startDeice(a, !!i.pad);
+        return i.pad ? "taxi to the de-icing pad" : "de-icing on stand, will report when complete";
+      }
+      case "towApproved": {
+        if (!a.veh || !a.task || a.task.kind !== "tow") return { unable: "Say again" };
+        a.towOk = true; a.wants = null; a.holdPos = false; if (a.pi >= (a.path || []).length) this.towNext(a);
+        return "tow approved, will report complete";
+      }
+      case "enterRwy": {
+        const e = apt.findRunwayEnd(i.rwy); if (!e) return { unable: "Say again runway" };
+        if (!a.veh || !a.task) return { unable: "Say again" };
+        a.crossOk.add(e.rwy); a.wants = null; a.holdPos = false; if (a.pi >= (a.path || []).length) this.inspectionNext(a);
+        return `entering runway ${i.rwy}, will report vacated`;
+      }
+      case "vacate": {
+        if (a.state === "rto" || (a.veh && a.task)) { if (a.veh) { a.task && (a.task.stage = "inspecting"); this.inspectionNext(a); return "vacating"; } return this.vacateRunway(a) ? "vacating the runway" : { unable: "Unable, we need a tow" }; }
+        if (a.state === "lined_up" || a.state === "lineup" || a.state === "lining") { this.lightClearRunway(a); return "vacating the runway"; }
+        return { unable: "Say again" };
+      }
+      case "rwyClosed": { const r = (a.depEnd || a.end || this.depEnd).rwy; this.closedRunways.add(r); this.onEvent({ type: "rwyClosed", rwy: r }); return "roger, runway closed"; }
+      case "rffs": {
+        if (a.veh && a.vtype === "fire") { a.rescueLevel = i.level; a.wants = null; return i.level === "full" ? "full emergency, proceeding to the runway" : "local standby, copied"; }
+        const v = this.rescueRespond(this.ac.find(o => o.mayday || o.pan) || null, i.level);
+        return v ? "roger" : { unable: "Say again" };
       }
       case "contact": {
         if (!this.split) {
@@ -1782,7 +2088,17 @@ export class Sim {
       waiting: a.reqAt != null ? Math.round(this.t - a.reqAt) : null, rb: a.rbError && !a.rbError.fixed ? { label: a.rbError.label, missed: !!a.rbError.missed, wrong: a.rbError.wrong, right: a.rbError.right } : null,
       atisReported: a.atisReported || null, lastWant: a.lastWant || "", ifr: !!a.ifr, calledIn: !!a.calledIn, abbrev: !!a.abbrev,
       crewNat: a.nat || "", gender: a.crew && a.crew[0] ? a.crew[0].gender || "" : "", lastCall: a.lastCall ?? null,
+      ctot: a.ctot != null ? ctotStatus(a.ctot, this.t) : null, hot: a.hotUntil != null ? Math.round(a.hotUntil - this.t) : null, deiced: !!a.deiced,
+      cond: a.cond && a.cond.ac ? `behind ${a.cond.ac.cs}` : "", priority: a.priority || "", pan: !!a.pan, broken: !!a.broken, towing: !!a.towing,
+      heli: !!a.heli, touchGo: !!a.touchGo, circuits: a.circuits || 0, wants: a.wants || "", rwyChanged: !!a.rwyChanged, giveWay: a.giveWay && a.giveWay.ac ? a.giveWay.ac.cs : "",
     }));
+  }
+
+  /** Operational state for panels and pop-outs. */
+  status() {
+    return { lvp: this.lvp, rvr: this.rvr ?? null, vis: this.vis ?? null, closed: [...this.closedRunways].map(r => this.apt.runways[r].label), deice: !!this.deiceNeeded,
+      snow: !!this.snow, wind: this.wind, rwyChange: this.rwyChange && !this.rwyChange.done ? { from: this.rwyChange.from.name, to: this.rwyChange.to.name } : null,
+      hint: this.rwyChangeHint || null, fod: this.fod, stopBars: this.apt.stopBars.map(b => ({ id: b.id, lit: b.lit })) };
   }
 
   /** The aircraft on a position's frequency (for voice casting: no two identical voices on one frequency). */
@@ -1790,3 +2106,6 @@ export class Sim {
 }
 
 const capFirstObj = (r) => ({ d: cap(r.d), s: cap(r.s) });
+installOps(Sim);
+installVfr(Sim);
+installEvents(Sim);

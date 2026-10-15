@@ -75,6 +75,36 @@ try {
   ok(await p.eval(`/information [A-Z][a-z]+/.test(TT.app.atisText()) && /Runway in use/.test(TT.app.atisText())`), "ATIS text generated from the METAR: " + (await p.eval(`TT.app.atisText().slice(0, 90)`)));
   ok(await p.eval(`document.getElementById("atisListen") && document.getElementById("wxPanel").innerText.includes("ATIS")`), "ATIS listen button and weather panel present");
 
+  // ---- Phase D: sequence panel, LVP & stop bars, weather scenario, checklist, runway inspection ----
+  await p.eval(`TT.app.setSpeed(0)`);
+  await p.eval(`(() => { const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture({ ga: false }); if (d && !d.ga) { d.state = "holding"; d.depEnd = s.depEnd; d.holdAt = s.t; d.onGround = true; d.ctot = s.t + 900; d.freq = "TWR"; window.seqDep = d; break; } if (d) s.putBack(d); } })()`);
+  ok(await p.waitFor(`!document.getElementById("seqPanel").classList.contains("hidden") && document.getElementById("seqPanel").innerText.includes(seqDep.cs) && /CTOT/.test(document.getElementById("seqPanel").innerText)`, 3000), "departure sequence panel lists the holding departure with its CTOT");
+  await p.eval(`(() => { const el = document.getElementById("setLvp"); el.checked = true; el.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+  ok(await p.eval(`TT.sim.lvp && TT.apt.stopBars.length > 0 && TT.apt.stopBars.every(b => b.lit) && /low visibility/i.test(TT.app.atisText())`), "LVP switch: stop bars lit, ATIS says low visibility procedures (" + (await p.eval(`TT.apt.stopBars.length`)) + " bars)");
+  // click a stop bar on the radar to switch it off
+  await p.eval(`(() => { const b = TT.apt.stopBars[0]; TT.radar.cx = b.p[0]; TT.radar.cy = b.p[1]; TT.radar.staticKey = null; })()`); await sleep(150);
+  await p.eval(`(() => { const b = TT.apt.stopBars[0]; const s = TT.radar.toScreen(b.p); const c = document.getElementById("radar"); const r = c.getBoundingClientRect();
+    const ev = (t) => new MouseEvent(t, { bubbles: true, clientX: r.left + s[0], clientY: r.top + s[1], button: 0 }); c.dispatchEvent(ev("mousedown")); c.dispatchEvent(ev("mouseup")); })()`);
+  ok(await p.eval(`!TT.apt.stopBars[0].lit && TT.apt.stopBars[0].manual`), "clicking a stop bar on the radar toggles it (manual override)");
+  await p.eval(`(() => { const el = document.getElementById("setLvp"); el.checked = false; el.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+  await p.eval(`(() => { const el = document.getElementById("setWx"); el.value = "fog"; el.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+  ok(await p.eval(`TT.sim.wxScenario && TT.sim.wxScenario.name === "fog" && /BR|FG/.test(document.getElementById("atisBox").innerText)`), "weather scenario: synthetic METAR shown in the ATIS box: " + (await p.eval(`document.getElementById("atisBox").innerText.replace(/\\s+/g, " ").slice(0, 80)`)));
+  await p.eval(`(() => { const s = TT.sim; s.t += 11 * 60; s.wxTick(); })()`);
+  ok(await p.eval(`TT.sim.lvp && !TT.sim.lvpManual`), "fog scenario brings LVP after ten minutes");
+  await p.eval(`(() => { const el = document.getElementById("setWx"); el.value = "live"; el.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+  ok(await p.eval(`!TT.sim.wxScenario`), "back to the live METAR");
+  await p.eval(`(() => { const s = TT.sim; const e = s.arrEnd; const others = s.ac.filter(a => a.kind === "arr" && !a.onGround); others.forEach(a => a.onGround = true);
+    for (let k = 0; k < 20; k++) { const a = s.spawnArrival(); if (a && !a.ga) { a.pos = [e.thr[0] - e.v[0] * 9 * 1852, e.thr[1] - e.v[1] * 9 * 1852]; a.alt = 3000; window.evArr = a; break; } if (a) s.ac.splice(s.ac.indexOf(a), 1); }
+    others.forEach(a => a.onGround = false); s.abnormalEvent("pan"); })()`);
+  ok(await p.waitFor(`!document.getElementById("checkPanel").classList.contains("hidden") && /PAN/.test(document.getElementById("checkPanel").innerText)`, 3000), "PAN PAN opens the checklist panel");
+  await p.eval(`document.getElementById("checkClose").click()`);
+  ok(await p.eval(`document.getElementById("checkPanel").classList.contains("hidden")`), "checklist panel closes");
+  await p.eval(`TT.sim.runwayInspection(TT.sim.depEnd.rwy, "routine")`);
+  ok(await p.eval(`TT.sim.closedRunways.size === 1 && TT.sim.ac.some(a => a.veh && a.vtype === "ops" && a.task) && /CLOSED/.test(document.getElementById("wxPanel").innerText)`), "runway inspection closes the runway (Ops dispatched, weather panel shows CLOSED)");
+  await p.eval(`(() => { const s = TT.sim; for (const v of s.ac.filter(a => a.veh && a.task)) { v.task = null; v.gone = true; } s.closedRunways.clear(); if (window.evArr) evArr.gone = true; if (window.seqDep) seqDep.gone = true; })()`);
+  ok(await p.eval(`["setWx", "setLvp", "setRecat", "setVfr", "setAbnormals", "setAbnormalRate", "setSeq"].every(id => document.getElementById(id)) && document.querySelectorAll("[data-ev]").length >= 12`), "operations & weather settings and event buttons present");
+  await p.eval(`TT.app.setSpeed(1)`);
+
   // ---- dialogs ----
   await p.click("#settingsBtn"); await sleep(300);
   ok(await p.eval(`document.getElementById("settings").open && document.querySelectorAll("#voiceTable tr").length > 10`), "settings dialog with voice table");

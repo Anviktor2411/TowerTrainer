@@ -7,7 +7,8 @@ let KNOWN_TAXIWAYS = null;
 /** Taxiway / taxilane names of the loaded airport, so "via" accepts apron lane names like "L3A" too. */
 export function setTaxiNames(set) { KNOWN_TAXIWAYS = set ? new Set([...set].map(x => String(x).toUpperCase())) : null; }
 const STOP_WORDS = new Set(["hold", "holding", "cross", "contact", "monitor", "runway", "and", "then", "behind",
-  "give", "way", "line", "cleared", "expect", "short", "of", "to", "stand", "gate", "squawk", "climb", "via", "for"]);
+  "give", "way", "line", "cleared", "expect", "short", "of", "to", "stand", "gate", "squawk", "climb", "via", "for", "report", "follow"]);
+const TRAFFIC_WORDS = "(?:the |that )?(landing|departing|arriving|crossing|taxiing|next|preceding)?\\s*([a-z0-9 ]{2,30}?)";
 
 /** Normalise spoken/typed text: number words -> digits, phonetic letters -> letters, merge groups. */
 export function normalize(text) {
@@ -98,7 +99,7 @@ export function parseInstructions(s) {
   };
 
   // IFR clearance: "cleared to riga [via X departure] [climb 4000] squawk 4521"
-  add(/\bcleared (?!(?:to )?land\b)(?!for\b)(?!take)(?!(?:to )?cross)(?!(?:for )?(?:ils|vor|rnav|rnp|visual|approach|direct|via)\b)(?:to )?([a-z0-9]+)/, (m) => {
+  add(/\bcleared (?!(?:to )?land\b)(?!for\b)(?!take)(?!touch)(?!special)(?!low approach)(?!stop and go)(?!immediate)(?!(?:to )?cross)(?!(?:for )?(?:ils|vor|rnav|rnp|visual|approach|direct|via)\b)(?:to )?([a-z0-9]+)/, (m) => {
     const tail = s.slice(m.index);
     const sid = tail.match(/\bvia ([a-z0-9 ]+?)(?: departure)?(?=,| climb| initial| squawk| maintain|$)/);
     const sq = tail.match(/squawk (\d{4})/);
@@ -124,13 +125,40 @@ export function parseInstructions(s) {
   }));
   add(/\btaxi via\b/, (m) => /taxi(?: to)? (?:stand|gate|parking)/.test(s) ? null : ({ t: "taxi", rwy: null, via: viaList(s, m.index) }));
   add(new RegExp(`\\bhold(?:ing)? short(?: of)?(?: runway)? ${RWY}`), (m) => ({ t: "holdShort", rwy: m[1].toUpperCase() }));
+  add(/\bhold(?:ing)? short(?: of)? (?:taxiway )?([a-z]{1,2}\d{0,2})\b(?! ?\d)/, (m) => KNOWN_TAXIWAYS && KNOWN_TAXIWAYS.has(m[1].toUpperCase()) && !/^\d/.test(m[1]) ? { t: "holdShortTwy", twy: m[1].toUpperCase() } : null);
   add(new RegExp(`\\bcross(?:ing)?(?: runway)? ${RWY}`), (m) => ({ t: "cross", rwy: m[1].toUpperCase() }));
-  add(/\bhold position\b/, () => ({ t: "hold" }));
+  add(/\bhold position\b|\bstop immediately\b/, () => ({ t: "hold" }));
   add(/\bcontinue taxi\b/, () => ({ t: "continue" }));
-  add(new RegExp(`\\bline up(?: and wait)?(?: runway ${RWY})?`), (m) => ({ t: "lineup", rwy: m[1] ? m[1].toUpperCase() : rwyNear(m.index) }));
-  add(new RegExp(`\\bcleared (?:for )?take ?off(?: runway ${RWY})?`), (m) => ({ t: "takeoff", rwy: m[1] ? m[1].toUpperCase() : rwyNear(m.index) }));
+  add(/\bcontinue approach\b/, () => ({ t: "contApp" }));
+  // conditional clearance: "behind the landing A320, line up and wait behind"
+  add(new RegExp(`\\bbehind ${TRAFFIC_WORDS}(?=,? (?:line up|cross|enter|hold|taxi)|,|$)`), (m) => ({ t: "condition", phase: m[1] || "", subject: m[2].trim() }));
+  add(new RegExp(`\\bline up(?: and wait)?(?: runway ${RWY})?( behind)?`), (m) => ({ t: "lineup", rwy: m[1] ? m[1].toUpperCase() : rwyNear(m.index) }));
+  add(new RegExp(`\\bcleared (?:for )?(immediate )?take ?off(?! from present position)(?: runway ${RWY})?`), (m) => ({ t: "takeoff", rwy: m[2] ? m[2].toUpperCase() : rwyNear(m.index), immediate: !!m[1] }));
+  add(/\bcancel take ?off(?: clearance)?\b|\btake ?off clearance cancelled\b|\bstop,? stop\b/, () => ({ t: "cancelTakeoff" }));
   add(new RegExp(`\\bcleared (?:to )?land(?: runway ${RWY})?`), (m) => ({ t: "land", rwy: m[1] ? m[1].toUpperCase() : rwyNear(m.index) }));
+  add(new RegExp(`\\bcleared (?:for )?(?:the )?option(?: runway ${RWY})?`), (m) => ({ t: "option", rwy: m[1] ? m[1].toUpperCase() : rwyNear(m.index) }));
+  add(new RegExp(`\\bcleared (?:for )?(?:touch and go|touch-and-go|low approach|stop and go)(?: runway ${RWY})?`), (m) => ({ t: "touchGo", rwy: m[1] ? m[1].toUpperCase() : rwyNear(m.index) }));
+  add(new RegExp(`\\bland after ${TRAFFIC_WORDS}(?=,? runway|,|$)`), (m) => ({ t: "landAfter", phase: m[1] || "landing", subject: m[2].trim() }));
   add(/\bgo around\b/, () => ({ t: "goaround" }));
+  add(/\bexpect (?:runway |an? |the |ils )?([a-z0-9 ]{2,40}?)(?=,|$| squawk| climb| contact)/, (m) => ({ t: "expect", what: m[1].trim() }));
+  add(/\breport (vacated|vacating|runway vacated|established|localizer established|final|short final|ready|airborne|downwind|base|passing (?:\d{3,5})(?: feet)?|holding short|reaching (?:\d{3,5})(?: feet)?|overhead|the field in sight|field in sight)\b/, (m) => ({ t: "report", what: m[1].replace("runway vacated", "vacated").replace("localizer established", "established").replace("short final", "final").replace("the field in sight", "field in sight") }));
+  add(new RegExp(`\\bgive way to ${TRAFFIC_WORDS}(?=,|$| then| and)`), (m) => ({ t: "giveWay", phase: m[1] || "", subject: m[2].trim() }));
+  add(new RegExp(`\\bfollow ${TRAFFIC_WORDS}(?=,|$| to| via)`), (m) => /^(me|the follow)/.test(m[2]) ? null : ({ t: "follow", phase: m[1] || "", subject: m[2].trim() }));
+  // VFR
+  add(new RegExp(`\\bjoin (left|right)?\\s?(downwind|base|final|overhead|crosswind|straight in)(?: runway ${RWY})?`), (m) => ({ t: "join", side: m[1] || null, leg: m[2], rwy: m[3] ? m[3].toUpperCase() : null }));
+  add(/\bextend downwind\b/, () => ({ t: "extend" }));
+  add(/\b(?:orbit|make a (?:left|right) (?:360|three sixty)) ?(left|right)?/, (m) => ({ t: "orbit", side: m[1] || (/left 360|left three sixty/.test(s) ? "left" : "right") }));
+  add(/\bcleared special vfr\b|\bspecial vfr (?:clearance )?(?:approved|granted)\b/, () => ({ t: "svfr" }));
+  add(/\bremain outside (?:the )?(?:control zone|controlled airspace|zone)\b|\bhold outside (?:the )?zone\b/, () => ({ t: "remainOutside" }));
+  add(/\b(?:lift|hover taxi|air taxi) approved\b|\bcleared for take ?off from present position\b/, () => ({ t: "lift" }));
+  add(/\bmake (?:a )?full stop\b|\bfull stop\b/, () => ({ t: "fullStop" }));
+  // de-icing, tows, vehicles
+  add(/\bde[- ]?icing (?:approved|on stand|on the stand)\b|\btaxi to (?:the )?de[- ]?ic(?:e|ing) (?:pad|area)\b/, (m) => ({ t: "deice", pad: /pad|area/.test(m[0]) }));
+  add(/\btow(?:ing)? approved\b/, () => ({ t: "towApproved", via: viaList(s, 0) }));
+  add(new RegExp(`\\b(?:enter|proceed onto|cleared to enter|proceed on) runway ${RWY}\\b`), (m) => ({ t: "enterRwy", rwy: m[1].toUpperCase() }));
+  add(/\bvacate (?:the )?runway\b|\bvacate immediately\b/, () => ({ t: "vacate" }));
+  add(/\brunway (?:is )?(?:closed|unavailable)\b/, () => ({ t: "rwyClosed" }));
+  add(/\bstandby for (?:the )?(?:aircraft|arrival|emergency)\b|\blocal standby\b|\bfull emergency\b|\baircraft accident\b/, (m) => ({ t: "rffs", level: /full|accident/.test(m[0]) ? "full" : "local" }));
   add(/\b(?:contact|monitor) ((?:[a-z]+ ){0,2}[a-z]+)(?:,? (?:on )?(\d{3}\.\d{1,3}|1\d{5}))?/, (m) => {
     if (/^(station|me)$/.test(m[1])) return null;
     const f = m[2] && !m[2].includes(".") ? m[2].slice(0, 3) + "." + m[2].slice(3) : m[2];
@@ -154,7 +182,15 @@ export function parseInstructions(s) {
   // a "line up" that is part of "cleared for takeoff" sequences is fine; drop duplicates of the same type
   found.sort((a, b) => a.at - b.at);
   const seen = new Set();
-  return found.filter(f => { if (seen.has(f.t)) return false; seen.add(f.t); return true; });
+  const out = found.filter(f => { if (seen.has(f.t)) return false; seen.add(f.t); return true; });
+  // a condition attaches to the instruction that follows it (or precedes it: "line up behind the landing A320")
+  const cond = out.find(f => f.t === "condition");
+  if (cond) {
+    const target = out.find(f => f.at > cond.at && ["lineup", "cross", "takeoff", "taxi", "hold"].includes(f.t)) || out.find(f => ["lineup", "cross"].includes(f.t));
+    if (target) target.cond = { phase: cond.phase, subject: cond.subject };
+  }
+  // "hold short" after a taxi/cross is a limit on that clearance, not a new one; "continue" in "continue approach" is not taxi
+  return out.filter(f => f.t !== "condition");
 }
 
 /** Canonical form of a stand name for matching ("Gate E2" == "e 2" == "echo two"). */

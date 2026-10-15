@@ -11,11 +11,14 @@ import { coach, coachHints } from "./coach.js";
 import { Bridges } from "./bridges.js";
 import { Guide } from "./guide.js";
 import { NAT_NAME } from "./data.js";
-import { suggestSid, procLines } from "./procs.js";
+import { suggestSid, procLines, runwayMatches } from "./procs.js";
 import { nextExpected, callsignText } from "./advisor.js";
 import { statePhrase, issueMarkers } from "./labels.js";
 import { buildAtis, parseMetar, atisSummary } from "./atis.js";
 import { daylight } from "./daylight.js";
+import { departureSequence, arrivalSpacing } from "./flow.js";
+import { CHECKLISTS } from "./events.js";
+import { synthMetar } from "./ops.js";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -33,6 +36,7 @@ const PRESET_EFFECT = { clean: 0, good: 0.85, distant: 1, old: 0.95 };
 const DEFAULTS = {
   accents: "natural", rate: 1, effect: 0.85, preset: "good", voices: true, blocked: true, rbErr: 4, sayAgain: 2, oldAtis: 10, events: false,
   dep: 10, arr: 8, coach: false, lang: "en", graph: false, monitor: [], occupancy: 70, vehicles: -1, waves: true, osm: true, realMix: true, nightAuto: true,
+  wx: "live", lvp: false, recat: false, vfr: 2, abnormals: false, abnormalRate: 2, seq: true,
   staff: { mode: "combined", keys: ["TWR"] },
   xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false },
 };
@@ -138,6 +142,8 @@ function bootMain() {
     $("aptName").textContent = `${apt.name}${apt.edges.length ? "" : " — no taxi routes in Gateway data"}`;
     radio.airport = apt.icao;
     radar.setAirport(apt);
+    radar.stopBars = apt.stopBars || [];
+    radar.onStopBar = (bar) => { if (!sim) return; sim.setStopBar(bar, !bar.lit); sysLog(`Stop bar ${bar.id} (runway ${apt.runways[bar.rwy] ? apt.runways[bar.rwy].label : "?"}) switched ${bar.lit ? "ON" : "OFF"}.`); };
     const sel = $("rwySel"); sel.innerHTML = "";
     for (const r of apt.runways) for (const e of r.ends) sel.add(new Option(e.name, e.name));
     metar = null;
@@ -213,6 +219,12 @@ function bootMain() {
     if (!sim || !apt) return;
     const rwy = sim.depEnd.name;
     sim.suggest = (a) => suggestSid(procs, rwy, { lat: apt.d.lat, lon: apt.d.lon, icao: apt.icao }, a.other, sim.region);
+    // the published missed approach of the runway in use (D4): legs with lat/lon from the CIFP
+    sim.missedFor = (end) => {
+      const app = (procs && procs.apps || []).find(p => p.missed && p.missed.length && p.missed.some(l => l.lat != null) &&
+        (Object.keys(p.rwy || {}).some(k => runwayMatches(k, end.name)) || (p.runways || []).some(r => runwayMatches(r, end.name))));
+      return app ? app.missed : null;
+    };
     radar.setProcs(procs ? procLines(procs, rwy) : []);
     const src = procs && procs.source ? procs.source : null;
     const pill = $("navPill");
@@ -239,15 +251,17 @@ function bootMain() {
       events: settings.events, clockUtc: Date.now(),
       occupancy: (+settings.occupancy || 0) / 100, waves: !!settings.waves,
       serviceVehicles: +settings.vehicles >= 0 ? +settings.vehicles : undefined,
+      recat: !!settings.recat, abnormals: !!settings.abnormals, abnormalRate: +settings.abnormalRate || 2, vfrPerHour: +settings.vfr || 0,
       onRadio: (m) => { radio.enqueue(m); bridges.transmission(m); },
       onAlert: alertBox,
       onEvent: onSimEvent,
     });
     sim.depPerHour = +settings.dep; sim.arrPerHour = +settings.arr;
     sim.setTrafficMix(settings.realMix ? trafficMix : null);
-    updateSky();
-    if (metar && typeof metar.wdir === "number") sim.wind = { dir: metar.wdir, spd: metar.wspd || 0 };
     if ($("rwySel").value) sim.setRunway($("rwySel").value);
+    applyWeather();
+    radar.vfrPoints = sim.vfrPoints();
+    updateSky();
     radio.onFrequency = (pos) => (sim ? sim.onFrequency(pos) : []);
     // after two stations block each other an AI controller asks who called; a staffed position leaves that to you
     radio.onBlocked = (pos) => { if (sim && sim.split && sim.positions[pos] && !sim.userWorks(pos)) setTimeout(() => sim && sim.atc(pos, Math.random() < 0.5 ? "station calling, say again" : "two stations calling at once, say again"), 900); };
@@ -271,6 +285,29 @@ function bootMain() {
     if (e.type === "nordoWants" && e.ac.lastWantAt !== e.ac._lastShown) { e.ac._lastShown = e.ac.lastWantAt; addLog(e.ac.freq, "sys", `(${esc(e.ac.cs)} has no radio — would say: “${esc(e.text)}”)`); }
     if (e.type === "followMeSent") addLog(e.ac.freq, "sys", `🚗 ${esc(e.veh.cs)} dispatched to ${esc(e.ac.cs)}`);
     if (e.type === "followMe") addLog(e.ac.freq, "sys", `🚗 ${esc(e.veh.cs)} leading ${esc(e.ac.cs)} to stand ${esc(e.ac.stand ? e.ac.stand.name : "")}`);
+    // Phase D: operations, weather and abnormal events
+    if (e.type === "abnormal") {
+      const who = e.ac ? e.ac.cs : e.veh ? e.veh.cs : "";
+      const title = { medical: "Medical emergency", birdstrike: "Bird strike", rto: "Rejected takeoff", breakdown: "Breakdown on the taxiway", fod: "FOD on the runway", incursion: "Runway incursion",
+        unstable: "Unstable approach", pan: "PAN PAN", mayday: "MAYDAY", "7500": "Squawk 7500 — unlawful interference", "7600": "Squawk 7600 — radio failure", "7700": "MAYDAY (7700)" }[e.kind] || e.kind;
+      sysLog(`⚠ ${title}${who ? ": " + who : ""}`);
+      if (e.checklist) showChecklist(e.kind, e.checklist, `${title}${who ? " — " + who : ""}`);
+    }
+    if (e.type === "emergency" && CHECKLISTS[{ "7500": "hijack", "7600": "rcf", "7700": "mayday" }[e.code]]) showChecklist(e.code, CHECKLISTS[{ "7500": "hijack", "7600": "rcf", "7700": "mayday" }[e.code]], `${e.ac.cs} squawking ${e.code}`);
+    if (e.type === "runwayChange") renderOps();
+    if (e.type === "runwayChanged") { sysLog(`Runway change: ${e.from} → ${e.to}. Departures already taxiing will ask for a new taxi clearance; arrivals inside 8 NM land on ${e.from}.`); $("rwySel").value = e.to; applyProcs(); renderOps(); }
+    if (e.type === "runwayChangeDone") { sysLog(`Runway change complete, runway ${e.to} in use.`); renderOps(); }
+    if (e.type === "lvp") { sysLog(e.on ? `Low visibility procedures in force (${e.why || ""}): CAT II/III holding points, stop bars on, no line-up with traffic on final, 6 NM spacing.` : `LVP cancelled (${e.why || ""}).`); updateSky(); renderOps(); }
+    if (e.type === "wx") { sysLog(e.live ? "Weather: back to the live METAR." : `Weather scenario ${e.scenario}: ${e.note || "changing"}.`); updateSky(); renderOps(); }
+    if (e.type === "inspection") { sysLog(`${e.veh.cs} requests runway ${apt.runways[e.rwy].label} for an inspection (${e.why}). The runway is closed until it reports clear.`); renderOps(); }
+    if (e.type === "inspectionDone") { sysLog(`${e.veh.cs}: runway ${apt.runways[e.rwy].label} inspected and clear.`); renderOps(); }
+    if (e.type === "rescue") sysLog(`${e.veh.cs} responding (${e.level === "full" ? "full emergency" : "local standby"})${e.ac ? " for " + e.ac.cs : ""}.`);
+    if (e.type === "tow") sysLog(`${e.veh.cs} requests to tow ${e.ac.cs} to ${e.dest.name} — "${e.veh.cs} tow approved".`);
+    if (e.type === "towDone") sysLog(`${e.veh.cs}: tow of ${e.ac.cs} complete.`);
+    if (e.type === "deice") sysLog(`${e.ac.cs} de-icing${e.ac.deice && e.ac.deice.atPad ? " at the pad" : " on stand"}; holdover time starts when it reports complete.`);
+    if (e.type === "rwyClosed") { sysLog(`Runway ${apt.runways[e.rwy].label} closed.`); renderOps(); }
+    if (e.type === "touchGo") sysLog(`${e.ac.cs} touch and go (${e.ac.circuits} of ${e.ac.wantCircuits || 2}).`);
+    if (e.type === "snow") sysLog(`${e.veh.cs} requests runway ${apt.runways[e.rwy].label} for snow clearing.`);
   }
 
   function bestRunway() {
@@ -284,15 +321,38 @@ function bootMain() {
     }
     return best.name;
   }
-  function windText() { return metar && metar.wdir != null ? `${String(metar.wdir).padStart(3, "0")}° / ${metar.wspd} kt` : "calm / unknown"; }
+  function windText() {
+    const w = sim && sim.wind && sim.wind.dir != null ? sim.wind : metar && metar.wdir != null ? { dir: metar.wdir, spd: metar.wspd || 0, gust: metar.wgst || 0 } : null;
+    return w ? `${String(Math.round(w.dir)).padStart(3, "0")}° / ${Math.round(w.spd)} kt${w.gust ? " G" + Math.round(w.gust) : ""}` : "calm / unknown";
+  }
+  /** The METAR the operation runs on: the live one, or the synthetic one of a scripted weather scenario (D1). */
+  function currentMetar() {
+    if (sim && sim.wxOverride && apt) return synthMetar(apt.icao, utcClock(), sim.wxOverride);
+    return metar && metar.rawOb ? metar.rawOb : "";
+  }
+  /** Push the METAR into the simulation: wind, visibility/RVR (LVP), temperature (de-icing), manual LVP, weather scenario. */
+  function applyWeather() {
+    if (!sim) return;
+    const dec = parseMetar(currentMetar());
+    sim.weatherFromMetar(dec);
+    if (!sim.wxScenario && !(dec.wind && dec.wind.dir != null) && metar && typeof metar.wdir === "number") sim.setWind({ dir: metar.wdir, spd: metar.wspd || 0, gust: metar.wgst || 0 });
+    if (settings.lvp) { sim.lvpManual = true; sim.setLvp(true, "manual"); }
+    if (settings.wx && settings.wx !== "live" && !sim.wxScenario) sim.setWxScenario(settings.wx);
+    renderOps();
+  }
 
   // ---------- ATIS ----------
   let atisOn = false;
   function utcClock() { const d = new Date((sim ? sim.clockUtc + sim.t * 1000 : Date.now())); return `${String(d.getUTCHours()).padStart(2, "0")}${String(d.getUTCMinutes()).padStart(2, "0")}`; }
   function atisText() {
     if (!sim || !apt) return "";
+    const remarks = [...(sim.atisRemarks || [])];
+    for (const r of sim.closedRunways) remarks.push(`Runway ${apt.runways[r].label} closed`);
+    if (sim.deiceNeeded) remarks.push("De-icing in progress, expect delays");
+    if (sim.rwyChange && !sim.rwyChange.done) remarks.push(`Runway change in progress, runway ${sim.rwyChange.to.name} in use`);
+    if (sim.fod) remarks.push(`Runway ${apt.runways[sim.fod.rwy].label} inspection pending`);
     return buildAtis({ icao: apt.icao, name: apt.callName, letter: sim.atisLetter(), rwy: sim.depEnd.name, arrRwy: sim.arrEnd.name,
-      metar: metar && metar.rawOb ? metar.rawOb : "", region: sim.region, utc: utcClock(), lvp: !!(sim.lvp), remarks: sim.atisRemarks || [] });
+      metar: currentMetar(), region: sim.region, utc: utcClock(), lvp: !!(sim.lvp), remarks });
   }
   function startAtis() { atisOn = true; $("atisListen").classList.add("on"); $("atisListen").textContent = "■ ATIS"; radio.playAtis(atisText()); }
   function stopAtis() { atisOn = false; $("atisListen").classList.remove("on"); $("atisListen").textContent = "▶ ATIS"; radio.stopAtis(); }
@@ -301,18 +361,54 @@ function bootMain() {
   function renderAtis() {
     if (!sim) return;
     const m = metar || {};
-    const dec = parseMetar(m.rawOb || "");
+    const raw = currentMetar();
+    const dec = parseMetar(raw);
     const qnh = dec.qnh || (m.altim ? Math.round(m.altim) : null);
-    const rvr = (m.rawOb || "").match(/\bR\d\d[LRC]?\/[PM]?\d{4}/g);
+    const rvr = raw.match(/\bR\d\d[LRC]?\/[PM]?\d{4}/g);
     const txt = atisText();
+    const scen = sim.wxScenario ? ` <b class="warnline">WX SCENARIO</b>` : "";
     $("atisBox").innerHTML = `<span>ATIS <b>${sim.atisLetter()}</b></span><span>RWY ${esc(sim.depEnd.name)}</span>` +
-      `<span>${windText()}</span>${qnh ? `<span>Q${qnh}</span>` : ""}<span class="raw" title="${esc(m.rawOb || "")}">${esc(m.rawOb || "no METAR")}</span>`;
+      `<span>${windText()}</span>${qnh ? `<span>Q${qnh}</span>` : ""}<span class="raw" title="${esc(raw)}">${esc(raw || "no METAR")}</span>${scen}`;
     $("atisBox").title = txt;
-    $("wxPanel").innerHTML = `WIND <b>${windText()}</b>${dec.wind && dec.wind.gust ? ` G<b>${dec.wind.gust}</b>` : ""}<br>QNH <b>${qnh || "—"}</b> · VIS <b>${esc(dec.cavok ? "CAVOK" : dec.vis != null ? (dec.vis >= 9999 ? "10km+" : dec.vis + " m") : m.visib ?? "—")}</b>${rvr ? `<br>RVR <b>${esc(rvr.join(" "))}</b>` : ""}` +
+    const closed = [...sim.closedRunways].map(r => apt.runways[r].label);
+    $("wxPanel").innerHTML = `WIND <b>${windText()}</b><br>QNH <b>${qnh || "—"}</b> · VIS <b>${esc(dec.cavok ? "CAVOK" : dec.vis != null ? (dec.vis >= 9999 ? "10km+" : dec.vis + " m") : m.visib ?? "—")}</b>${rvr ? `<br>RVR <b>${esc(rvr.join(" "))}</b>` : ""}` +
       `${dec.wx.length ? `<br>WX <b>${esc(dec.wx.map(x => x.int + x.codes.join("")).join(" "))}</b>` : ""}${dec.temp != null ? `<br>T/DP <b>${dec.temp}/${dec.dew ?? "—"}</b>` : ""}` +
-      `<br>RWY <b>${esc(sim.depEnd.name)}</b> · ATIS <b>${sim.atisLetter()}</b>${sim.lvp ? ' · <b class="warnline">LVP</b>' : ""}<br><span class="muted atistxt" title="${esc(txt)}">${esc(txt.slice(0, 90))}…</span>`;
+      `<br>RWY <b>${esc(sim.depEnd.name)}</b> · ATIS <b>${sim.atisLetter()}</b>${sim.lvp ? ' · <b class="warnline">LVP</b>' : ""}${sim.deiceNeeded ? ' · <b class="warnline">DE-ICE</b>' : ""}` +
+      `${closed.length ? `<br><b class="warnline">RWY ${esc(closed.join(" "))} CLOSED</b>` : ""}${sim.rwyChangeHint ? `<br><b class="warnline">RWY CHANGE → ${esc(sim.rwyChangeHint)}?</b>` : ""}${sim.wxOverride && sim.wxOverride.note ? `<br><span class="muted">${esc(sim.wxOverride.note)}</span>` : ""}` +
+      `<br><span class="muted atistxt" title="${esc(txt)}">${esc(txt.slice(0, 90))}…</span>`;
     if (apt && apt.freq.atis) $("atisListen").title = `Listen to the ATIS loop (${fmtFreq(apt.freq.atis.mhz)})`;
   }
+  /** Operational panels: departure sequence / arrival spacing (D4) and the checklist of a running abnormal event (D7). */
+  function renderSeq() {
+    const el = $("seqPanel");
+    if (!sim || !settings.seq) { el.classList.add("hidden"); return; }
+    const deps = departureSequence(sim, sim.depEnd, sim.recat), arrs = arrivalSpacing(sim, sim.arrEnd, sim.recat);
+    if (!deps.length && !arrs.length) { el.classList.add("hidden"); return; }
+    el.classList.remove("hidden");
+    const st = (s) => ({ lined_up: "LUW", lining: "LU", lineup: "LU", holding: "HOLD", cond_lineup: "COND", taxi: "TAXI" }[s] || s);
+    el.innerHTML = `<div class="hd">Departures ${esc(sim.depEnd.name)}${sim.recat ? " · RECAT-EU" : ""}</div>` +
+      deps.slice(0, 8).map((d, i) => `<div><b>${i + 1}</b> ${esc(d.a.cs)} <span class="muted">${esc(d.a.type)} ${d.a.wtc}</span> ${st(d.status)}` +
+        `${d.wait > 0 ? ` <span class="bad">wake ${Math.round(d.wait)}s</span>` : ""}${d.ctot ? ` <span class="${d.ctot.ok ? "ok" : "bad"}" title="CTOT ${d.acdm.ctot}">CTOT ${esc(d.ctot.text)}</span>` : ""}` +
+        `${d.a.hotUntil != null ? ` <span class="${d.a.hotUntil - sim.t > 0 ? "ok" : "bad"}">HOT ${Math.max(0, Math.round((d.a.hotUntil - sim.t) / 60))}m</span>` : ""}` +
+        ` <span class="muted" title="TOBT ${d.acdm.tobt} · TSAT ${d.acdm.tsat} · TTOT ${d.acdm.ttot}">TSAT ${d.acdm.tsat}</span></div>`).join("") +
+      (arrs.length ? `<div class="hd">Arrivals ${esc(sim.arrEnd.name)}</div>` + arrs.slice(0, 8).map(x => `<div>${esc(x.a.cs)} <span class="muted">${esc(x.a.type)} ${x.a.wtc}</span> ${x.nm.toFixed(1)} NM` +
+        `${x.gapNm != null ? ` <span class="${x.short ? "bad" : "ok"}">+${x.gapNm.toFixed(1)} NM / ${Math.round(x.gapS)} s${x.short ? " < " + x.need : ""}</span>` : ""}</div>`).join("") : "");
+  }
+  let checklist = null;
+  function showChecklist(kind, items, title) {
+    checklist = { kind, items, title, done: items.map(() => false) };
+    renderChecklist();
+  }
+  function renderChecklist() {
+    const el = $("checkPanel");
+    if (!checklist) { el.classList.add("hidden"); return; }
+    el.classList.remove("hidden");
+    el.innerHTML = `<div class="hd">${esc(checklist.title)} <button type="button" id="checkClose" title="Close">×</button></div>` +
+      checklist.items.map((it, i) => `<label><input type="checkbox" data-i="${i}" ${checklist.done[i] ? "checked" : ""}> ${esc(it)}</label>`).join("");
+    el.querySelector("#checkClose").addEventListener("click", () => { checklist = null; renderChecklist(); });
+    el.querySelectorAll("input").forEach(cb => cb.addEventListener("change", () => { checklist.done[+cb.dataset.i] = cb.checked; }));
+  }
+  function renderOps() { renderAtis(); renderSeq(); }
   /** Live METAR: every 10 minutes; a changed observation rolls the ATIS letter and updates the wind. */
   async function pollMetar() {
     if (!apt) return;
@@ -321,7 +417,7 @@ function bootMain() {
       if (m && m.rawOb && (!metar || metar.rawOb !== m.rawOb)) {
         const first = !metar;
         metar = m;
-        if (sim && typeof m.wdir === "number") sim.wind = { dir: m.wdir, spd: m.wspd || 0, gust: m.wgst || 0 };
+        applyWeather();
         if (sim && !first) { sim.rollAtis(); sysLog(`New METAR: ${m.rawOb}`); }
         renderAtis();
       }
@@ -755,11 +851,13 @@ function bootMain() {
     ["setRbErr", "rbErr"], ["setSayAgain", "sayAgain"], ["setOldAtis", "oldAtis"], ["setEvents", "events", "checked"],
     ["depRate", "dep"], ["arrRate", "arr"], ["setCoach", "coach", "checked"], ["setLang", "lang"], ["graph", "graph", "checked"],
     ["setOccupancy", "occupancy"], ["setVehicles", "vehicles"], ["setWaves", "waves", "checked"], ["setOsm", "osm", "checked"], ["setRealMix", "realMix", "checked"], ["setNight", "nightAuto", "checked"],
+    ["setWx", "wx"], ["setLvp", "lvp", "checked"], ["setRecat", "recat", "checked"], ["setVfr", "vfr"], ["setAbnormals", "abnormals", "checked"], ["setAbnormalRate", "abnormalRate"], ["setSeq", "seq", "checked"],
   ];
   function fillSettings() {
     for (const [id, k, prop] of bindings) $(id)[prop || "value"] = settings[k];
     $("setRateV").textContent = (+settings.rate).toFixed(2); $("setEffectV").textContent = Math.round(settings.effect * 100) + "%";
     $("setOccupancyV").textContent = settings.occupancy + "%";
+    $("setAbnormalRateV").textContent = settings.abnormalRate + "/h";
     if (+settings.vehicles < 0 && sim) $("setVehicles").value = sim.serviceVehicles;
     const x = settings.xr;
     $("xrEnabled").checked = x.enabled; $("xrHost").value = x.host; $("xrPort").value = x.port; $("xrPass").value = x.password;
@@ -782,7 +880,14 @@ function bootMain() {
       if (+settings.vehicles >= 0) sim.serviceVehicles = +settings.vehicles;
       if (changedId === "setRealMix") applyTraffic();
       if (changedId === "setOccupancy" && sim.occupancy > sim.ac.filter(a => a.state === "parked").length / Math.max(1, apt.stands.length)) sim.populate(sim.occupancy - sim.ac.filter(a => a.state === "parked").length / Math.max(1, apt.stands.length));
+      sim.recat = !!settings.recat; sim.vfrPerHour = +settings.vfr || 0;
+      sim.abnormals = { on: !!settings.abnormals, perHour: +settings.abnormalRate || 2 };
+      if (changedId === "setAbnormals" || changedId === "setAbnormalRate") sim.scheduleAbnormal();
+      if (changedId === "setLvp") { sim.lvpManual = !!settings.lvp; if (settings.lvp) sim.setLvp(true, "manual"); else applyWeather(); }
+      if (changedId === "setWx") { sim.setWxScenario(settings.wx === "live" ? null : settings.wx); if (settings.wx === "live") applyWeather(); renderOps(); }
+      if (changedId === "setSeq") renderSeq();
     }
+    $("setAbnormalRateV").textContent = settings.abnormalRate + "/h";
     if (changedId === "setOsm" && apt) loadOsm(apt.icao);
     if (changedId === "setNight") updateSky();
     $("setOccupancyV").textContent = settings.occupancy + "%";
@@ -806,6 +911,18 @@ function bootMain() {
   });
   $("settings").addEventListener("input", (e) => { if (e.target.type === "range") readSettings(e.target.id); });
   $("testVoices").addEventListener("click", () => radio.testVoices(["GB", "US", "IE", "EE", "FI", "LV", "LT", "DE", "FR"]));
+  // abnormal events on demand (D7) and the operational buttons (D1/D2)
+  document.querySelectorAll("[data-ev]").forEach(b => b.addEventListener("click", () => {
+    if (!sim) return;
+    const k = b.dataset.ev;
+    let r = null;
+    if (k === "inspect") r = sim.runwayInspection(sim.depEnd.rwy, "routine") ? "inspection" : null;
+    else if (k === "rwychange") { const best = sim.bestEndForWind(); const to = best && best !== sim.depEnd ? best : sim.apt.runways[sim.depEnd.rwy].ends.find(e => e !== sim.depEnd); r = to && sim.changeRunway(to.name) ? "runway change to " + to.name : null; }
+    else if (k === "stopbars") { const lit = !sim.apt.stopBars.some(x => x.lit); for (const x of sim.apt.stopBars) sim.setStopBar(x, lit, true); r = `stop bars ${lit ? "on" : "off"}`; }
+    else r = sim.abnormalEvent(k);
+    sysLog(r ? `Triggered: ${r}.` : `Nothing suitable for "${k}" right now (needs e.g. an arrival on final or a departure taxiing) — try again in a minute.`);
+    $("settings").close();
+  }));
   $("radioLab").addEventListener("click", () => radio.lab && radio.lab());
   $("coachToggle").addEventListener("change", (e) => { settings.coach = e.target.checked; save(); renderCoach(); });
   radar.showGraph = settings.graph;
@@ -881,11 +998,11 @@ function bootMain() {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
     if (sim && speed > 0) for (let i = 0; i < speed; i++) sim.step(dt);
     if (sim) {
-      radar.draw({ ac: sim.snapshot(selectedId), arrEnd: sim.arrEnd }, selectedId);
+      radar.draw({ ac: sim.snapshot(selectedId), arrEnd: sim.arrEnd, closed: sim.closedRunways, lvp: sim.lvp }, selectedId);
       slowT += dt; bcT += dt;
       if (slowT > 0.5) {
         slowT = 0;
-        renderBoard(); renderDel(); renderTabs(); renderCoach(); renderInfo();
+        renderBoard(); renderDel(); renderTabs(); renderCoach(); renderInfo(); renderSeq();
         const st = sim.stats;
         $("status").textContent = `${fmtClock(sim)}  DEP ${st.departures}  ARR ${st.arrivals}  G/A ${st.goArounds}  ALERTS ${st.alerts}  AC ${sim.ac.length}` +
           (speed === 0 ? "  [PAUSED]" : speed > 1 ? `  [${speed}×]` : "");

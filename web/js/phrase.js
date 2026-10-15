@@ -293,6 +293,12 @@ export const TEMPLATES = {
   },
   noReply: { ICAO: [(p, c) => p`${c.unit}, ${c.cs}, no reply on ${c.freq}`, (p, c) => p`${c.unit}, ${c.cs}, nobody on ${c.freq}, back with you`] },
   mayday: { ICAO: [(p, c) => p`Mayday, mayday, mayday, ${c.unit}, ${c.cs}, engine failure, request priority landing runway ${c.rwy}`] },
+  pan: { ICAO: [(p, c) => p`Pan pan, pan pan, pan pan, ${c.unit}, ${c.cs}, ${c.what}, runway ${c.rwy}`] },
+  vfrInbound: {
+    ICAO: [(p, c) => p`${c.unit}, ${g(c)}${c.cs}, ${c.typeSp}, overhead ${c.point} at ${c.alt}, VFR inbound, request joining instructions`,
+      (p, c) => p`${c.unit}, ${c.cs}, ${c.typeSp}, ${c.point} at ${c.alt}, information ${c.atis}, request join`],
+    US: [(p, c) => p`${c.unit}, ${c.cs}, ${c.typeSp}, over ${c.point} at ${c.alt}, inbound for landing with ${c.atis}`],
+  },
   // visual circuit / VFR
   circuitReport: {
     ICAO: [(p, c) => p`${c.unit}, ${c.cs}, ${c.leg} runway ${c.rwy}`, (p, c) => p`${c.cs}, ${c.leg}`],

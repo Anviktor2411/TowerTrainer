@@ -76,7 +76,9 @@ function strip(a, selectedId, now) {
     `<span class="cs">${esc(a.cs)}</span>` +
     `<span>${esc(a.type)}/${a.wtc}</span>` +
     `<span>${route} ${a.kind === "dep" ? ed("sid", d.sid ?? a.sid ?? "", "SID") : ""} ${ed("cfl", d.cfl ?? (a.cfl ? (a.cfl >= 6000 ? "F" + a.cfl / 100 : a.cfl) : ""), "CFL")}` +
-    `${a.warn && a.warn.length ? ` <span class="w">${esc(a.warn.join(" "))}</span>` : ""}${issueMarkers(a).map(i => ` <span class="w ${i.level}">${esc(i.t)}</span>`).join("")}</span>` +
+    `${a.warn && a.warn.length ? ` <span class="w">${esc(a.warn.join(" "))}</span>` : ""}${issueMarkers(a).map(i => ` <span class="w ${i.level}">${esc(i.t)}</span>`).join("")}` +
+    `${a.ctot ? ` <span class="w ${a.ctot.ok ? "ok" : "warn"}" title="CTOT (slot)">CTOT ${esc(a.ctot.text)}</span>` : ""}${a.hot != null ? ` <span class="w ${a.hot > 0 ? "ok" : "warn"}" title="de-icing holdover time left">HOT ${Math.max(0, Math.round(a.hot / 60))}m</span>` : ""}` +
+    `${a.cond ? ` <span class="w ok" title="conditional clearance">${esc(a.cond)}</span>` : ""}${a.priority ? ` <span class="w warn">${esc(String(a.priority).toUpperCase())}</span>` : ""}${a.broken ? ' <span class="w warn">BROKEN</span>' : ""}${a.towing ? ' <span class="w ok">TOW</span>' : ""}${a.rwyChanged ? ' <span class="w warn">RWY CHG</span>' : ""}</span>` +
     `<span>${ed("sq", sq, "squawk")} ${ed("stand", d.stand ?? a.stand ?? "", "stand")}</span>` +
     `<span class="st x5" title="${esc(statePhrase(a))}">${esc(shortState(a))}${a.kind === "dep" && a.rwy ? " " + ed("hp", d.hp ?? a.rwy, "holding point / runway") : ""}</span></div>`;
 }

@@ -46,7 +46,7 @@ a = next(p for p in procs["sids"] if p["name"] == "ALPHA1A")
 check(a["runways"] == ["26"] and [l["fix"] for l in a["rwy"]["26"]] == ["TSTA1"] and a["common"][0]["fix"] == "ALPHA", "ALPHA1A runway + common legs")
 check(a["common"][0]["alt"] == 4000 and a["common"][0]["desc"] == "+", "altitude constraint +4000")
 check([p["name"] for p in procs["stars"]] == ["DELTA1T"] and procs["stars"][0]["common"][0]["alt"] == 10000, "STAR with FL100 constraint")
-check(len(procs["apps"]) == 1, "approach parsed")
+check(len(procs["apps"]) == 1 and procs["apps"][0]["runways"] == ["26"] and [l["fix"] for l in procs["apps"][0]["missed"]] == ["ALPHA", "FOXT"] and procs["apps"][0]["missed"][0]["alt"] == 3000, "approach parsed with its missed-approach legs after the runway fix: " + str(procs["apps"][0]["missed"]))
 check(N.runway_matches("RW08B", "08L") and N.runway_matches("RW26", "26") and not N.runway_matches("RW26", "08"), "runway matching incl. B (both parallels)")
 
 with tempfile.TemporaryDirectory() as tmp:

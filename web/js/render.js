@@ -40,6 +40,7 @@ export class Radar {
     this.stopBars = [];             // [{p:[x,y], v:[dx,dy], lit:bool, id}] (D2)
     this.filter = { ground: true, air: true, maxAlt: 99999 };
     this.procs = [];
+    this.vfrPoints = [];            // VFR reporting points [{name, p, alt}] (D5)
     this.history = new Map();       // id -> [{p, t}]
     this.labelOff = new Map();      // id -> [dx, dy] screen offset of the data block (manual drags)
     this.autoOff = new Map();       // id -> offset chosen by the overlap solver
@@ -341,6 +342,15 @@ export class Radar {
       for (const l of this.procs) { const last = l.xy[l.kind === "sid" ? l.xy.length - 1 : 0]; const s = this.toScreen(last.p); ctx.fillStyle = l.kind === "sid" ? C.sid : C.star; ctx.fillText(l.name, s[0] + 6, s[1] - 8); }
       ctx.textAlign = "center";
     }
+    // VFR reporting points (D5): hollow triangles with name and altitude on the Tower / Approach pictures
+    if (radarView && this.view !== "CTR" && this.vfrPoints && this.vfrPoints.length) {
+      ctx.font = "9px ui-monospace, Consolas, monospace"; ctx.fillStyle = "#8fc7ff"; ctx.strokeStyle = "#8fc7ff"; ctx.lineWidth = 1;
+      for (const pt of this.vfrPoints) {
+        const s = this.toScreen(pt.p);
+        ctx.beginPath(); ctx.moveTo(s[0], s[1] - 6); ctx.lineTo(s[0] + 6, s[1] + 5); ctx.lineTo(s[0] - 6, s[1] + 5); ctx.closePath(); ctx.stroke();
+        ctx.fillText(`${pt.name} ${pt.alt}`, s[0], s[1] + 16);
+      }
+    }
     if (k > 0.12) {
       ctx.font = "10px ui-monospace, Consolas, monospace";
       for (const l of this.labels) {
@@ -417,6 +427,23 @@ export class Radar {
     for (const b of this.stopBars) {
       ctx.strokeStyle = b.lit ? "#ff2d2d" : "#4a2a2a"; ctx.lineWidth = Math.max(2 / k, 1.5);
       ctx.beginPath(); ctx.moveTo(b.p[0] - b.v[1] * b.len / 2, b.p[1] + b.v[0] * b.len / 2); ctx.lineTo(b.p[0] + b.v[1] * b.len / 2, b.p[1] - b.v[0] * b.len / 2); ctx.stroke();
+    }
+    // closed runways (D7): red band and crosses at both ends
+    if (world.closed && world.closed.size) {
+      for (const r of world.closed) {
+        const R = apt.runways[r]; if (!R) continue;
+        const e = R.ends[0], v = e.v, n = [-v[1], v[0]], w = (R.width || 45) / 2;
+        ctx.save(); ctx.globalAlpha = 0.35; ctx.fillStyle = "#ff3b3b";
+        ctx.beginPath(); ctx.moveTo(e.pos[0] + n[0] * w, e.pos[1] + n[1] * w); ctx.lineTo(e.pos[0] + v[0] * R.len + n[0] * w, e.pos[1] + v[1] * R.len + n[1] * w);
+        ctx.lineTo(e.pos[0] + v[0] * R.len - n[0] * w, e.pos[1] + v[1] * R.len - n[1] * w); ctx.lineTo(e.pos[0] - n[0] * w, e.pos[1] - n[1] * w); ctx.closePath(); ctx.fill();
+        ctx.globalAlpha = 0.9; ctx.strokeStyle = "#ff3b3b"; ctx.lineWidth = Math.max(3 / k, 2);
+        for (const along of [120, R.len - 120]) {
+          const c = [e.pos[0] + v[0] * along, e.pos[1] + v[1] * along], s = Math.max(w * 1.6, 40);
+          ctx.beginPath(); ctx.moveTo(c[0] - (v[0] + n[0]) * s, c[1] - (v[1] + n[1]) * s); ctx.lineTo(c[0] + (v[0] + n[0]) * s, c[1] + (v[1] + n[1]) * s);
+          ctx.moveTo(c[0] - (v[0] - n[0]) * s, c[1] - (v[1] - n[1]) * s); ctx.lineTo(c[0] + (v[0] - n[0]) * s, c[1] + (v[1] - n[1]) * s); ctx.stroke();
+        }
+        ctx.restore();
+      }
     }
     const sel = world.ac.find(a => a.id === selectedId);
     if (sel && sel.path && sel.path.length && sel.onGround) {

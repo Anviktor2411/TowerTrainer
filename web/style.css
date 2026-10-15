@@ -171,3 +171,13 @@ fieldset .row { display: flex; gap: 12px; flex-wrap: wrap; }
 .posTabs .tab .mon { font-size: 10px; padding: 0 3px; opacity: .6; } .posTabs .tab .mon.on { opacity: 1; color: var(--atc); }
 #log .guard { color: var(--alert); font-weight: 700; font-size: 10px; margin-right: 4px; }
 .atistxt { display: block; max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 10px; }
+
+/* Phase D: sequence panel states, checklist panel, event buttons */
+.seqpanel .ok { color: #7fd48a; } .seqpanel .bad { color: #ff8a8a; }
+.checkpanel { position: absolute; right: 8px; bottom: 8px; width: 300px; max-width: 45%; font-size: 12px; background: #1c1710f2; border: 1px solid #c9962a; border-radius: 4px; padding: 6px 10px; line-height: 1.6; z-index: 5; }
+.checkpanel .hd { color: #ffd37a; font-weight: 600; display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px; }
+.checkpanel .hd button { background: none; border: 0; color: #ffd37a; font-size: 16px; cursor: pointer; padding: 0 4px; }
+.checkpanel label { display: block; cursor: pointer; } .checkpanel input:checked + * , .checkpanel label:has(input:checked) { color: #8a8a8a; text-decoration: line-through; }
+.evrow { flex-wrap: wrap; gap: 4px; } .evrow button { padding: 2px 6px; font-size: 11px; }
+
+.strip .w.ok { color: #7fd48a; }

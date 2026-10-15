@@ -12,6 +12,26 @@ export const angDiff = (a, b) => { let d = (b - a + 540) % 360 - 180; return d; 
 export const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 export const vecFromHdg = (h) => [Math.sin(h * Math.PI / 180), Math.cos(h * Math.PI / 180)];
 
+/** Midpoint, direction and length of a polyline: {p, v, len} (null when degenerate). */
+function mid(pts) {
+  if (!pts || pts.length < 2) return null;
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) len += dist(pts[i - 1], pts[i]);
+  if (len < 1) return null;
+  let acc = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const d = dist(pts[i - 1], pts[i]);
+    if (acc + d >= len / 2) {
+      const t = (len / 2 - acc) / d;
+      const p = [pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * t, pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * t];
+      const v = [(pts[i][0] - pts[i - 1][0]) / d, (pts[i][1] - pts[i - 1][1]) / d];
+      return { p, v, len };
+    }
+    acc += d;
+  }
+  return null;
+}
+
 /** Nearest point on segment ab to p: {t, d, p}. */
 export function projectOnSeg(p, a, b) {
   const dx = b[0] - a[0], dy = b[1] - a[1], l2 = dx * dx + dy * dy;
@@ -95,6 +115,39 @@ export class Airport {
     this.freq = {};
     for (const f of d.freqs) if (!this.freq[f.kind]) this.freq[f.kind] = f;
     this.callName = Airport.unitName(d);
+    this.stopBars = this.buildStopBars(d);
+    this.ilsHolds = (d.ilsHoldLines || []).map(l => mid(l)).filter(Boolean);
+  }
+
+  /**
+   * Stop bars: one per runway holding position marking (hold line within 150 m of a runway, roughly across the
+   * taxiway). {id, p, v (bar direction), len, rwy, lit, node (nearest taxi node)}
+   */
+  buildStopBars(d) {
+    const out = [];
+    for (const l of [...(d.holdLines || []), ...(d.ilsHoldLines || [])]) {
+      const m = mid(l);
+      if (!m) continue;
+      const r = this.runways[this.nearestRunway(m.p)];
+      if (!r || this.distToRunway(m.p, r) > 150 || this.onRunway(m.p, r, 2)) continue;
+      const node = this.nearestNode(m.p);
+      if (node < 0 || dist(this.nodes[node], m.p) > 40) continue;
+      if (out.some(b => dist(b.p, m.p) < 25)) continue;
+      out.push({ id: out.length, p: m.p, v: m.v, len: Math.max(12, Math.min(60, m.len)), rwy: r.id, lit: false, node, cat2: d.ilsHoldLines && d.ilsHoldLines.includes(l) });
+    }
+    return out;
+  }
+
+  /** The stop bar sitting at node n (the holding point itself), or null. */
+  stopBarAtNode(n) { return this.stopBars.find(b => b.node === n && dist(b.p, this.nodes[n]) < 25) || null; }
+  /** The stop bar an aircraft would cross when going from node a to node b (within 20 m of the edge), or null. */
+  stopBarOnEdge(a, b) {
+    for (const bar of this.stopBars) {
+      const pr = projectOnSeg(bar.p, this.nodes[a], this.nodes[b]);
+      if (pr.d < 20 && pr.t > 0.02 && pr.t < 0.98) return bar;
+      if (bar.node === b && dist(bar.p, this.nodes[b]) < 25) return bar;
+    }
+    return null;
   }
 
   /**
@@ -436,10 +489,10 @@ export class Airport {
   }
 
   /** Nearest taxiway edge to a world point (for click-to-instruct): {e, d} or null. */
-  nearestEdge(p, maxD = 40) {
+  nearestEdge(p, maxD = 40, named = true) {
     let best = null, bd = maxD;
     for (const e of this.edges) {
-      if (e.runway || !e.name) continue;
+      if (e.runway || (named && !e.name)) continue;
       const pr = projectOnSeg(p, this.nodes[e.a], this.nodes[e.b]);
       if (pr.d < bd) { bd = pr.d; best = e; }
     }

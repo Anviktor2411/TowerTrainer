@@ -130,8 +130,21 @@ def parse_cifp(text):
                 if f[i].strip() in ALT_DESC and f[i].strip():
                     alt, desc = _alt(f[i + 1]), f[i].strip()
                     break
-        p = procs[kind].setdefault(name, {"name": name, "runways": set(), "common": [], "rwy": {}, "enroute": {}})
+        p = procs[kind].setdefault(name, {"name": name, "runways": set(), "common": [], "rwy": {}, "enroute": {}, "missed": []})
         leg = {"fix": fix, "region": region, "alt": alt, "desc": desc}
+        if kind == "APPCH":
+            # final approach legs end at the runway fix (RWxx); what follows is the missed approach
+            m2 = re.match(r"^RW(\d{2}[LRC]?)", fix)
+            if m2:
+                p["runways"].add(m2.group(1))
+                p["_at_rwy"] = True
+                continue
+            if p.get("_at_rwy"):
+                p["missed"].append(leg)
+                continue
+            if fix:
+                p["common"].append(leg)
+            continue
         if trans.startswith("RW"):
             p["runways"].add(trans[2:])
             if fix:
@@ -147,7 +160,7 @@ def parse_cifp(text):
         lst = []
         for p in procs[kind].values():
             lst.append({"name": p["name"], "runways": sorted(p["runways"]), "common": p["common"],
-                        "rwy": p["rwy"], "enroute": p["enroute"]})
+                        "rwy": p["rwy"], "enroute": p["enroute"], "missed": p.get("missed", [])})
         out[key] = sorted(lst, key=lambda x: x["name"])
     return out
 
@@ -268,7 +281,7 @@ def finish(procs, fixes, source, apt_lat, apt_lon):
     for key in ("sids", "stars", "apps"):
         for p in procs[key]:
             all_legs = _legs(p)
-            for lst in [p["common"], *p["rwy"].values(), *p["enroute"].values()]:
+            for lst in [p["common"], *p["rwy"].values(), *p["enroute"].values(), p.get("missed", [])]:
                 for leg in lst:
                     ll = pos(leg["fix"])
                     if ll:
@@ -309,7 +322,7 @@ def load_procedures(icao, apt_lat, apt_lon, cache_dir, xplane="", mode="auto", c
         if f.is_file():
             procs = parse_cifp(f.read_text("utf-8", "replace"))
             wanted = {l["fix"] for k in ("sids", "stars", "apps") for p in procs[k]
-                      for l in [*p["common"], *sum(p["rwy"].values(), []), *sum(p["enroute"].values(), [])]}
+                      for l in [*p["common"], *sum(p["rwy"].values(), []), *sum(p["enroute"].values(), []), *p.get("missed", [])]}
             fixes = load_fixes(folder, wanted)
             info = navdata_info(xplane, mode, custom)
             result = finish(procs, fixes, {"kind": kind, "label": info["label"], "airac": read_cycle(folder)}, apt_lat, apt_lon)

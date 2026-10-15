@@ -48,6 +48,7 @@
     <div id="status" class="overlay"></div>
     <div id="wxPanel" class="wxpanel hidden"></div>
     <div id="seqPanel" class="seqpanel hidden"></div>
+    <div id="checkPanel" class="checkpanel hidden"></div>
     <div id="alerts" class="alerts"></div>
     <div id="coachPanel" class="coach hidden"></div>
     <button id="restorePop" type="button" class="restore hidden"></button>
@@ -122,6 +123,22 @@
       <label><input type="checkbox" id="setRealMix"> Real airlines &amp; destinations (OpenFlights, ODbL)</label>
       <label><input type="checkbox" id="setOsm"> Buildings from OpenStreetMap (ODbL)</label>
       <label><input type="checkbox" id="setNight"> Day/night from the clock</label>
+    </fieldset>
+    <fieldset><legend>Operations &amp; weather</legend>
+      <label>Weather <select id="setWx"><option value="live">Live METAR</option><option value="veer">Wind veers → runway change</option><option value="gusts">Gusty wind</option><option value="fog">Fog → LVP / CAT III</option><option value="snow">Snow → de-icing</option></select></label>
+      <label><input type="checkbox" id="setLvp"> Low visibility procedures (manual)</label>
+      <label><input type="checkbox" id="setRecat"> RECAT-EU wake categories</label>
+      <label>VFR inbound/h <input id="setVfr" type="number" min="0" max="12"></label>
+      <label><input type="checkbox" id="setSeq"> Departure sequence &amp; arrival spacing panel</label>
+      <label><input type="checkbox" id="setAbnormals"> Abnormal events</label>
+      <label>Rate <input id="setAbnormalRate" type="range" min="0.5" max="12" step="0.5"> <span id="setAbnormalRateV"></span></label>
+      <div class="row evrow small">
+        <button type="button" data-ev="medical">Medical</button><button type="button" data-ev="birdstrike">Bird strike</button><button type="button" data-ev="rto">RTO</button>
+        <button type="button" data-ev="breakdown">Breakdown</button><button type="button" data-ev="fod">FOD</button><button type="button" data-ev="incursion">Incursion</button>
+        <button type="button" data-ev="unstable">Go-around</button><button type="button" data-ev="pan">PAN</button><button type="button" data-ev="mayday">MAYDAY</button>
+        <button type="button" data-ev="7500">7500</button><button type="button" data-ev="7600">7600</button>
+        <button type="button" data-ev="inspect">Runway inspection</button><button type="button" data-ev="rwychange">Runway change</button><button type="button" data-ev="stopbars">Stop bars</button>
+      </div>
     </fieldset>
     <fieldset><legend>Training</legend>
       <label><input type="checkbox" id="setCoach"> Coach mode</label>

@@ -15,13 +15,15 @@ Output (all point lists in local metres):
 """
 import math
 
-CENTERLINE_TYPES = {1, 2, 51, 52, 60, 61}
+CENTERLINE_TYPES = {1, 2, 51, 60, 61}
 LEAD_TYPES = {7, 57, 8, 10, 32, 82}
-HOLD_TYPES = {4, 5, 54, 55}
-ILS_HOLD_TYPES = {6, 56}
+# runway holding positions: classic 4/5 (+50 lit), X-Plane 12 draws them with 52 (intermediate) and 62 (runway);
+# the JS side keeps only those within 150 m of a runway as stop bars, so intermediate ones are harmless here
+HOLD_TYPES = {4, 5, 54, 55, 62, 63}
+ILS_HOLD_TYPES = {6, 56, 64}
 WHITE_TYPES = {20, 21, 22, 70, 71}
 FREQ_KIND = {0: "atis", 1: "unicom", 2: "delivery", 3: "ground", 4: "tower", 5: "approach", 6: "departure"}
-VERSION = 2          # bump when the output changes; server.py re-parses cached .dat files on a mismatch
+VERSION = 3          # bump when the output changes; server.py re-parses cached .dat files on a mismatch
 
 
 class Proj:
@@ -44,6 +46,11 @@ def _bezier(p0, c0, c1, p1, steps=8):
             u * u * u * p0[1] + 3 * u * u * t * c0[1] + 3 * u * t * t * c1[1] + t * t * t * p1[1],
         ])
     return out
+
+
+def _length(pts):
+    """Length of a polyline in local metres."""
+    return sum(((pts[i + 1][0] - pts[i][0]) ** 2 + (pts[i + 1][1] - pts[i][1]) ** 2) ** 0.5 for i in range(len(pts) - 1))
 
 
 def _expand(nodes, closed):
@@ -205,6 +212,10 @@ def parse(text):
             return "holdLines"
         if t in ILS_HOLD_TYPES:
             return "ilsHoldLines"
+        # X-Plane 12 airports draw intermediate holding positions with the broken yellow line (black border, 52);
+        # only short ones (across a taxiway) are holding positions, long ones are apron boundaries
+        if t == 52 and pts and _length(pts) < 60:
+            return "holdLines"
         if t in WHITE_TYPES:
             return "whiteLines"
         if t in CENTERLINE_TYPES:
