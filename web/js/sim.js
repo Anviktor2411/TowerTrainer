@@ -468,6 +468,8 @@ export class Sim {
     a.fpStatus = fp.status || "filed";
     // S3: what the pilot filed from XRadio (a SimBrief OFP, usually) shows on the strip and goes into EuroScope's $FP
     if (fp.route) a.route = fp.route;
+    const first = String(fp.route || "").trim().split(/\s+/)[0] || "";
+    if (/^[A-Z]{3,5}\d[A-Z]?$/.test(first)) a.planSid = first;   // the SID the pilot filed (SimBrief puts it first)
     if (fp.altn) a.altn = fp.altn;
     if (fp.cruise_ft) a.rfl = fp.cruise_ft;
     const rem = String(fp.remarks || "");

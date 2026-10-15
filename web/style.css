@@ -220,3 +220,6 @@ body.board .guestbar { font-size: 15px; } body.board .posTabs .tab { font-size: 
 .ofp { font-size: 12px; } .ofphead { margin-bottom: 4px; } .ofphead b { color: var(--atc); }
 .ofprow { display: grid; grid-template-columns: 64px 1fr; gap: 2px 8px; padding: 2px 0; border-top: 1px solid #18222c; } .ofprow > span:first-child { color: var(--muted); }
 .ofp .mono { font: 11px ui-monospace, Consolas, monospace; white-space: pre-wrap; } .ofp .warn { color: var(--warn); } .ofp details { margin-top: 4px; } .ofp summary { cursor: pointer; color: var(--muted); }
+
+/* S4: the debrief of a real pilot's flight */
+#pilotDebrief pre { max-height: 60vh; max-width: 80vw; overflow: auto; white-space: pre-wrap; font-size: 12px; margin: 6px 0 10px; }

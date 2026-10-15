@@ -394,6 +394,9 @@ class XRadioBridge:
             s = next((x for x in self.atc.values() if x.pos and x.pos["com1"] == khz), None) or next(iter(self.atc.values()), None)
             if s and s.sid:
                 s.text(0 if to else khz, t["text"], to=to)
+                if t.get("say") and not to and self.cfg["ai_voice"] and self.caps["encode"] and self.tts:
+                    # S4: an AI controller's call to a real pilot is voiced into the flight with a controller voice
+                    self._queue_ai_voice("ATC:" + str(t.get("pos") or s.callsign), s.sid, khz, dict(t, role="atc", voice=None))
                 # a clearance to a real pilot carries their squawk: answer the flight plan with it
                 m = re.search(r"\bsquawk (\d{4})\b", t.get("text", ""), re.I)
                 if m:
@@ -472,7 +475,7 @@ class XRadioBridge:
                 mgr = self.tts()
                 voice = t.get("voice") or self.cast_cache.get(cs)
                 if not voice:
-                    v = mgr.cast(str(t.get("nat") or "GB")[:3], int(t.get("seed") or 0), t.get("gender"), [], "pilot")
+                    v = mgr.cast(str(t.get("nat") or "GB")[:3], int(t.get("seed") or 0), t.get("gender"), [], str(t.get("role") or "pilot"))
                     voice = v["id"] if isinstance(v, dict) else v
                     self.cast_cache[cs] = voice
                 data, mime = mgr.render(voice, str(t.get("say") or t.get("text"))[:600], t.get("prosody") or {})
@@ -499,12 +502,14 @@ class XRadioBridge:
             t0 = time.monotonic()
             for i, f in enumerate(frames):
                 with self.lock:
-                    s = self.injector if sid is not None and P.is_ai_sid(sid) else next(iter(self.atc.values()), None)
+                    ai = isinstance(sid, int) and P.is_ai_sid(sid)
+                    # an AI pilot speaks through the injector; a controller through its own ATC session (S4)
+                    s = self.injector if ai else (next((x for x in self.atc.values() if x.sid == sid), None) or next(iter(self.atc.values()), None))
                     if sid == "atis":
                         s = self.atis_session
                     if not self.running or not s or not s.sid:
                         break
-                    s.voice(khz, f, from_sid=sid if sid != "atis" else None)
+                    s.voice(khz, f, from_sid=sid if ai else None)
                 time.sleep(max(0.0, t0 + (i + 1) * 0.02 - time.monotonic()))
 
     def _transcribe_tick(self, now):

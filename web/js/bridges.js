@@ -53,8 +53,10 @@ export class Bridges {
     if (from === "pilot" && ac && !ac.human) this.esTx.push({ cs: ac.cs, freq: mhz, text });
     if (this.xr.enabled && this.xr.text) {
       const voice = ac && ac.cast && ac.cast[0] && ac.cast[0].id ? ac.cast[0].id : null;   // the voice the browser speaks with
+      // an AI controller's call to a real pilot is voiced too (role atc); the user's own calls go as text -- their mic is the voice
       this.xrTx.push({ kind: from === "pilot" ? "pilot" : "atc", cs: ac ? ac.cs : "", khz: Math.round(mhz * 1000), text,
-        say: from === "pilot" ? say || text : undefined, nat: ac ? ac.nat || "" : "", seed: seed || (ac ? ac.id : 0), gender, voice, to: to || "" });
+        say: from === "pilot" || ai ? say || text : undefined, role: from === "pilot" ? "pilot" : "atc", pos: pos || "",
+        nat: ac ? ac.nat || "" : (sim.apt.d && sim.apt.d.country) || "", seed: seed || (ac ? ac.id : (pos ? 100 + pos.charCodeAt(0) : 0)), gender, voice, to: to || "" });
     }
   }
 

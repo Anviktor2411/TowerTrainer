@@ -10,6 +10,7 @@ import { wakeDepSeconds, wakeArrNm, ctotStatus, recatOf, departureSequence, arri
 import { parseMetar } from "../web/js/atis.js";
 import { synthMetar, WX_SCENARIOS } from "../web/js/ops.js";
 import { defaultVfrPoints } from "../web/js/vfr.js";
+import { PilotAtc, normalizeNumbers, checkReadback, intentOf } from "../web/js/pilotatc.js";
 import { buildPositions } from "../web/js/positions.js";
 import { incomingFor } from "../web/js/strips.js";
 import { suggestions } from "../web/js/autocomplete.js";
@@ -496,6 +497,131 @@ eq(ctotStatus(1000, 1700).state, "missed", "CTOT missed");
   const plain = sim.upsertHuman({ hid: 8, cs: "N771AB", type: "C172", pos: h.pos, alt: 131, hdg: 80, spd: 0, onGround: true, squawk: "7000", xpdr: "S", ai: false, tx: false,
     fp: { session_id: 8, callsign: "N771AB", ac_icao: "C172", rules: "V", status: "filed", squawk: 0, dep: "EETN", dest: "EEPU", altn: "", cruise_ft: 2500, route: "DCT", remarks: "" } });
   ok(!plain.simbrief && !plain.eobt && plain.route === "DCT" && !plain.ifr, "a plain VFR plan without remarks stays plain");
+}
+
+// ---- S4: AI ATC for a real pilot's flight (XRadio), driven by the real position, with readback checks and a debrief ----
+{
+  ok(normalizeNumbers("four five two one") === "4521" && normalizeNumbers("three thousand five hundred feet") === "3500 feet" && normalizeNumbers("flight level one two zero") === "FL120" && normalizeNumbers("climb 5000, squawk 4521") === "climb 5000 squawk 4521" && normalizeNumbers("one two thousand") === "12000", "spoken numbers become digits");
+  const rb = checkReadback("cleared to Riga via ULGOT one golf departure, climb five thousand feet, squawk four five two one, ESXYZ", [{ k: "sid", v: "ULGOT1G" }, { k: "alt", v: 5000 }, { k: "squawk", v: "4521" }]);
+  ok(rb.ok, "a full readback passes");
+  const rb2 = checkReadback("climb 5000, squawk 4512, ESXYZ", [{ k: "sid", v: "ULGOT1G" }, { k: "alt", v: 5000 }, { k: "squawk", v: "4521" }]);
+  ok(!rb2.ok && rb2.missing.length === 2 && rb2.missing.some(m => m.k === "squawk") && rb2.missing.some(m => m.k === "sid"), "a wrong squawk and a missing SID are caught");
+  ok(checkReadback("runway 26 cleared for takeoff ESXYZ", [{ k: "rwy", v: "26" }, { k: "word", v: "cleared for takeoff" }]).ok && checkReadback("line up runway 08", [{ k: "rwy", v: "08" }]).ok && !checkReadback("runway 08", [{ k: "rwy", v: "26" }]).ok, "runway readbacks");
+  ok(intentOf("request clearance to Riga") === "clearance" && intentOf("request push and start") === "push" && intentOf("request taxi") === "taxi" && intentOf("holding point runway 26, ready for departure") === "ready" && intentOf("inbound, information Charlie") === "inbound" && intentOf("") === "call" && intentOf("squawk 4521 climb 5000") === "readback" && intentOf("mayday mayday") === "emergency", "intents");
+
+  const KT = 0.5144, NM = 1852;
+  const pos = buildPositions(apt);
+  const khz = (k) => Math.round(pos[k].mhz * 1000);
+  const said = [], acks = [], logs = [];
+  const { sim } = mk({ positions: pos, staffing: new Set([]) });   // nobody staffed: every position is an AI controller
+  const atc = new PilotAtc(sim, { say: (m) => said.push(m), fpAck: (cs, x) => acks.push({ cs, ...x }), log: (l) => logs.push(l) });
+  const stand = apt.stands.find(s => s.types && s.types.includes("jets")) || apt.stands[0];
+  const fp = { session_id: 9, callsign: "ESXYZ", ac_icao: "A320", rules: "I", status: "filed", squawk: 0, dep: "EETN", dest: "EVRA", altn: "EYVI", cruise_ft: 36000, route: "ULGOT1G ULGOT N746 ABETI ABETI2A", remarks: "SIMBRIEF EOBT/0730 TAS/447" };
+  let cur = { pos: [stand.pos[0], stand.pos[1]], alt: 0, hdg: 80, spd: 0, onGround: true };
+  const upd = (x) => { cur = { ...cur, ...x }; return sim.upsertHuman({ hid: 9, cs: "ESXYZ", type: "A320", squawk: "2000", xpdr: "S", ai: false, tx: false, fp, ...cur }); };
+  upd({});
+  sim.step(1); atc.tick();
+  ok(said.length === 0 && atc.flights.has("ESXYZ"), "the AI waits for the pilot's call");
+  atc.heard("ESXYZ", "Tallinn Delivery, ESXYZ, stand " + stand.name + ", information Charlie, request clearance to Riga", khz("DEL"), false);
+  const clr = said[said.length - 1];
+  ok(clr && clr.pos === "DEL" && /^ESXYZ, cleared to EVRA via .*, climb \d+ feet, squawk \d{4}$/.test(clr.text), "Delivery clears from the filed plan: " + (clr && clr.text));
+  const code = /squawk (\d{4})/.exec(clr.text)[1], climb = /climb (\d+) feet/.exec(clr.text)[1];
+  atc.heard("ESXYZ", `cleared to Riga, climb ${climb} feet, squawk 4512, ESXYZ`, khz("DEL"), false);
+  ok(/^ESXYZ, negative, squawk \d{4}, read back$/.test(said[said.length - 1].text), "a wrong squawk is corrected: " + said[said.length - 1].text);
+  atc.heard("ESXYZ", `cleared to Riga via flight planned route, climb ${climb} feet, squawk ${code}, ESXYZ`, khz("DEL"), false);
+  ok(/readback correct, contact Ground \d{3}\.\d+ when ready/.test(said[said.length - 1].text) && acks.some(x => x.cs === "ESXYZ" && x.status === "cleared" && x.squawk === +code), "readback correct, handed to Ground, plan answered as cleared");
+  const F = atc.flights.get("ESXYZ");
+  ok(F.phase === "cleared" && F.pos === "GND" && F.readbackErrors === 1, "state after the clearance");
+  // taxiing without clearance: Ground sees the real position move
+  upd({ pos: [stand.pos[0] + 80, stand.pos[1]], spd: 5 * KT });
+  sim.step(1); atc.tick();
+  ok(/hold position, you are not cleared to taxi/.test(said[said.length - 1].text) && F.deviations === 1, "moving before a taxi clearance: hold position: " + said[said.length - 1].text + " dev=" + F.deviations);
+  atc.heard("ESXYZ", "ESXYZ, request taxi", khz("GND"), false);
+  const taxi = said[said.length - 1];
+  ok(taxi.pos === "GND" && new RegExp(`taxi to holding point runway ${sim.depEnd.name}.*hold short runway ${sim.depEnd.name}`).test(taxi.text) && F.taxi && F.taxi.points.length > 1, "taxi clearance with a route from the real position: " + taxi.text);
+  atc.heard("ESXYZ", `taxi to holding point runway ${sim.depEnd.name}, hold short, ESXYZ`, khz("GND"), false);
+  ok(F.phase === "taxi" && !F.pending, "taxi readback accepted");
+  // off the route, then at the holding point
+  const pts = F.taxi.points, hp = pts[pts.length - 1], prev = pts[pts.length - 2];
+  const far = [hp[0] + 400, hp[1] + 400];
+  upd({ pos: far, spd: 10 * KT }); sim.step(1); atc.tick();
+  ok(/off the cleared route/.test(said[said.length - 1].text) && F.deviations === 2, "off the cleared route: told so: " + said[said.length - 1].text + " dev=" + F.deviations);
+  const L = Math.hypot(hp[0] - prev[0], hp[1] - prev[1]) || 1, ux = (hp[0] - prev[0]) / L, uy = (hp[1] - prev[1]) / L;
+  // the holding point: short of the runway entry node, off the runway itself (the entry node sits on it)
+  let back = 60; while (back < 290 && apt.runways.some(R => apt.onRunway([hp[0] - ux * back, hp[1] - uy * back], R, 5))) back += 10;
+  upd({ pos: [hp[0] - ux * back, hp[1] - uy * back], spd: 0 }); sim.step(1); atc.tick();
+  ok(/contact Tower \d{3}\.\d+/.test(said[said.length - 1].text) && F.pos === "TWR" && F.phase === "holding", "near the holding point: contact Tower: " + said[said.length - 1].text + " " + F.pos + " " + F.phase);
+  atc.heard("ESXYZ", `Tallinn Tower, ESXYZ, holding point runway ${sim.depEnd.name}, ready for departure`, khz("TWR"), false);
+  const tko = said[said.length - 1];
+  ok(tko.pos === "TWR" && new RegExp(`runway ${sim.depEnd.name}, cleared for takeoff`).test(tko.text), "Tower clears for takeoff with the runway free: " + tko.text);
+  atc.heard("ESXYZ", `runway ${sim.depEnd.name}, cleared for takeoff, ESXYZ`, khz("TWR"), false);
+  ok(F.takeoff && !F.pending, "takeoff readback accepted");
+  const e = sim.depEnd;
+  upd({ pos: [e.thr[0] + e.v[0] * 2500, e.thr[1] + e.v[1] * 2500], alt: 1200, spd: 160 * KT, onGround: false }); sim.step(1); atc.tick();
+  ok(F.phase === "to_app" && F.pos === "APP" && /contact (Radar|Departure|Director) \d{3}\.\d+/.test(said[said.length - 1].text), "airborne: handed to Radar");
+  atc.heard("ESXYZ", "Tallinn Radar, ESXYZ, passing 2000 feet", khz("APP"), false);
+  ok(/identified, climb flight level 120/.test(said[said.length - 1].text), "Radar identifies and clears the climb: " + said[said.length - 1].text);
+  atc.heard("ESXYZ", "climb flight level one two zero, ESXYZ", khz("APP"), false);
+  ok(F.phase === "climb" && !F.pending, "climb readback with spoken numbers accepted");
+  upd({ alt: 6000, pos: [e.thr[0] + e.v[0] * 12000, e.thr[1] + e.v[1] * 12000] }); sim.step(1); atc.tick();
+  ok(F.pos === "CTR" && /contact .*Control \d{3}\.\d+/.test(said[said.length - 1].text), "above 4500 ft: handed to Control");
+  atc.heard("ESXYZ", "Tallinn Control, ESXYZ, climbing flight level 120", khz("CTR"), false);
+  ok(/identified, climb flight level 360/.test(said[said.length - 1].text), "Control clears to the filed cruise level");
+  atc.heard("ESXYZ", "climb flight level 360, ESXYZ", khz("CTR"), false);
+  upd({ alt: 20000, pos: [e.v[0] * 40 * NM, e.v[1] * 40 * NM] }); sim.step(1); atc.tick();
+  ok(F.done && F.how === "departed" && /radar service terminated/.test(said[said.length - 1].text) && acks.some(x => x.status === "cancel"), "leaving the airspace closes the flight");
+  const d = atc.debrief("ESXYZ");
+  ok(d && d.readbackErrors === 1 && d.deviations === 2 && d.score === 50 && /airborne: \+/.test(d.text) && /off the cleared taxi route/.test(d.text) && d.lines.length > 12, "the debrief has the timings, the deviations and a score: " + d.score);
+  ok(said.every(m => m.say && !/\d{4}/.test(m.say)), "every AI call has its spoken form");
+
+  // nobody answers where a human works the position
+  {
+    const said2 = [];
+    const s2 = mk({ positions: pos, staffing: new Set(["DEL"]) }).sim;
+    const atc2 = new PilotAtc(s2, { say: (m) => said2.push(m), fpAck: () => {}, log: () => {} });
+    s2.upsertHuman({ hid: 10, cs: "ESABC", type: "C172", pos: [stand.pos[0], stand.pos[1]], alt: 0, hdg: 80, spd: 0, onGround: true, squawk: "7000", xpdr: "S", ai: false, tx: false, fp: { ...fp, session_id: 10, callsign: "ESABC" } });
+    s2.step(1); atc2.tick();
+    atc2.heard("ESABC", "request clearance", khz("DEL"), false);
+    ok(said2.length === 0, "the AI stays silent on a position a human works");
+    atc2.heard("ESABC", "request taxi", khz("GND"), false);
+    ok(said2.length === 1 && said2[0].pos === "GND", "but Ground, unstaffed, answers when the pilot calls there");
+  }
+
+  // an arrival: Radar, Tower, Ground, the stand
+  {
+    const said3 = [], acks3 = [];
+    const s3 = mk({ positions: pos, staffing: new Set([]) }).sim;
+    const atc3 = new PilotAtc(s3, { say: (m) => said3.push(m), fpAck: (cs, x) => acks3.push({ cs, ...x }), log: () => {} });
+    const a = s3.arrEnd, px = -a.v[1], py = a.v[0];
+    const fp3 = { session_id: 11, callsign: "LN771", ac_icao: "B738", rules: "I", status: "filed", squawk: 0, dep: "EVRA", dest: "EETN", altn: "EFHK", cruise_ft: 24000, route: "ABETI N746 ULGOT", remarks: "" };
+    let c3 = { pos: [a.thr[0] - a.v[0] * 15 * NM, a.thr[1] - a.v[1] * 15 * NM], alt: 4000, hdg: 260, spd: 180 * KT, onGround: false };
+    const up3 = (x) => { c3 = { ...c3, ...x }; return s3.upsertHuman({ hid: 11, cs: "LN771", type: "B738", squawk: "4525", xpdr: "C", ai: false, tx: false, fp: fp3, ...c3 }); };
+    up3({}); s3.step(1); atc3.tick();
+    const G = atc3.flights.get("LN771");
+    ok(G && G.dir === "arr" && G.pos === "CTR" && said3.length === 0, "an inbound is known and waited for");
+    atc3.heard("LN771", "Tallinn Radar, LN771, inbound, information Charlie", khz("APP"), false);
+    ok(G.pos === "APP" && new RegExp(`identified, descend 3000 feet, cleared ILS approach runway ${a.name}, report established`).test(said3[said3.length - 1].text), "Radar clears the approach: " + said3[said3.length - 1].text);
+    atc3.heard("LN771", `descend 3000 feet, cleared ILS runway ${a.name}, LN771`, khz("APP"), false);
+    ok(G.phase === "approach" && !G.pending, "approach readback accepted");
+    up3({ pos: [a.thr[0] - a.v[0] * 8 * NM, a.thr[1] - a.v[1] * 8 * NM], alt: 2500 }); s3.step(1); atc3.tick();
+    ok(G.pos === "TWR" && G.phase === "final" && /contact Tower/.test(said3[said3.length - 1].text), "inside 10 NM: contact Tower");
+    atc3.heard("LN771", `Tallinn Tower, LN771, established ILS ${a.name}`, khz("TWR"), false);
+    ok(/continue approach/.test(said3[said3.length - 1].text), "outside 6 NM: continue approach");
+    up3({ pos: [a.thr[0] - a.v[0] * 5 * NM, a.thr[1] - a.v[1] * 5 * NM], alt: 1600 }); s3.step(1); atc3.tick();
+    ok(G.landClr && new RegExp(`runway ${a.name}, cleared to land`).test(said3[said3.length - 1].text), "inside 6 NM with the runway free: cleared to land");
+    atc3.heard("LN771", `runway ${a.name}, cleared to land, LN771`, khz("TWR"), false);
+    up3({ pos: [a.thr[0] + a.v[0] * 600, a.thr[1] + a.v[1] * 600], alt: 0, spd: 60 * KT, onGround: true }); s3.step(1); atc3.tick();
+    ok(G.phase === "landed", "touchdown seen");
+    up3({ pos: [a.thr[0] + a.v[0] * 900 + px * 120, a.thr[1] + a.v[1] * 900 + py * 120], spd: 10 * KT }); s3.step(1); atc3.tick();
+    ok(G.phase === "vacated" && G.pos === "GND" && /contact Ground/.test(said3[said3.length - 1].text), "vacated: contact Ground");
+    atc3.heard("LN771", "Tallinn Ground, LN771, runway vacated, request taxi to stand", khz("GND"), false);
+    const tx = said3[said3.length - 1];
+    ok(G.stand && new RegExp(`taxi to stand ${G.stand.name}`).test(tx.text), "Ground gives a stand and a route: " + tx.text);
+    atc3.heard("LN771", `taxi to stand ${G.stand.name}, LN771`, khz("GND"), false);
+    ok(G.phase === "to_stand", "stand readback accepted");
+    up3({ pos: [G.stand.pos[0], G.stand.pos[1]], spd: 0 }); s3.step(1); atc3.tick();
+    ok(G.done && G.how === "arrived" && atc3.debrief("LN771").score === 100 && /landed: \+/.test(atc3.debrief("LN771").text), "on the stand: the flight is closed with a clean debrief");
+  }
 }
 
 console.log(fails ? `${fails} FAILED of ${n}` : `ALL ${n} PASSED`);

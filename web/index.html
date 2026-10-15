@@ -224,6 +224,7 @@
         <label><input type="checkbox" id="xrAtisVoice"> ATIS voice loop</label>
         <label><input type="checkbox" id="xrTranscribe"> Transcribe real pilots (local STT)</label>
         <label title="Hosts a multiplayer session with the code TOWER that the XRadio plugin's Tower mode joins (server.py --tower-port, default 8781)"><input type="checkbox" id="xrTower"> X-Plane tower link (session code TOWER)</label>
+        <label title="Delivery, Ground, Tower, Radar and Control answer XRadio pilots on the positions you do not staff: the clearance from the filed plan with a readback check, taxi watched against the real position, takeoff and landing against the traffic, handoffs, a debrief"><input type="checkbox" id="xrAiAtc"> AI controllers handle real pilots where nobody is staffed</label>
       </div>
       <div class="row small muted">Server address, join code (K7M2Q-X4PB9) or an in-sim host's address all go in the Server field.</div>
       <div id="xrInfo" class="small muted"></div>
@@ -237,6 +238,7 @@
 </dialog>
 
 <dialog id="debrief"><div id="debriefBody"></div><form method="dialog"><button>Close</button></form></dialog>
+<dialog id="pilotDebrief"><h3>Pilot debrief</h3><pre id="pilotDebriefBody"></pre><form method="dialog"><button id="pilotDebriefDl" type="button">Download</button> <button>Close</button></form></dialog>
 
 <div id="guideLayer" class="guide hidden">
   <div id="guideHole" class="hole"></div>

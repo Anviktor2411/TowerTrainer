@@ -13,6 +13,7 @@ import { Ptt } from "./speech.js";
 import { fetchOfp, importOfp, planUrl, renderOfp, routePoints } from "./simbrief.js";
 import { BUILTIN, WX_CHOICES, allScenarios, findScenario, saveScenario, deleteScenario, exportScenarios, importScenarios, normalize, scenarioSettings, evaluate, career, recordResult, levelOpen, history as sessionHistory, addHistory, overallScore, sparkline } from "./career.js";
 import { Recorder, frameAircraft, download, logsAsText } from "./replay.js";
+import { PilotAtc } from "./pilotatc.js";
 import { coach, coachHints } from "./coach.js";
 import { Bridges, XR_PILOT_HELP } from "./bridges.js";
 import { Guide } from "./guide.js";
@@ -46,7 +47,7 @@ const DEFAULTS = {
   nick: "", layouts: {}, layout: "", chartsUrl: "",
   staff: { mode: "combined", keys: ["TWR"] },
   xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false,
-    weather: "off", aiVoice: true, atisVoice: false, transcribe: false, tower: false },
+    weather: "off", aiVoice: true, atisVoice: false, transcribe: false, tower: false, aiAtc: true },
   simbrief: { user: "", units: "kg", apiKey: "", autoFetch: true },
 };
 
@@ -102,6 +103,7 @@ function bootMain() {
     box.parentElement.scrollTop = box.parentElement.scrollHeight;
   }
   const sysLog = (text) => addLog(activePos, "sys", esc(text));
+  let pilotAtc = null;   // S4: AI controllers for real pilots on the positions nobody staffs
   function remember(cs, who, text) {
     if (!cs) return;
     const h = (history[cs] ||= []);
@@ -314,10 +316,10 @@ function bootMain() {
     const rwy = sim.depEnd.name;
     sim.suggest = (a) => {
       const s = suggestSid(procs, rwy, { lat: apt.d.lat, lon: apt.d.lon, icao: apt.icao }, a.other, sim.region);
-      if (a.plan) {   // S2: the pilot's OFP wins when its SID is one of this runway's; its cruise level is the filed RFL
+      if (a.plan || a.planSid) {   // S2: the pilot's OFP wins when its SID is one of this runway's; its cruise level is the filed RFL (S4: also a plan filed from XRadio)
         const sids = (procs && procs.sids) || [];
         const ok = a.planSid && sids.some(p => p.name === a.planSid && p.runways.some(r => runwayMatches(r, rwy)));
-        return { ...s, sid: ok ? a.planSid : s.sid, rfl: a.rfl || 0, note: ok ? "SID from the OFP" : a.planSid ? `OFP SID ${a.planSid} is for runway ${a.plan.origin.rwy || "?"}; ${s.sid ? s.sid + " suggested" : "radar vectors"}` : s.note };
+        return { ...s, sid: ok ? a.planSid : s.sid, rfl: a.rfl || 0, note: ok ? "SID from the OFP" : a.planSid ? `OFP SID ${a.planSid} is for runway ${(a.plan && a.plan.origin && a.plan.origin.rwy) || "?"}; ${s.sid ? s.sid + " suggested" : "radar vectors"}` : s.note };
       }
       return s;
     };
@@ -359,6 +361,7 @@ function bootMain() {
       onEvent: onSimEvent,
     });
     sim.depPerHour = +settings.dep; sim.arrPerHour = +settings.arr;
+    makePilotAtc();
     recorder.start({ icao: apt.icao, staff: settings.staff });
     if (settings.xr.tower && !(mp.relay && mp.role === "host")) setTimeout(() => { if (sim && !(mp.relay && mp.role === "host")) mp.host(false, "TOWER"); }, 500);
     sim.setTrafficMix(settings.realMix ? trafficMix : null);
@@ -710,6 +713,25 @@ function bootMain() {
     const code = (a.stripData && a.stripData.sq) || a.assignedSq || sim.squawks.peek(sim.t);
     return { ...sg, code };
   }
+  // S4: AI controllers for real pilots (XRadio) on the positions nobody staffs; their calls go out like any AI call
+  function makePilotAtc() {
+    if (!sim || settings.xr.aiAtc === false) { pilotAtc = null; return; }
+    pilotAtc = new PilotAtc(sim, {
+      say: (m) => sim.onRadio({ from: "atc", ai: true, pos: m.pos, text: m.text, say: m.say, role: "atc" }),
+      fpAck: (cs, x) => bridges.fpAck(cs, x),
+      log: (line) => sysLog(line),
+      clock: () => fmtClock(sim),
+      onDone: (F) => { sysLog(`${F.cs}: flight closed — Debrief in the Delivery panel.`); renderDel(); },
+    });
+  }
+  function showPilotDebrief(id) {
+    const a = sim && sim.ac.find(x => x.id === id);
+    const d = a && pilotAtc ? pilotAtc.debrief(a.cs) : null;
+    if (!d) { alertBox("No debrief yet: the AI controllers have not handled this pilot."); return; }
+    $("pilotDebriefBody").textContent = d.text;
+    $("pilotDebriefDl").onclick = () => download(`towertrainer-${d.cs}-debrief.txt`, d.text);
+    $("pilotDebrief").showModal();
+  }
   function renderDel() {
     if (!sim) return;
     // rendered while visible here, or while a Delivery window / a remote controller may be showing it
@@ -722,7 +744,7 @@ function bootMain() {
       return `<div class="clr live${a.id === selectedId ? " sel" : ""}" data-id="${a.id}"><span class="cs">${esc(a.cs)} <span class="muted">(live pilot)</span></span>` +
         `<span>${esc(a.type)} ${esc(a.fp.rules || "V")}FR ${esc(a.fp.dep)} → ${esc(a.fp.dest)} ${esc(a.fp.route || "")} ${a.fp.cruise_ft ? a.fp.cruise_ft + " ft" : ""}</span>` +
         `<span class="st">${a.fpStatus === "ack" || a.fpStatus === "cleared" ? "answered" + (a.assignedSq ? " · " + esc(a.assignedSq) : "") : "filed"}</span>` +
-        `<span class="sg">${sg.sid ? "SID " + esc(sg.sid) : "no SID"} · climb ${sg.climb} ft · squawk ${esc(sg.code)} ${a.fpStatus === "filed" ? `<button data-read="${a.id}" title="Put the clearance in the command line">Read clearance</button>` : ""}</span></div>`;
+        `<span class="sg">${sg.sid ? "SID " + esc(sg.sid) : "no SID"} · climb ${sg.climb} ft · squawk ${esc(sg.code)} ${a.fpStatus === "filed" ? `<button data-read="${a.id}" title="Put the clearance in the command line">Read clearance</button>` : ""}${pilotAtc && pilotAtc.flights.has(a.cs) ? `<button data-debrief="${a.id}" title="What the AI controllers said and saw">Debrief</button>` : ""}</span></div>`;
     }).join("");
     $("clrList").innerHTML = (liveHtml + (req.length ? req.map(a => {
       const sg = suggestionFor(a);
@@ -746,6 +768,8 @@ function bootMain() {
   }
   $("fpEditor").addEventListener("change", (e) => { const f = e.target.dataset.f; if (f) stripAction({ id: selectedId, field: f, value: e.target.value.trim() }); });
   $("clrList").addEventListener("click", (e) => {
+    const db = e.target.closest("[data-debrief]");
+    if (db) { showPilotDebrief(+db.dataset.debrief); return; }
     const b = e.target.closest("[data-read]");
     if (b) { const a = sim.ac.find(x => x.id === +b.dataset.read); if (a) { select(a); $("cmd").value = clearanceText(a); $("cmd").focus(); } return; }
     const s = e.target.closest("[data-id]"); if (s) select(sim.ac.find(a => a.id === +s.dataset.id));
@@ -1028,6 +1052,7 @@ function bootMain() {
       const tag = t.to ? "✉ " : t.voice ? "🎙 " : "";
       addLog(pos || "ALL", "pilot human", `${tag}<b>${esc(t.from)}</b> ${esc(t.text)}${t.to ? ' <span class="muted">(private)</span>' : t.voice ? ' <span class="muted">(transcript)</span>' : ""}`);
       if (t.to) alertBox(`Private message from ${t.from}: ${t.text}`);
+      if (pilotAtc && !t.to && t.khz !== 121500) pilotAtc.heard(t.from, t.text, t.khz, !!t.voice);
     },
     onXrFlightPlan: null,
     onXrEvent: (e) => {
@@ -1161,7 +1186,7 @@ function bootMain() {
     $("xrEnabled").checked = x.enabled; $("xrHost").value = x.host; $("xrPort").value = x.port; $("xrPass").value = x.password;
     $("xrCs").value = x.cs || (apt ? `${apt.icao}_TWR` : ""); $("xrFreq").value = x.freq || (apt && apt.freq.tower ? fmtFreq(apt.freq.tower.mhz) : "");
     $("xrAi").checked = x.ai; $("xrHumans").checked = x.humans; $("xrText").checked = x.text; $("xrVoice").checked = x.voice;
-    $("xrWeather").value = x.weather || "off"; $("xrAiVoice").checked = x.aiVoice !== false; $("xrAtisVoice").checked = !!x.atisVoice; $("xrTranscribe").checked = !!x.transcribe; $("xrTower").checked = !!x.tower;
+    $("xrWeather").value = x.weather || "off"; $("xrAiVoice").checked = x.aiVoice !== false; $("xrAtisVoice").checked = !!x.atisVoice; $("xrTranscribe").checked = !!x.transcribe; $("xrTower").checked = !!x.tower; $("xrAiAtc").checked = x.aiAtc !== false;
     const sb = settings.simbrief; $("sbUser").value = sb.user || ""; $("sbUnits").value = sb.units || "kg"; $("sbKey").value = sb.apiKey || ""; $("sbAuto").checked = sb.autoFetch !== false;
     $("coachToggle").checked = settings.coach;
     renderVoiceTable(); renderEngines();
@@ -1172,10 +1197,11 @@ function bootMain() {
     settings.xr = { enabled: $("xrEnabled").checked, host: $("xrHost").value.trim() || "127.0.0.1", port: +$("xrPort").value || 49100,
       password: $("xrPass").value, cs: $("xrCs").value.trim().toUpperCase(), freq: $("xrFreq").value.trim(), ai: $("xrAi").checked,
       humans: $("xrHumans").checked, text: $("xrText").checked, voice: $("xrVoice").checked,
-      weather: $("xrWeather").value, aiVoice: $("xrAiVoice").checked, atisVoice: $("xrAtisVoice").checked, transcribe: $("xrTranscribe").checked, tower: $("xrTower").checked };
+      weather: $("xrWeather").value, aiVoice: $("xrAiVoice").checked, atisVoice: $("xrAtisVoice").checked, transcribe: $("xrTranscribe").checked, tower: $("xrTower").checked, aiAtc: $("xrAiAtc").checked };
     settings.simbrief = { user: $("sbUser").value.trim(), units: $("sbUnits").value, apiKey: $("sbKey").value.trim(), autoFetch: $("sbAuto").checked };
     if (settings.xr.tower && sim && !(mp.relay && mp.role === "host")) mp.host(false, "TOWER");
     save(); applyRadioSettings();
+    if (sim) { if (settings.xr.aiAtc === false) pilotAtc = null; else if (!pilotAtc) makePilotAtc(); }
     if (sim) {
       sim.rates = { readbackError: settings.rbErr / 100, sayAgain: settings.sayAgain / 100, oldAtis: settings.oldAtis / 100 };
       sim.events = settings.events; sim.depPerHour = +settings.dep; sim.arrPerHour = +settings.arr;
@@ -1590,6 +1616,7 @@ function bootMain() {
   function frame(now) {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
     if (sim && speed > 0) for (let i = 0; i < speed; i++) sim.step(dt);
+    if (sim && pilotAtc) pilotAtc.tick();
     if (sim) {
       recorder.tick(sim, logs);
       if (replay.on) drawReplay(dt);
@@ -1615,6 +1642,7 @@ function bootMain() {
     if (!sim || now - last < 400) return;
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
     if (speed > 0) for (let i = 0; i < speed; i++) sim.step(dt);
+    if (pilotAtc) pilotAtc.tick();
     recorder.tick(sim, logs);
     if (scenario && sim.t >= scenarioEndsAt) endScenario();
     bcT += dt; if (bcT > 0.25) { bcT = 0; broadcast(false); }
@@ -1622,7 +1650,7 @@ function bootMain() {
   }, 100);
   loadAirport(params.get("icao") || store.get("tt.icao", "EETN"));
   // for debugging and automated tests
-  window.TT = { get sim() { return sim; }, get apt() { return apt; }, get positions() { return positions; }, get procs() { return procs; }, transmit, parse, radio, radar, guide, app,
+  window.TT = { get sim() { return sim; }, get pilotAtc() { return pilotAtc; }, get apt() { return apt; }, get positions() { return positions; }, get procs() { return procs; }, transmit, parse, radio, radar, guide, app,
     settings, setActive, setView, select: (id) => select(sim && sim.ac.find(a => a.id === id)), openDebrief, bridges, loadAirport, refreshVoices, get mp() { return mp; }, broadcast,
     scenarios: { start: startScenario, end: endScenario, list: allScenarios, get current() { return scenario; } }, recorder, replay, openReplay, closeReplay, renderScen, get coachStats() { return coachStats; },
     applyStaffing: (mode, keys) => { settings.staff = { mode, keys }; save(); updateStaffBtn(); createSim(); } };
