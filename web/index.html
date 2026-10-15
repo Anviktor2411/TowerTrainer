@@ -19,11 +19,13 @@
   <select id="speed" class="main-only" title="Simulation speed"><option value="0">Pause</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
   <label class="main-only" title="Phraseology notes after each transmission"><input type="checkbox" id="coachToggle"> Coach</label>
   <button id="guideBtn" type="button" class="main-only">Guide</button>
+  <button id="scenBtn" type="button" class="main-only" title="Career path, scenarios, replay and statistics">Scenarios</button>
   <button id="debriefBtn" type="button" class="main-only">Debrief</button>
   <button id="settingsBtn" type="button" class="main-only">Settings</button>
   <button id="layoutBtn" type="button" class="main-only" title="Windows on your screens (Alt+L)">Layout</button>
   <button id="mpBtn" type="button" class="main-only" title="Host a session or join one (Alt+M)">Multiplayer</button>
   <button id="icBtn" type="button" class="main-only small" title="Intercom to the other controllers: hold (or Alt+Shift)">🎧</button>
+  <button id="chartsBtn" type="button" class="main-only" title="SIDs, STARs, approaches and chart links for this airport">Charts</button>
   <button id="helpBtn" type="button">Phraseology</button>
   <span id="navPill" class="pill hidden" title="Navigation data (SID/STAR source and AIRAC cycle)">NAV: –</span>
   <span id="voicePill" class="pill main-only" title="Voice engine that is speaking">Voices: …</span>
@@ -53,6 +55,7 @@
     <div id="seqPanel" class="seqpanel hidden"></div>
     <div id="checkPanel" class="checkpanel hidden"></div>
     <div id="alerts" class="alerts"></div>
+    <div id="replayBar" class="replaybar hidden"><button type="button" id="rpPlay">▶</button><input type="range" id="rpPos" min="0" max="0" value="0"><span id="rpTime">0:00</span><span id="rpInfo" class="muted small"></span><button type="button" id="rpSave" title="Save the recording as a file">Save</button><button type="button" id="rpClose">Close replay</button></div>
     <div id="coachPanel" class="coach hidden"></div>
     <button id="restorePop" type="button" class="restore hidden"></button>
   </section>
@@ -79,6 +82,17 @@
   </aside>
 </main>
 
+<dialog id="scenDialog">
+  <h2>Scenarios &amp; career</h2>
+  <div class="tabs" id="scenTabs"><button type="button" data-tab="career" class="on">Career path</button><button type="button" data-tab="list">Scenarios</button><button type="button" data-tab="replay">Replay</button><button type="button" data-tab="stats">Statistics</button></div>
+  <div id="scenBody"></div>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+<dialog id="chartsDialog">
+  <h2>Procedures &amp; charts</h2>
+  <div id="chartsBody"></div>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
 <dialog id="mpDialog">
   <h2>Multiplayer</h2>
   <div id="mpBody"></div>
@@ -161,6 +175,7 @@
       <label><input type="checkbox" id="setCoach"> Coach mode</label>
       <label>Guide / coach language <select id="setLang"><option value="en">English</option><option value="et">Eesti</option></select></label>
       <label><input type="checkbox" id="graph"> Show taxi graph (generated stand links dashed)</label>
+          <label>Charts link <input id="setChartsUrl" placeholder="https://skyvector.com/airport/{icao}" size="30" title="{icao} is replaced by the airport"></label>
     </fieldset>
     <fieldset><legend>EuroScope</legend>
       <div id="setEs" class="small"></div>

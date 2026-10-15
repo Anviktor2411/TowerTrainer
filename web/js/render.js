@@ -9,6 +9,7 @@
 // redrawn when the view moves, so 150+ targets stay at 60 fps.
 import { dist } from "./airport.js";
 import { AC_DIM } from "./data.js";
+import { TowerView } from "./tower3d.js";
 import { statePhrase, issueMarkers, squawkText } from "./labels.js";
 
 const NM = 1852;
@@ -22,7 +23,7 @@ const DAY = {
 const NIGHT = { ...DAY, bg: "#05080b", pave: "#121820", concrete: "#141a22", grass: "#080d09", rwy: "#070a0d", taxiLine: "#4d4418",
   lead: "#3f3814", edge: "#1a2026", white: "#454d55", stand: "#3f4c58", ring: "#141c24", text: "#9aa9b7" };
 
-export const VIEWS = { DEL: "Delivery", GND: "Ground", TWR: "Tower", APP: "Approach", CTR: "Centre" };
+export const VIEWS = { DEL: "Delivery", GND: "Ground", TWR: "Tower", APP: "Approach", CTR: "Centre", "3D": "Tower 3D" };
 const RADAR_VIEWS = new Set(["TWR", "APP", "CTR"]);
 const VEH_COL = { followme: "#ffd04a", fire: "#ff5a3c", ops: "#e8eef4", tug: "#9aa7b4", snow: "#8fd3ff", fuel: "#d9a53d", bus: "#7fc7ff", catering: "#b0e07a", baggage: "#c8c8c8" };
 const LABEL_OFFSETS = [[14, -22], [14, 16], [-14, -22], [-14, 16], [16, -44], [-16, -44], [16, 36], [-16, 36], [0, -58], [0, 48]];
@@ -53,6 +54,7 @@ export class Radar {
     this.onStopBar = null;          // (bar) => {} toggle
     this.credit = "";
     this.osm = null;                // { buildings: [{pts, kind, name}] } (C3)
+    this.t3d = new TowerView(this); // the cab view (G4)
     this.staticKey = null;
     this.bindMouse();
     new ResizeObserver(() => { this.resize(); }).observe(canvas);
@@ -99,6 +101,7 @@ export class Radar {
     this.roads = line(apt.roads.map(e => [apt.nodes[e.a], apt.nodes[e.b]]));
     this.centrePts = (d.lines || []).flatMap(l => l.filter((q, i) => i % 2 === 0));   // taxiway centreline lights at night
     this.edgePts = (d.edgeLines || []).flatMap(l => l.filter((q, i) => i % 3 === 0));   // blue taxiway edge lights at night
+    this.t3d.setAirport(apt, this.osm);
     this.labels = [];
     for (const e of apt.edges) {
       if (!e.name || e.runway || e.len < 30 || e.generated) continue;
@@ -113,7 +116,7 @@ export class Radar {
   }
 
   /** OSM buildings etc. (C3): [{pts:[[x,y]...], kind:"terminal"|"hangar"|"tower"|"building"|"apron", name}] */
-  setOsm(osm) { this.osm = osm; this.staticKey = null; }
+  setOsm(osm) { this.osm = osm; this.staticKey = null; if (this.apt) this.t3d.setAirport(this.apt, osm); }
 
   /** SID/STAR polylines from procs.js procLines() (lat/lon). */
   setProcs(lines) {
@@ -126,6 +129,7 @@ export class Radar {
     this.view = VIEWS[view] ? view : "GND";
     if (!this.apt) return;
     this.resize();
+    if (this.view === "3D") { this.staticKey = null; return; }
     const apt = this.apt;
     if (this.view === "GND" || this.view === "DEL") {
       const [x0, y0, x1, y1] = this.view === "DEL" ? apt.apronBounds(80) : apt.bounds(200);
@@ -150,6 +154,7 @@ export class Radar {
     const local = (e) => { const r = this.cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
     this.cv.addEventListener("wheel", (e) => {
       e.preventDefault();
+      if (this.view === "3D") { this.t3d.wheel(e); return; }
       const [x, y] = local(e);
       const before = this.toWorld(x, y);
       this.scale *= Math.exp(-e.deltaY * 0.0015);
@@ -160,14 +165,17 @@ export class Radar {
     }, { passive: false });
     this.cv.addEventListener("mousedown", (e) => {
       const [x, y] = local(e);
+      if (this.view === "3D") { this.t3d.dragStart(x, y); drag = { t3d: true, moved: false }; return; }
       const box = this.labelBoxes.find(b => x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h);
       if (box) { drag = { label: box.id, x, y, off: [...(this.labelOff.get(box.id) || this.autoOff.get(box.id) || [14, -22])], moved: false }; return; }
       drag = { x: e.clientX, y: e.clientY, cx: this.cx, cy: this.cy, moved: false };
     });
     this.cv.addEventListener("mousemove", (e) => { this.mouse = local(e); });
     this.cv.addEventListener("mouseleave", () => { this.mouse = null; this.hover = null; });
+    this.cv.addEventListener("dblclick", (e) => { if (this.view !== "3D") return; const [x, y] = local(e); const best = this.t3d.targetAt(x, y); this.t3d.locked = best ? best.id : null; });
     window.addEventListener("mousemove", (e) => {
       if (!drag) return;
+      if (drag.t3d) { const [x, y] = local(e); if (this.t3d.dragMove(x, y)) drag.moved = true; return; }
       if (drag.label != null) {
         const [x, y] = local(e);
         this.labelOff.set(drag.label, [drag.off[0] + x - drag.x, drag.off[1] + y - drag.y]);
@@ -180,6 +188,11 @@ export class Radar {
       this.staticKey = null;
     });
     window.addEventListener("mouseup", (e) => {
+      if (drag && drag.t3d) {
+        this.t3d.dragEnd();
+        if (!drag.moved && this.world && e.target === this.cv) { const [x, y] = local(e); const best = this.t3d.targetAt(x, y); this.onSelect(best ? best.id : null); }
+        drag = null; return;
+      }
       if (drag && !drag.moved && this.world && e.target === this.cv) {
         if (drag.label != null) { this.onSelect(drag.label); drag = null; return; }
         const [x, y] = local(e);
@@ -197,6 +210,7 @@ export class Radar {
   }
 
   targetAt(x, y) {
+    if (this.view === "3D") return this.t3d.targetAt(x, y);
     let best = null, bd = 18;
     for (const a of this.world ? this.world.ac : []) {
       const s = this.toScreen(a.pos); const d = Math.hypot(s[0] - x, s[1] - y);
@@ -205,6 +219,7 @@ export class Radar {
     return best;
   }
   stopBarAt(x, y) {
+    if (this.view === "3D") return null;
     for (const b of this.stopBars) { const s = this.toScreen(b.p); if (Math.hypot(s[0] - x, s[1] - y) < 10) return b; }
     return null;
   }
@@ -419,6 +434,7 @@ export class Radar {
     const ctx = this.ctx, apt = this.apt, k = this.scale, dpr = this.dpr || 1, C = this.C;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (!apt) { ctx.fillStyle = C.bg; ctx.fillRect(0, 0, this.w, this.h); return; }
+    if (this.view === "3D") { this.recordHistory(world.ac); this.t3d.draw(world, selectedId); this.hover = null; return; }
     this.drawStatic(world.arrEnd);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.drawImage(this.staticCv, 0, 0);

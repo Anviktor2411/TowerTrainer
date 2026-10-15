@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tower Trainer — setup</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  body { overflow: auto; }
+  .wiz { max-width: 980px; margin: 0 auto; padding: 12px 18px 60px; }
+  .wiz h1 { font-size: 20px; letter-spacing: .08em; color: var(--atc); }
+  .step { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; margin: 12px 0; background: var(--panel); }
+  .step h2 { margin: 0 0 6px; font-size: 15px; } .step h2 .n { display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 11px; background: #1b2a1f; color: var(--atc); margin-right: 8px; font-size: 12px; }
+  .ok { color: #7fd48a; } .bad { color: #ff8a8a; } .warn { color: var(--warn); }
+  .kv { display: grid; grid-template-columns: 180px 1fr; gap: 3px 10px; font-size: 13px; } .kv b { color: var(--muted); font-weight: 600; }
+  table.pk { font-size: 13px; border-collapse: collapse; } table.pk td, table.pk th { padding: 3px 10px 3px 0; text-align: left; }
+  .out { font: 11px ui-monospace, Consolas, monospace; white-space: pre-wrap; background: #0b1016; border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; max-height: 220px; overflow: auto; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; } input[type=text] { min-width: 260px; }
+  .light { display: inline-block; width: 10px; height: 10px; border-radius: 5px; margin-right: 6px; background: #555; } .light.ok { background: #4ddc6a; } .light.bad { background: #ff5a5a; } .light.warn { background: #ffc24d; }
+  .topbar { display: flex; gap: 14px; align-items: center; margin-bottom: 8px; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wiz">
+  <h1>TOWER TRAINER — SETUP</h1>
+  <div class="topbar">
+    <label title="Only show what would be done"><input type="checkbox" id="dry"> Dry run (show what would happen, change nothing)</label>
+    <a href="/">← back to the trainer</a>
+    <span class="grow"></span>
+    <span class="muted small">This page only works on the PC that runs server.py. Everything it changes is listed in <code id="logPath">setup.log</code>.</span>
+  </div>
+  <div class="step" id="sPython"><h2><span class="n">1</span>Python and optional packages</h2><div id="pyBody">…</div></div>
+  <div class="step" id="sEs"><h2><span class="n">2</span>EuroScope</h2><div id="esBody">…</div></div>
+  <div class="step" id="sXp"><h2><span class="n">3</span>X-Plane 12, Navigraph data and the XRadio plugin</h2><div id="xpBody">…</div></div>
+  <div class="step" id="sTest"><h2><span class="n">4</span>Tests</h2><div id="testBody"><button type="button" id="runTests">Run the tests</button><div id="testOut"></div></div></div>
+  <div class="step" id="sLog"><h2><span class="n">5</span>setup.log</h2><div class="out" id="logOut">…</div></div>
+</div>
+<script type="module" src="js/setup.js"></script>
+</body>
+</html>

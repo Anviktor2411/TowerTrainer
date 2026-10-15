@@ -26,6 +26,7 @@ from socketserver import ThreadingMixIn
 import aptdat
 import fsd
 import navdata
+import setup as setupwiz
 import openflights
 import osm
 import ws
@@ -163,6 +164,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         try:
             body = self.read_json()
+            if path.startswith("/api/setup/"):
+                return self.setup_post(path, body)
             if path == "/api/stt":
                 if not rate_ok(self.client_address[0], 20):
                     return self.send(429, {"error": "too many requests"})
@@ -198,6 +201,59 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(404, {"error": "unknown endpoint"})
         except Exception as e:
             return self.send(500, {"error": f"{type(e).__name__}: {e}"})
+
+    def setup_post(self, path, body):
+        """Setup wizard actions (G6): every one takes dry_run and only touches folders the page showed first."""
+        if not self.is_local():
+            return self.send(403, {"error": "the setup wizard is only available on this PC"})
+        dry = bool(body.get("dry_run"))
+        a = path[len("/api/setup/"):]
+        if a == "upload":                                   # a sector package the user chose in the browser
+            name = re.sub(r"\.{2,}", ".", re.sub(r"[^A-Za-z0-9_.-]+", "_", str(body.get("name", "package.zip")))).lstrip("._")[:80] or "package.zip"
+            data = base64.b64decode(body.get("data", ""))
+            if len(data) > 400 * 1024 * 1024:
+                return self.send(413, {"error": "too large"})
+            up = CACHE / "setup-upload"
+            up.mkdir(parents=True, exist_ok=True)
+            p = up / name
+            p.write_bytes(data)
+            return self.send(200, {"ok": True, "path": str(p), "bytes": len(data)})
+        if a == "pip":
+            return self.send(200, setupwiz.pip_install(str(body.get("name", "")), dry))
+        if a == "unpack":
+            return self.send(200, setupwiz.unpack_sector_package(str(body.get("zip", "")), str(body.get("docs", "")), str(body.get("name", "")), bool(body.get("overwrite")), dry))
+        if a == "generate":
+            return self.send(200, setupwiz.generate_sector(str(body.get("icao", "")), str(body.get("docs", "")), CACHE, str(body.get("callsign", "")), bool(body.get("overwrite")), dry))
+        if a == "shortcut":
+            return self.send(200, setupwiz.desktop_shortcut(str(body.get("target", "")), str(body.get("label", "TowerTrainer"))[:60], str(body.get("args", "")), dry))
+        if a == "xradio_latest":
+            return self.send(200, setupwiz.xradio_latest())
+        if a == "xradio_install":
+            return self.send(200, setupwiz.install_xradio(str(body.get("xplane", "")), str(body.get("source", "")), str(body.get("tag", "")), body.get("backup", True), dry))
+        if a == "xradio_settings":
+            return self.send(200, setupwiz.xradio_settings(str(body.get("xplane", "")), body.get("values") or {}, dry))
+        if a == "xplane_info":
+            return self.send(200, setupwiz.xplane_folder_info(str(body.get("path", ""))))
+        if a == "tests":                                    # what the server can check itself; the microphone is tested in the page
+            out = {}
+            try:
+                out["voices"] = tts().status()
+            except Exception as e:  # noqa: BLE001
+                out["voices"] = {"error": str(e)}
+            try:
+                out["euroscope"] = {"running": FSD is not None, "port": getattr(FSD, "port", None), **(FSD.status() if FSD is not None and hasattr(FSD, "status") else {})}
+            except Exception as e:  # noqa: BLE001
+                out["euroscope"] = {"running": FSD is not None, "error": str(e)}
+            try:
+                out["xradio"] = xradio().status()
+            except Exception as e:  # noqa: BLE001
+                out["xradio"] = {"error": str(e)}
+            try:
+                out["stt"] = stt().status()
+            except Exception as e:  # noqa: BLE001
+                out["stt"] = {"error": str(e)}
+            return self.send(200, out)
+        return self.send(404, {"error": "unknown setup action"})
 
     def tts_post(self, path, body):
         local = self.is_local()
@@ -258,6 +314,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, navdata.load_procedures(
                     m.group(1), apt["lat"], apt["lon"], CACHE, xplane=q.get("xplane", ""), mode=q.get("mode", "auto"),
                     custom=q.get("custom", ""), sector=q.get("sector", ""), use_cache=q.get("refresh") != "1"))
+            if path == "/api/setup/status":             # the setup wizard (G6): detection only, local PC only
+                if not self.is_local():
+                    return self.send(403, {"error": "the setup wizard is only available on this PC"})
+                return self.send(200, setupwiz.status(q.get("xplane", ""), q.get("docs", ""), CACHE))
+            if path == "/api/setup/log":
+                if not self.is_local():
+                    return self.send(403, {"error": "local only"})
+                try:
+                    lines = setupwiz.LOG.read_text("utf-8", "replace").splitlines()[-80:]
+                except OSError:
+                    lines = []
+                return self.send(200, {"log": lines, "path": str(setupwiz.LOG)})
             if path == "/api/navdata":
                 if not self.is_local():
                     return self.send(403, {"error": "local only"})
@@ -310,7 +378,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             return self.send(500, {"error": f"{type(e).__name__}: {e}"})
 
-        rel = "index.html" if path == "/" else path.lstrip("/")
+        rel = "index.html" if path == "/" else "setup.html" if path == "/setup" else path.lstrip("/")
         f = (WEB / rel).resolve()
         if WEB not in f.parents or not f.is_file():
             return self.send(404, "not found", "text/plain")

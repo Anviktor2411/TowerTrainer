@@ -34,6 +34,11 @@ const T = {
     unparsed: "Not understood as standard phraseology — the pilot will ask you to say again.",
     good: "Good: standard phraseology.",
     abbrevTooEarly: "Abbreviate a callsign only after the pilot has made first contact with you.",
+    readyWaiting: (s) => `ready for ${s} s with the runway free — clear for takeoff or line up (ICAO 4444 §7.9).`,
+    landLate: (nm) => `${nm} nm final without a landing clearance — clear to land or send around (ICAO 4444 §7.10).`,
+    wakeWait: (cs, s) => `wake turbulence behind ${cs} (heavy): ${s} s more before a lighter departure (ICAO 4444 §5.8, 2 min).`,
+    spacing: (cs, nm, need) => `${nm} nm behind ${cs}, ${need} nm needed — reduce speed or break off the approach.`,
+    rwyBusy: (cs) => `${cs} still on the runway with the next landing close — expedite vacating or send around.`,
   },
   et: {
     noCallsign: "Kutsung puudub — alusta iga saadet kutsungiga.",
@@ -61,6 +66,11 @@ const T = {
     unparsed: "Ei tundnud standardfraseoloogiat ära — piloot palub korrata.",
     good: "Hea: standardne fraseoloogia.",
     abbrevTooEarly: "Kutsungit lühenda alles pärast seda, kui piloot on sinuga esmase ühenduse võtnud.",
+    readyWaiting: (s) => `valmis ${s} s, rada vaba — anna õhkutõusuluba või rajale sõidu korraldus (ICAO 4444 §7.9).`,
+    landLate: (nm) => `${nm} NM lõpplähenemisel ilma maandumisloata — anna luba või saada kordusringile (ICAO 4444 §7.10).`,
+    wakeWait: (cs, s) => `jälgturbulents ${cs} (heavy) järel: veel ${s} s enne kergema väljumist (ICAO 4444 §5.8, 2 min).`,
+    spacing: (cs, nm, need) => `${nm} NM ${cs} taga, vaja ${need} NM — vähenda kiirust või katkesta lähenemine.`,
+    rwyBusy: (cs) => `${cs} on veel rajal ja järgmine maanduja lähedal — kiirenda vabastamist või saada kordusringile.`,
   },
 };
 
@@ -144,6 +154,48 @@ export function coachHints(sim, lang = "en") {
     if (a.freq === "TWR" && a.kind === "dep" && a.state === "airborne" && a.alt > 1000 && sim.positions.APP) out.push({ ac: a, msg: L.handTwrDep });
     if (a.freq === "TWR" && a.kind === "arr" && a.state === "vacated" && sim.positions.GND) out.push({ ac: a, msg: L.handTwrArr });
     if (a.freq === "APP" && a.kind === "arr" && a.state === "final" && sim.distToThr(a) < 10 * 1852 && sim.positions.TWR) out.push({ ac: a, msg: L.handApp });
+  }
+  return out.concat(timingHints(sim, lang));
+}
+
+/** Timing and separation (G2): a ready departure waiting with a free runway, a late landing clearance,
+ *  wake turbulence behind a heavy, arrival spacing on final, a runway not vacated before the next landing. */
+export function timingHints(sim, lang = "en") {
+  const L = T[lang] || T.en;
+  const out = [];
+  const NM = 1852;
+  const works = (a) => !sim.split || sim.userWorks(a.freq);
+  const heavy = (w) => w === "H" || w === "J";
+  for (const a of sim.ac) {
+    if (!works(a)) continue;
+    if (a.kind === "dep" && a.state === "holding" && a.holdAt != null && !a.toClr && !a.cond) {
+      const wait = sim.t - a.holdAt, rwy = (a.depEnd || sim.depEnd).rwy;
+      const short = sim.ac.some(o => o.kind === "arr" && o.state === "final" && o.end && o.end.rwy === rwy && sim.distToThr(o) < 4 * NM);
+      const wake = sim.lastTakeoff && heavy(sim.lastTakeoff.wtc) && !heavy(a.wtc) && sim.t - sim.lastTakeoff.t < 120;
+      if (wait > 60 && sim.runwayFree(rwy, a) && !short && !wake && !sim.closedRunways.has(rwy)) out.push({ ac: a, msg: L.readyWaiting(Math.round(wait)) });
+    }
+    if (a.kind === "arr" && a.state === "final" && !a.landClr && !a.nordo && !a.landAfter) {
+      const d = sim.distToThr(a) / NM;
+      if (d < 4 && d > 0.3) out.push({ ac: a, msg: L.landLate(d.toFixed(1)) });
+    }
+  }
+  const lt = sim.lastTakeoff;
+  if (lt && heavy(lt.wtc) && sim.t - lt.t < 120) {
+    const next = sim.ac.find(a => a.kind === "dep" && ["holding", "lineup", "lining", "lined_up"].includes(a.state) && (a.depEnd || sim.depEnd).rwy === lt.rwy && !heavy(a.wtc) && works(a));
+    if (next) out.push({ ac: next, msg: L.wakeWait(lt.cs, Math.round(120 - (sim.t - lt.t))) });
+  }
+  const finals = sim.ac.filter(a => a.kind === "arr" && a.state === "final" && a.end).sort((p, q) => sim.distToThr(p) - sim.distToThr(q));
+  for (let i = 1; i < finals.length; i++) {
+    const a = finals[i], b = finals[i - 1];
+    if (a.end.rwy !== b.end.rwy || !works(a)) continue;
+    const gap = (sim.distToThr(a) - sim.distToThr(b)) / NM;
+    const need = heavy(b.wtc) ? (heavy(a.wtc) ? 4 : 5) : 3;
+    if (gap < need - 0.3 && gap > 0) out.push({ ac: a, msg: L.spacing(b.cs, gap.toFixed(1), need) });
+  }
+  for (const b of finals) {
+    if (sim.distToThr(b) > 2 * NM || !works(b)) continue;
+    const occ = sim.ac.find(o => o !== b && o.onGround && (o.state === "rollout" || o.state === "vacating") && o.end && o.end.rwy === b.end.rwy);
+    if (occ) out.push({ ac: occ, msg: L.rwyBusy(occ.cs) });
   }
   return out;
 }

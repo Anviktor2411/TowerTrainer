@@ -1,0 +1,46 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    # everything that needs no network: phraseology, voices, squawks, relay, FSD, data, setup wizard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - run: python tests/ws_test.py
+      - run: python tests/fsd_test.py
+      - run: python tests/data_test.py
+      - run: python tests/navdata_test.py
+      - run: python tests/tts_test.py
+      - run: python tests/stt_test.py
+      - run: python tests/setup_test.py
+      - run: python tests/sector_test.py
+
+  airport:
+    # suites that need a cached airport (fetched once from the X-Plane Scenery Gateway and OpenStreetMap)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - name: fetch EETN into cache/
+        run: python -c "import server; server.load_airport('EETN'); print('cached')"
+      - run: node tests/unit.test.mjs
+      - run: node tests/taxi.test.mjs
+      - run: node tests/ops.test.mjs
+      - run: node tests/flow.test.mjs EETN
+      - name: browser suite (headless Chrome)
+        run: |
+          python server.py --fsd-port 0 > server.log 2>&1 &
+          sleep 3
+          node tests/browser.test.mjs
+          node tests/perf.mjs

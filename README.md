@@ -1,7 +1,18 @@
 # Tower Trainer
 
+[![tests](https://github.com/Anviktor2411/TowerTrainer/actions/workflows/tests.yml/badge.svg)](https://github.com/Anviktor2411/TowerTrainer/actions/workflows/tests.yml)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-green.svg)](LICENSE)
+
 Offline practice for VATSIM Delivery / Ground / Tower / Approach / Centre at (almost) any airport in the world.
 Airport layouts come from the X-Plane Scenery Gateway (cached in `cache/`), the runway from the live METAR.
+
+| Ground view | Delivery | Tower at night |
+|---|---|---|
+| ![ground](docs/screenshots/EETN-ground.png) | ![delivery](docs/screenshots/EETN-delivery.png) | ![tower](docs/screenshots/EETN-night.png) |
+
+**Install in one go (Windows):** right-click `installer/TowerTrainer-Setup.ps1` → *Run with PowerShell*. It checks
+Python, downloads the trainer into `%LOCALAPPDATA%\TowerTrainer`, makes a desktop shortcut and opens the setup
+wizard. Everything else: `start.bat` (Windows) / `start.sh` (macOS, Linux), then <http://localhost:8780>.
 
 ## Run
 
@@ -51,6 +62,42 @@ own). `xradio/protocol.py` is vendored from XRadio v0.6.0 (MIT, protocol 6); a v
 the older feature set. The status pill shows `XR: v6 · 3 pilots · 12 AI`; the XRadio settings have a short
 "how to fly with TowerTrainer ATC" text for the pilots.
 
+## Learning: scenarios, career path, replay, statistics
+
+**Scenarios** (header button): a career path from Delivery to "everything at once" where each level opens when a
+scenario of the level before is passed; the result is the phraseology score plus the goals (missed readbacks,
+conflicts, go-arounds) in the debrief. Scenarios are plain objects: copy a built-in one or make your own in the
+editor (airport, runway, positions, rates, weather, LVP, abnormals, duration, goals), export/import them as JSON.
+The session is recorded all the time (one frame per second): **Replay** scrubs it on the radar with the frequency
+log following, and a recording can be saved and loaded again later. The debrief exports the log (.txt) and the whole
+session (.json) and every finished session goes into **Statistics** (score trend, table). The coach now also gives
+timing and separation hints: a departure waiting with the runway free, a late landing clearance, wake turbulence
+behind a heavy, arrival spacing, a runway not vacated. **Charts** lists the SIDs/STARs/approaches of the airport
+(from your own Navigraph / X-Plane / EuroScope data), lets you show only some on the radar and links to chart
+sites (the link is a setting; nothing is bundled).
+
+## Tower 3D
+
+A view tab next to the radar pictures: the airport seen from the tower cab, drawn with the ordinary canvas (no
+WebGL, no libraries). Pavement, runways with markings and lights, taxiway lines, OpenStreetMap buildings extruded
+by their height, aircraft as silhouettes with labels, day/night, fog. Drag to look around, wheel for binoculars,
+click an aircraft to select it, double-click to follow it. Alt+6.
+
+![tower 3d](docs/screenshots/EETN-3d.png)
+
+## Setup wizard
+
+<http://localhost:8780/setup> (local PC only). Step by step: Python and the optional packages with their sizes
+(installed only with this Python's own pip); EuroScope detection (never bundled — it links to euroscope.hu),
+radar files either from a sector package you supply (unpacked into `Documents\EuroScope\<package>`) or generated
+from the trainer's own airport data (`TowerTrainer_<ICAO>.sct/.ese/.asr` + a profile that connects to
+127.0.0.1 with "Connect to VATSIM" off, and a desktop shortcut); X-Plane 12 detection (installer list and Steam),
+the Navigraph AIRAC in `Custom Data`, installing or updating the XRadio plugin from its GitHub release zip with a
+backup of the old folder, and filling `xradio.cfg`; finally tests of voices, microphone, speech recognition,
+EuroScope and XRadio with a green/red light and a fix line each. Nothing is written outside the folders the page
+shows, nothing is overwritten without ticking "allow overwriting", every action has a dry run, and `setup.log`
+keeps the record. `python server.py` on another PC does not expose the wizard.
+
 ## Several controllers, several screens
 
 * **Windows** – any position, or a single panel of it (radar, strips, log, Delivery list, weather, sequence,
@@ -73,6 +120,21 @@ the older feature set. The status pill shows `XR: v6 · 3 pilots · 12 AI`; the 
   taxiway on the map appends it to the taxi instruction you are typing. Push-to-talk works in Firefox too:
   the server's Vosk or Whisper recognises what you said, biased with the callsigns in use.
 
+## Packaging
+
+`start.bat` / `start.sh` start the server and open the browser. `pyinstaller TowerTrainer.spec` builds a
+`dist/TowerTrainer/` folder with the server, the page and the vendored XRadio protocol (optional engines only when
+they are installed in that Python). `.github/workflows/tests.yml` runs the Python and Node suites on every push
+(the airport-dependent ones fetch EETN from the Gateway first).
+
+## Licence and credits
+
+MIT (see `LICENSE`). Airport layouts: X-Plane Scenery Gateway (Laminar Research). Buildings and the tower
+position: © OpenStreetMap contributors (ODbL). Airlines, routes and airports: OpenFlights (ODbL). Weather:
+aviationweather.gov. Procedures: your own Navigraph / X-Plane / EuroScope files, read locally and never copied
+into the repository. XRadio protocol module: XRadio (MIT, Anviktor2411). Data downloaded at run time is cached
+in `cache/` with its fetch date; the OSM and OpenFlights snapshots age with it — delete the cache to refresh.
+
 ## Tests
 
 ```
@@ -84,4 +146,6 @@ node tests/browser.test.mjs                   # real page in headless Chrome inc
 node tests/ops.test.mjs                       # operations, weather, handoffs, autocomplete
 python tests/ws_test.py                       # the multiplayer relay (WebSocket framing, roles, claims, kick/ban)
 node tests/firefox.mjs                        # the same page in headless Firefox over WebDriver BiDi (TT_BROWSER=edge runs browser.test in Edge)
+python tests/sector_test.py                   # generated EuroScope .sct/.ese/.asr/.prf for EETN and EGSS parse back
+python tests/setup_test.py                    # the setup wizard on a temporary folder, dry runs, its HTTP API
 ```

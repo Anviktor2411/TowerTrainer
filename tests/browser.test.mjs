@@ -103,9 +103,42 @@ try {
   ok(await p.waitFor(`[...document.querySelectorAll("#suggest div")].some(d => /cleared|line up|taxi|push|hold|contact|next expected/i.test(d.innerText))`, 3000), "after the callsign the next instructions are offered");
   await p.eval(`document.getElementById("cmd").value = ""; document.getElementById("cmd").blur()`);
 
+  // ---- Phase G: 3D tower view, charts, scenarios / career, replay, statistics, the setup wizard ----
+  await p.eval(`TT.setView("3D")`); await sleep(600);
+  ok(await p.eval(`TT.radar.view === "3D" && TT.radar.labelBoxes.length > 0`), "3D tower view draws aircraft labels (" + (await p.eval(`TT.radar.labelBoxes.length`)) + ")");
+  await p.shot(join(OUT, "tower-3d.png"));
+  await p.eval(`TT.setView("TWR")`);
+  await p.eval(`document.getElementById("chartsBtn").click()`); await sleep(200);
+  ok(await p.eval(`document.getElementById("chartsDialog").open && /Charts for EETN/.test(document.getElementById("chartsBody").innerText)`), "charts dialog opens with the chart links");
+  await p.eval(`document.getElementById("chartsDialog").close()`);
+  await p.eval(`document.getElementById("scenBtn").click()`); await sleep(200);
+  ok(await p.eval(`document.getElementById("scenDialog").open && document.querySelectorAll("#scenBody .scen").length >= 8 && document.querySelectorAll("#scenBody .scen.locked").length >= 5`), "career path lists the scenarios with the higher levels locked");
+  await p.eval(`document.querySelector('#scenTabs [data-tab="list"]').click(); document.getElementById("scenNew").click()`); await sleep(100);
+  await p.eval(`document.querySelector('#scenForm [name="name"]').value = "Browser test"; document.querySelector('#scenForm [name="minutes"]').value = "5"; document.getElementById("scenForm").requestSubmit()`); await sleep(200);
+  ok(await p.eval(`TT.scenarios.list().some(s => s.name === "Browser test" && s.user && s.minutes === 5)`), "a user scenario is saved from the editor");
+  await p.eval(`document.getElementById("scenDialog").close(); TT.scenarios.start(TT.scenarios.list()[0])`);
+  ok(await p.waitFor(`TT.scenarios.current && TT.scenarios.current.id === "del-first" && TT.sim.split && TT.sim.userWorks("DEL") && !TT.sim.userWorks("TWR")`, 15000), "the first career scenario starts with Delivery only");
+  await p.eval(`(() => { for (let i = 0; i < 30; i++) { TT.sim.step(1); TT.recorder.tick(TT.sim, {}); } TT.sim.t += 15 * 60 + 5; })()`); await sleep(1500);
+  ok(await p.waitFor(`!TT.scenarios.current && document.getElementById("debrief").open && /Passed|Not passed/.test(document.getElementById("debriefBody").innerText)`, 5000), "the scenario ends in the debrief with a result: " + (await p.eval(`(document.querySelector("#debriefBody .result") || {}).innerText || ""`)));
+  ok(await p.eval(`JSON.parse(localStorage.getItem("tt.history") || "[]").length === 1 && !!JSON.parse(localStorage.getItem("tt.career") || "{}").last`), "the session went into the statistics and the career record");
+  await p.eval(`document.getElementById("dbReplay").click()`); await sleep(800);
+  ok(await p.eval(`TT.replay.on && !document.getElementById("replayBar").classList.contains("hidden") && +document.getElementById("rpPos").max >= 10`), "replay opens with a scrubber over the recorded frames (" + (await p.eval(`document.getElementById("rpPos").max`)) + ")");
+  await p.eval(`document.getElementById("rpPos").value = "5"; document.getElementById("rpPos").dispatchEvent(new Event("input"))`); await sleep(400);
+  ok(await p.eval(`TT.replay.i === 5 && /REPLAY/.test(document.getElementById("status").innerText)`), "scrubbing moves the replay");
+  await p.eval(`document.getElementById("rpClose").click()`); await sleep(200);
+  ok(await p.eval(`!TT.replay.on`), "replay closes and the simulation continues");
+  await p.eval(`TT.applyStaffing("split", ["TWR"]); TT.app.setSpeed(1)`);
+  const wz = await br.newPage("http://localhost:8780/setup");
+  ok(await wz.waitFor(`document.getElementById("pyBody").innerText.includes("Python") && document.querySelectorAll("table.pk tr").length > 3 && !!document.getElementById("esIcao")`, 20000), "setup wizard page renders (Python, packages, EuroScope, X-Plane) " + wz.errors.join(" | "));
+  await wz.eval(`document.getElementById("dry").checked = true; document.getElementById("esGen").click()`);
+  ok(await wz.waitFor(`/DRY RUN/.test(document.getElementById("esOut").innerText) && /TowerTrainer_/.test(document.getElementById("esOut").innerText)`, 10000), "wizard dry run lists the sector files it would generate");
+  ok(wz.errors.length === 0, "wizard page has no JS errors " + wz.errors.join(" | "));
+  await wz.send("Page.navigate", { url: "about:blank" }); wz.close();
+  await p.send("Page.bringToFront");
+
   // ---- Delivery view, plain-language labels, info panel, light signals, voice status ----
   await p.eval(`TT.setView("DEL")`); await sleep(500);
-  ok(await p.eval(`!document.getElementById("delPanel").classList.contains("hidden") && document.querySelectorAll("#viewTabs button").length === 5`), "Delivery view tab shows the clearance panel");
+  ok(await p.eval(`!document.getElementById("delPanel").classList.contains("hidden") && document.querySelectorAll("#viewTabs button").length === 6`), "Delivery view tab shows the clearance panel (six view tabs incl. Tower 3D)");
   await p.eval(`(() => { TT.app.setSpeed(0); const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture({ ga: false }); if (d && !d.ga) { d.callAt = s.t + 1; window.delAc = d; break; } if (d) s.putBack(d); } for (let i = 0; i < 25; i++) s.step(0.1); })()`);
   await p.waitFor(`/squawk [0-9]{4}/.test(document.getElementById("clrList").innerText)`, 5000);
   ok(await p.eval(`/squawk [0-9]{4}/.test(document.getElementById("clrList").innerText) && /climb [0-9]{4} ft/.test(document.getElementById("clrList").innerText)`), "clearance list shows SID/climb/next squawk suggestions: " + (await p.eval(`JSON.stringify({ st: delAc.state, ga: delAc.ga, kind: delAc.kind, lc: delAc.lastCall, t: TT.sim.t, n: TT.sim.ac.length, view: TT.radar.view })`)) + " " + (await p.eval(`document.getElementById("clrList").innerText.split("\\n").slice(0, 2).join(" | ")`)));

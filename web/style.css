@@ -207,3 +207,12 @@ body.popout.panel-only aside { width: 100%; border-left: none; } body.popout.pan
 .posTabs .tab.mine { border-color: var(--atc); box-shadow: inset 0 -2px 0 var(--atc); }
 body.remote .chat { display: flex; } body.board .chat, body.board .coordp, body.board .guestbar .sp { display: none; }
 body.board .guestbar { font-size: 15px; } body.board .posTabs .tab { font-size: 15px; padding: 8px 14px; }
+.proc { display: block; padding: 2px 0; font-size: 12px; } .proc b { color: var(--atc); }
+.replaybar { position: absolute; left: 8px; right: 8px; bottom: 8px; z-index: 6; display: flex; gap: 8px; align-items: center; background: #0b1016ee; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font-size: 12px; }
+.replaybar input[type=range] { flex: 1; } .replaybar #rpTime { font: 12px ui-monospace, Consolas, monospace; min-width: 60px; }
+.tabs { display: flex; gap: 4px; margin-bottom: 8px; } .tabs button.on { border-color: var(--atc); color: var(--atc); }
+.scen { border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; margin: 4px 0; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; font-size: 13px; }
+.scen.locked { opacity: .45; } .scen .pass { color: var(--atc); } .scen .fail { color: var(--warn); } .scen .meta { color: var(--muted); font-size: 11px; grid-column: 1 / -1; }
+.scen .lvl { display: inline-block; min-width: 18px; text-align: center; border: 1px solid var(--line); border-radius: 9px; font-size: 10px; margin-right: 6px; color: var(--muted); }
+.scenform { display: grid; grid-template-columns: repeat(4, auto); gap: 6px 12px; font-size: 12px; } .scenform label { display: flex; flex-direction: column; gap: 2px; } .scenform .wide { grid-column: 1 / -1; }
+.result.pass { color: var(--atc); font-weight: 600; } .result.fail { color: var(--warn); font-weight: 600; }

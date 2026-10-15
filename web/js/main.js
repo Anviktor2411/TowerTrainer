@@ -10,6 +10,8 @@ import { renderStrips, incomingFor } from "./strips.js";
 import { suggestions } from "./autocomplete.js";
 import { Relay, Intercom } from "./remote.js";
 import { Ptt } from "./speech.js";
+import { BUILTIN, WX_CHOICES, allScenarios, findScenario, saveScenario, deleteScenario, exportScenarios, importScenarios, normalize, scenarioSettings, evaluate, career, recordResult, levelOpen, history as sessionHistory, addHistory, overallScore, sparkline } from "./career.js";
+import { Recorder, frameAircraft, download, logsAsText } from "./replay.js";
 import { coach, coachHints } from "./coach.js";
 import { Bridges, XR_PILOT_HELP } from "./bridges.js";
 import { Guide } from "./guide.js";
@@ -40,7 +42,7 @@ const DEFAULTS = {
   accents: "natural", rate: 1, effect: 0.85, preset: "good", voices: true, blocked: true, rbErr: 4, sayAgain: 2, oldAtis: 10, events: false,
   dep: 10, arr: 8, coach: false, lang: "en", graph: false, monitor: [], occupancy: 70, vehicles: -1, waves: true, osm: true, realMix: true, nightAuto: true,
   wx: "live", lvp: false, recat: false, vfr: 2, abnormals: false, abnormalRate: 2, seq: true,
-  nick: "", layouts: {}, layout: "",
+  nick: "", layouts: {}, layout: "", chartsUrl: "",
   staff: { mode: "combined", keys: ["TWR"] },
   xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false,
     weather: "off", aiVoice: true, atisVoice: false, transcribe: false },
@@ -68,6 +70,9 @@ function bootMain() {
   const coachStats = {};           // pos -> {tx, warn}
   let guideRestore = null;
   const app = {};                  // API used by the guide
+  const recorder = new Recorder();   // one frame per second, for replay and export (G1)
+  let scenario = null, scenarioEndsAt = 0;
+  const replay = { on: false, rec: null, logs: null, i: 0, playing: false, acc: 0, speedBefore: 1, lastShown: -1 };
 
   const applyRadioSettings = () => {
     Object.assign(radio, { accents: settings.accents, rate: +settings.rate, effect: +settings.effect, tts: settings.voices, blocked: settings.blocked, preset: settings.preset });
@@ -89,7 +94,8 @@ function bootMain() {
   }
   function renderLog() {
     const box = $("log");
-    box.innerHTML = (logs[activePos] || []).map(e => `<div class="${e.cls}">${e.html}</div>`).join("");
+    const src = replay.on && replay.rec ? (replay.logs[activePos] || []).slice(0, ((replay.rec.frames[replay.i] || {}).logN || {})[activePos] || 0) : (logs[activePos] || []);
+    box.innerHTML = src.map(e => `<div class="${e.cls}">${e.html}</div>`).join("");
     box.parentElement.scrollTop = box.parentElement.scrollHeight;
   }
   const sysLog = (text) => addLog(activePos, "sys", esc(text));
@@ -220,6 +226,28 @@ function bootMain() {
     } catch { /* remote player: procedures are host-only */ }
     applyProcs();
   }
+  // ---------- G3: procedures & charts ----------
+  const procFilter = new Set();
+  function renderCharts() {
+    if (!apt) return;
+    const rwy = sim ? sim.depEnd.name : "";
+    const src = procs && procs.source;
+    const url = (settings.chartsUrl || "https://skyvector.com/airport/{icao}").replace(/\{icao\}/gi, apt.icao);
+    const list = (title, kind, arr) => arr.length ? `<h3>${title} (${arr.length})</h3>` + arr.map(p => {
+      const rws = (p.runways && p.runways.length ? p.runways : Object.keys(p.rwy || {})).map(r => String(r).replace(/^RW/, "")).join(" ");
+      const key = `${kind}:${p.name}`;
+      return `<label class="proc">${kind ? `<input type="checkbox" data-proc="${esc(key)}" ${procFilter.has(key) ? "checked" : ""}>` : ""} <b>${esc(p.name)}</b> <span class="muted">${esc(rws)}${p.climb ? " · climb " + p.climb : ""}${p.exit ? " · " + esc(p.exit) : ""}${p.missed && p.missed.length ? " · missed approach " + p.missed.filter(l => l.fix).map(l => l.fix).join(" ") : ""}</span></label>`;
+    }).join("") : "";
+    $("chartsBody").innerHTML = `<p class="small muted">${src && src.kind !== "fallback" ? `Procedures from ${esc(src.label || src.kind)}${src.airac ? ", AIRAC " + esc(src.airac) : ""}${navInfo && navInfo.outdated ? " (older than the current cycle)" : ""}` : "No procedure data for this airport — point Settings → Navigation data at your Navigraph, X-Plane or EuroScope files; the trainer never bundles them."}. Runway in use <b>${esc(rwy)}</b>. Tick SIDs/STARs to show only those on the radar views (none ticked = all for the runway).</p>` +
+      `<div class="row"><a href="${esc(url)}" target="_blank" rel="noopener">Charts for ${esc(apt.icao)} ↗</a> <a href="https://chartfox.org/${esc(apt.icao)}" target="_blank" rel="noopener">ChartFox ↗</a> <a href="https://www.navigraph.com/" target="_blank" rel="noopener">Navigraph ↗</a> <span class="muted small">(the chart link is a setting: Settings → Training)</span></div>` +
+      list("SIDs", "sid", (procs && procs.sids) || []) + list("STARs", "star", (procs && procs.stars) || []) + list("Approaches", "", (procs && procs.apps) || []);
+  }
+  $("chartsBtn").addEventListener("click", () => { renderCharts(); $("chartsDialog").showModal(); });
+  $("chartsBody").addEventListener("change", (e) => {
+    const c = e.target.closest("[data-proc]"); if (!c) return;
+    if (c.checked) procFilter.add(c.dataset.proc); else procFilter.delete(c.dataset.proc);
+    applyProcs();
+  });
   function applyProcs() {
     if (!sim || !apt) return;
     const rwy = sim.depEnd.name;
@@ -230,7 +258,7 @@ function bootMain() {
         (Object.keys(p.rwy || {}).some(k => runwayMatches(k, end.name)) || (p.runways || []).some(r => runwayMatches(r, end.name))));
       return app ? app.missed : null;
     };
-    radar.setProcs(procs ? procLines(procs, rwy) : []);
+    radar.setProcs(procs ? procLines(procs, rwy).filter(l => !procFilter.size || procFilter.has(`${l.kind}:${l.name}`)) : []);
     const src = procs && procs.source ? procs.source : null;
     const pill = $("navPill");
     pill.classList.remove("hidden");
@@ -262,6 +290,7 @@ function bootMain() {
       onEvent: onSimEvent,
     });
     sim.depPerHour = +settings.dep; sim.arrPerHour = +settings.arr;
+    recorder.start({ icao: apt.icao, staff: settings.staff });
     sim.setTrafficMix(settings.realMix ? trafficMix : null);
     if ($("rwySel").value) sim.setRunway($("rwySel").value);
     applyWeather();
@@ -844,7 +873,7 @@ function bootMain() {
     const typing = ["INPUT", "TEXTAREA"].includes(document.activeElement.tagName) || document.activeElement.isContentEditable;
     if (e.key === "/" && !typing) { e.preventDefault(); $("cmd").focus(); return; }
     if (!e.altKey || e.ctrlKey || e.metaKey) return;
-    const views = { 1: "GND", 2: "TWR", 3: "APP", 4: "CTR", 5: "DEL" };
+    const views = { 1: "GND", 2: "TWR", 3: "APP", 4: "CTR", 5: "DEL", 6: "3D" };
     const posKeys = { q: "DEL", w: "GND", e: "TWR", r: "APP", t: "CTR", a: "ALL" };
     if (views[e.key]) { e.preventDefault(); setView(views[e.key]); }
     else if (posKeys[e.key] && sim && (sim.split ? e.key !== "a" : e.key === "a")) { e.preventDefault(); setActive(posKeys[e.key]); }
@@ -1047,7 +1076,7 @@ function bootMain() {
   const bindings = [
     ["setAccents", "accents"], ["setRate", "rate"], ["setEffect", "effect"], ["setPreset", "preset"], ["setVoices", "voices", "checked"], ["setBlocked", "blocked", "checked"],
     ["setRbErr", "rbErr"], ["setSayAgain", "sayAgain"], ["setOldAtis", "oldAtis"], ["setEvents", "events", "checked"],
-    ["depRate", "dep"], ["arrRate", "arr"], ["setCoach", "coach", "checked"], ["setLang", "lang"], ["graph", "graph", "checked"],
+    ["depRate", "dep"], ["arrRate", "arr"], ["setCoach", "coach", "checked"], ["setLang", "lang"], ["setChartsUrl", "chartsUrl"], ["graph", "graph", "checked"],
     ["setOccupancy", "occupancy"], ["setVehicles", "vehicles"], ["setWaves", "waves", "checked"], ["setOsm", "osm", "checked"], ["setRealMix", "realMix", "checked"], ["setNight", "nightAuto", "checked"],
     ["setWx", "wx"], ["setLvp", "lvp", "checked"], ["setRecat", "recat", "checked"], ["setVfr", "vfr"], ["setAbnormals", "abnormals", "checked"], ["setAbnormalRate", "abnormalRate"], ["setSeq", "seq", "checked"],
   ];
@@ -1128,8 +1157,12 @@ function bootMain() {
   radar.showGraph = settings.graph;
 
   // ---------- debrief ----------
-  function openDebrief() {
+  function openDebrief(result = null) {
     if (!sim) return;
+    const score = overallScore(coachStats), hist = sessionHistory(), Lx = settings.lang === "et";
+    const resHtml = result && result.scenario ? `<div class="result ${result.passed ? "pass" : "fail"}">${result.passed ? (Lx ? "✓ Läbitud" : "✓ Passed") : (Lx ? "✗ Ei läbinud" : "✗ Not passed")}: ${esc(scenName(result.scenario))} — ${Lx ? "skoor" : "score"} ${result.score}${result.reasons.length ? " (" + esc(result.reasons.join("; ")) + ")" : ""}</div>` : "";
+    const extras = `<h3>${Lx ? "Varasemad sessioonid" : "Earlier sessions"} (${hist.length})</h3>${hist.length ? sparkline(hist.slice(-30).map(r => r.score)) : `<span class="muted">—</span>`}` +
+      `<div class="row"><button type="button" id="dbLog">${Lx ? "Salvesta logi (.txt)" : "Export log (.txt)"}</button><button type="button" id="dbJson">${Lx ? "Salvesta sessioon (.json)" : "Export session (.json)"}</button><button type="button" id="dbReplay">${Lx ? "Vaata tagasi" : "Replay"}</button>${result ? "" : `<button type="button" id="dbSave">${Lx ? "Salvesta statistikasse" : "Save to statistics"}</button>`}</div>`;
     const st = sim.stats;
     const delays = st.delays.map(d => d.s);
     const avg = delays.length ? delays.reduce((a, b) => a + b, 0) / delays.length : 0;
@@ -1145,9 +1178,17 @@ function bootMain() {
       </table>
       <h3>${L ? "Fraseoloogia positsioonide kaupa" : "Phraseology per position"}</h3>
       <table class="score"><tr><th>${L ? "Positsioon" : "Position"}</th><th>${L ? "Saateid" : "Transmissions"}</th><th>${L ? "Märkusi" : "Issues"}</th><th>${L ? "Skoor" : "Score"}</th></tr>${rows || `<tr><td colspan=4 class="muted">—</td></tr>`}</table>`;
+    $("debriefBody").innerHTML = resHtml + $("debriefBody").innerHTML + extras;
     $("debrief").showModal();
   }
-  $("debriefBtn").addEventListener("click", openDebrief);
+  $("debriefBtn").addEventListener("click", () => openDebrief());
+  $("debriefBody").addEventListener("click", (e) => {
+    const id = e.target.id, name = `towertrainer-${apt ? apt.icao : "session"}-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}`;
+    if (id === "dbLog") download(name + ".txt", logsAsText(logs, { icao: apt && apt.icao, started: recorder.meta && recorder.meta.started }), "text/plain");
+    if (id === "dbJson") download(name + ".json", JSON.stringify({ towertrainer: "session", v: 1, icao: apt && apt.icao, stats: sim.stats, coach: coachStats, score: overallScore(coachStats), alerts: sim.alertLog || null, recording: recorder.toJSON(logs) }));
+    if (id === "dbReplay") { $("debrief").close(); openReplay(recorder, logs); }
+    if (id === "dbSave") { addHistory({ date: new Date().toISOString().slice(0, 10), icao: apt.icao, scenario: "", minutes: Math.round(sim.t / 60), departures: sim.stats.departures, arrivals: sim.stats.arrivals, goArounds: sim.stats.goArounds, conflicts: sim.stats.conflicts, missedRb: sim.stats.missedRb, alerts: sim.stats.alerts, score: overallScore(coachStats), passed: null }); e.target.disabled = true; e.target.textContent = "✓"; }
+  });
 
   // ---------- misc controls ----------
   $("aptForm").addEventListener("submit", (e) => { e.preventDefault(); loadAirport($("aptIcao").value); });
@@ -1346,19 +1387,136 @@ function bootMain() {
   const guide = new Guide(app);
   $("guideBtn").addEventListener("click", () => guide.start());
 
+  // ---------- G1: scenarios, the career path, recording / replay, statistics ----------
+  let scenTab = "career";
+  function scenName(s) { return settings.lang === "et" && s.nameEt ? s.nameEt : s.name; }
+  function scenIntro(s) { return settings.lang === "et" && s.introEt ? s.introEt : s.intro; }
+  function scenMeta(s) {
+    const g = s.goals || {};
+    return `${s.icao || "current airport"}${s.rwy ? " RWY " + s.rwy : ""} · ${s.staff === "combined" ? "combined DEL/GND/TWR" : s.staff.join("+")} · ${s.dep}/h dep, ${s.arr}/h arr${s.vfr ? ", VFR " + s.vfr + "/h" : ""} · wx ${s.wx || "live"}${s.lvp ? " · LVP" : ""}${s.abnormals ? " · abnormals " + s.abnormalRate + "/h" : ""} · ${s.minutes} min · goals: score ≥ ${g.score}${g.missedRb != null ? ", missed readbacks ≤ " + g.missedRb : ""}${g.conflicts != null ? ", conflicts ≤ " + g.conflicts : ""}${g.goArounds != null ? ", go-arounds ≤ " + g.goArounds : ""}`;
+  }
+  function renderScen() {
+    $("scenTabs").querySelectorAll("button").forEach(b => b.classList.toggle("on", b.dataset.tab === scenTab));
+    const el = $("scenBody"), L = settings.lang === "et", c = career();
+    if (scenTab === "career") {
+      const levels = [...new Set(BUILTIN.map(s => s.level))].sort((a, b) => a - b);
+      el.innerHTML = `<p class="small muted">${L ? "Tasemed avanevad järjest: läbi eelmise taseme üks stsenaarium. Tulemus = fraseoloogia skoor ja eesmärgid kokkuvõttes." : "Levels open one after another: pass one scenario of the level before. The result is the phraseology score and the goals in the debrief."}</p>` +
+        levels.map(lv => { const open = levelOpen(lv); return BUILTIN.filter(s => s.level === lv).map(s => { const p = c.passed[s.id]; return `<div class="scen${open ? "" : " locked"}"><div><span class="lvl">${lv}</span><b>${esc(scenName(s))}</b> ${p ? `<span class="pass">✓ ${p.score} (${p.date})</span>` : c.last && c.last.id === s.id && !c.last.passed ? `<span class="fail">✗ ${c.last.score}</span>` : ""}</div><div>${open ? `<button type="button" data-start="${s.id}">${L ? "Alusta" : "Start"}</button>` : "🔒"}</div><div class="meta">${esc(scenIntro(s))}<br>${esc(scenMeta(s))}</div></div>`; }).join(""); }).join("");
+    } else if (scenTab === "list") {
+      el.innerHTML = `<div class="row"><button type="button" id="scenNew">${L ? "Uus stsenaarium" : "New scenario"}</button><button type="button" id="scenImport">${L ? "Impordi JSON" : "Import JSON"}</button><button type="button" id="scenExport">${L ? "Ekspordi minu omad" : "Export mine"}</button><input type="file" id="scenFile" accept=".json" class="hidden"></div><div id="scenEdit"></div>` +
+        allScenarios().map(s => `<div class="scen"><div><span class="lvl">${s.level || "·"}</span><b>${esc(scenName(s))}</b>${s.user ? "" : ' <span class="muted small">built-in</span>'}</div><div><button type="button" data-start="${s.id}">${L ? "Alusta" : "Start"}</button> <button type="button" data-edit="${s.id}">${s.user ? (L ? "Muuda" : "Edit") : (L ? "Kopeeri" : "Copy")}</button>${s.user ? ` <button type="button" data-del="${s.id}">${L ? "Kustuta" : "Delete"}</button>` : ""}</div><div class="meta">${esc(scenMeta(s))}</div></div>`).join("");
+    } else if (scenTab === "replay") {
+      el.innerHTML = `<p class="small muted">${L ? "Salvestus käib kogu aeg (üks kaader sekundis). Vaata praegust sessiooni tagasi või laadi varem salvestatud fail." : "Recording runs all the time (one frame per second). Replay the current session or load a saved file."}</p>` +
+        `<div class="row"><button type="button" id="rpNow">${L ? "Vaata praegust sessiooni" : "Replay this session"} (${Math.round(recorder.seconds / 60)} min)</button><button type="button" id="rpLoadBtn">${L ? "Laadi salvestus" : "Load a recording"}</button><input type="file" id="rpFile" accept=".json" class="hidden"><button type="button" id="rpExport">${L ? "Salvesta fail" : "Save as file"}</button></div>`;
+    } else {
+      const h = sessionHistory();
+      el.innerHTML = `<p class="small muted">${L ? "Iga lõpetatud sessioon (kokkuvõte või stsenaarium) jääb siia brauserisse." : "Every finished session (debrief or scenario) is kept here in this browser."}</p>` +
+        (h.length ? sparkline(h.slice(-30).map(r => r.score)) + `<table class="score"><tr><th>${L ? "Kuupäev" : "Date"}</th><th>ICAO</th><th>${L ? "Stsenaarium" : "Scenario"}</th><th>min</th><th>DEP</th><th>ARR</th><th>G/A</th><th>${L ? "Konfl." : "Confl."}</th><th>${L ? "Vead" : "Missed"}</th><th>${L ? "Skoor" : "Score"}</th><th></th></tr>` +
+          h.slice().reverse().slice(0, 40).map(r => `<tr><td>${esc(r.date)}</td><td>${esc(r.icao)}</td><td>${esc(r.scenario || "—")}</td><td>${r.minutes}</td><td>${r.departures}</td><td>${r.arrivals}</td><td>${r.goArounds}</td><td>${r.conflicts}</td><td>${r.missedRb}</td><td><b>${r.score}</b></td><td>${r.passed == null ? "" : r.passed ? '<span class="pass">✓</span>' : '<span class="fail">✗</span>'}</td></tr>`).join("") + "</table>" +
+          `<div class="row"><button type="button" id="statClear">${L ? "Kustuta ajalugu" : "Clear history"}</button></div>` : `<p class="muted">${L ? "Veel midagi pole." : "Nothing yet."}</p>`);
+    }
+  }
+  function scenForm(s) {
+    const L = settings.lang === "et";
+    const f = (k, label, v, extra = "") => `<label>${label}<input name="${k}" value="${esc(v ?? "")}" ${extra}></label>`;
+    $("scenEdit").innerHTML = `<form id="scenForm" class="scenform">` + f("id", "id", s.id) + f("name", L ? "Nimi" : "Name", s.name) + f("nameEt", "Nimi (et)", s.nameEt) + f("level", L ? "Tase" : "Level", s.level, 'type="number" min="0" max="9"') +
+      f("icao", "ICAO", s.icao, 'placeholder="current"') + f("rwy", "RWY", s.rwy) + f("staff", L ? "Positsioonid" : "Positions", s.staff === "combined" ? "combined" : s.staff.join(" "), 'placeholder="combined or TWR GND"') + f("minutes", L ? "Kestus (min)" : "Minutes", s.minutes, 'type="number" min="5"') +
+      f("dep", "DEP/h", s.dep, 'type="number"') + f("arr", "ARR/h", s.arr, 'type="number"') + f("vfr", "VFR/h", s.vfr, 'type="number"') + `<label>${L ? "Ilm" : "Weather"}<select name="wx">${WX_CHOICES.map(w => `<option ${s.wx === w ? "selected" : ""}>${w}</option>`).join("")}</select></label>` +
+      `<label><input type="checkbox" name="lvp" ${s.lvp ? "checked" : ""}> LVP</label><label><input type="checkbox" name="abnormals" ${s.abnormals ? "checked" : ""}> ${L ? "Hädaolukorrad" : "Abnormals"}</label>` + f("abnormalRate", L ? "Hädaolukordi/h" : "Abnormals/h", s.abnormalRate, 'type="number"') + f("score", L ? "Eesmärk: skoor ≥" : "Goal: score ≥", s.goals.score, 'type="number"') +
+      f("missedRb", L ? "Märkamata vigu ≤" : "Missed readbacks ≤", s.goals.missedRb ?? "", 'type="number" placeholder="any"') + f("conflicts", L ? "Konflikte ≤" : "Conflicts ≤", s.goals.conflicts ?? "", 'type="number" placeholder="any"') + f("goArounds", L ? "Kordusringe ≤" : "Go-arounds ≤", s.goals.goArounds ?? "", 'type="number" placeholder="any"') +
+      `<label class="wide">${L ? "Sissejuhatus" : "Intro"}<input name="intro" value="${esc(s.intro)}"></label><label class="wide">Intro (et)<input name="introEt" value="${esc(s.introEt)}"></label>` +
+      `<div class="wide row"><button type="submit">${L ? "Salvesta" : "Save"}</button><button type="button" id="scenCancel">${L ? "Loobu" : "Cancel"}</button></div></form>`;
+    $("scenForm").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target), g = (k) => fd.get(k);
+      const ns = normalize({ id: g("id"), name: g("name"), nameEt: g("nameEt"), level: g("level"), icao: g("icao"), rwy: g("rwy"), staff: g("staff"), minutes: g("minutes"), dep: g("dep"), arr: g("arr"), vfr: g("vfr"), wx: g("wx"), lvp: !!g("lvp"), abnormals: !!g("abnormals"), abnormalRate: g("abnormalRate"),
+        goals: { score: g("score"), missedRb: g("missedRb") === "" ? null : g("missedRb"), conflicts: g("conflicts") === "" ? null : g("conflicts"), goArounds: g("goArounds") === "" ? null : g("goArounds") }, intro: g("intro"), introEt: g("introEt") });
+      if (BUILTIN.some(b => b.id === ns.id)) ns.id += "-my";
+      saveScenario(ns); renderScen();
+    });
+    $("scenCancel").addEventListener("click", () => { $("scenEdit").innerHTML = ""; });
+  }
+  $("scenTabs").addEventListener("click", (e) => { const b = e.target.closest("[data-tab]"); if (b) { scenTab = b.dataset.tab; renderScen(); } });
+  $("scenBtn").addEventListener("click", () => { renderScen(); $("scenDialog").showModal(); });
+  $("scenBody").addEventListener("click", (e) => {
+    const t = e.target;
+    const st = t.closest("[data-start]"); if (st) { $("scenDialog").close(); startScenario(findScenario(st.dataset.start)); return; }
+    const ed = t.closest("[data-edit]"); if (ed) { const s = findScenario(ed.dataset.edit); scenForm(s.user ? s : { ...s, id: s.id + "-my", user: true }); return; }
+    const dl = t.closest("[data-del]"); if (dl) { if (confirm("Delete this scenario?")) { deleteScenario(dl.dataset.del); renderScen(); } return; }
+    if (t.id === "scenNew") { scenForm(normalize({ id: "my-" + Date.now().toString(36), name: "My scenario", staff: settings.staff.mode === "split" ? settings.staff.keys : "combined", dep: settings.dep, arr: settings.arr, vfr: settings.vfr, wx: settings.wx, minutes: 20, goals: { score: 75 } })); return; }
+    if (t.id === "scenExport") { download("towertrainer-scenarios.json", exportScenarios()); return; }
+    if (t.id === "scenImport") { $("scenFile").click(); return; }
+    if (t.id === "rpNow") { $("scenDialog").close(); openReplay(recorder, logs); return; }
+    if (t.id === "rpLoadBtn") { $("rpFile").click(); return; }
+    if (t.id === "rpExport") { download(`towertrainer-${apt ? apt.icao : "rec"}-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.json`, JSON.stringify(recorder.toJSON(logs))); return; }
+    if (t.id === "statClear") { if (confirm("Clear the statistics?")) { store.set("tt.history", []); renderScen(); } }
+  });
+  $("scenBody").addEventListener("change", async (e) => {
+    if (e.target.id === "scenFile" && e.target.files[0]) { try { const n = importScenarios(await e.target.files[0].text()); sysLog(`${n} scenario(s) imported.`); } catch (err) { alert(err.message); } renderScen(); }
+    if (e.target.id === "rpFile" && e.target.files[0]) { try { const rec = Recorder.fromJSON(JSON.parse(await e.target.files[0].text())); $("scenDialog").close(); openReplay(rec, rec.logs || {}); } catch (err) { alert(err.message); } }
+  });
+  async function startScenario(s) {
+    if (!s) return;
+    Object.assign(settings, scenarioSettings(s)); save(); updateStaffBtn();
+    if (s.icao && (!apt || apt.icao !== s.icao)) await loadAirport(s.icao); else createSim();
+    if (!sim) return;
+    if (s.rwy && apt.findRunwayEnd(s.rwy)) { $("rwySel").value = s.rwy; sim.setRunway(s.rwy); renderAtis(); applyProcs(); }
+    applyWeather();
+    for (const k of Object.keys(coachStats)) delete coachStats[k];
+    scenario = s; scenarioEndsAt = sim.t + s.minutes * 60; setSpeed(1);
+    sysLog(`▶ ${scenName(s)} — ${s.minutes} min. ${scenIntro(s)}`);
+    alertBox(`${scenName(s)}: ${s.minutes} min`);
+  }
+  function endScenario() {
+    const s = scenario; scenario = null;
+    if (!s || !sim) return;
+    const score = overallScore(coachStats);
+    const res = evaluate(s, sim.stats, score, settings.lang);
+    recordResult(s, { passed: res.passed, score });
+    addHistory({ date: new Date().toISOString().slice(0, 10), icao: apt.icao, scenario: scenName(s), minutes: s.minutes, departures: sim.stats.departures, arrivals: sim.stats.arrivals, goArounds: sim.stats.goArounds, conflicts: sim.stats.conflicts, missedRb: sim.stats.missedRb, alerts: sim.stats.alerts, score, passed: res.passed });
+    setSpeed(0);
+    openDebrief({ scenario: s, score, ...res });
+  }
+  function openReplay(rec, rlogs) {
+    if (!rec || !rec.frames.length) { sysLog("Nothing recorded yet."); return; }
+    replay.on = true; replay.rec = rec; replay.logs = rlogs || {}; replay.i = 0; replay.playing = true; replay.speedBefore = speed; replay.acc = 0; replay.lastShown = -1;
+    setSpeed(0);
+    $("replayBar").classList.remove("hidden"); $("rpPos").max = String(rec.frames.length - 1); $("rpPos").value = "0";
+    $("rpInfo").textContent = `${rec.meta && rec.meta.icao ? rec.meta.icao + " · " : ""}${Math.round(rec.seconds / 60)} min · ${rec.frames.length} frames`;
+    sysLog("Replay: the simulation is paused while you scrub. Close replay to continue.");
+  }
+  function closeReplay() { replay.on = false; replay.rec = null; $("replayBar").classList.add("hidden"); setSpeed(replay.speedBefore || 1); renderLog(); }
+  function drawReplay(dt) {
+    const rec = replay.rec, n = rec.frames.length;
+    if (replay.playing) { replay.acc += dt; while (replay.acc >= 1 && replay.i < n - 1) { replay.acc -= 1; replay.i++; } if (replay.i >= n - 1) replay.playing = false; }
+    const f = rec.frames[replay.i];
+    radar.draw({ ac: frameAircraft(f), arrEnd: apt ? apt.findRunwayEnd(f.arr) : null, closed: new Set(), lvp: false }, selectedId);
+    if ($("rpPos").value !== String(replay.i)) $("rpPos").value = String(replay.i);
+    const t = f.t - rec.frames[0].t; $("rpTime").textContent = `${Math.floor(t / 60)}:${String(t % 60).padStart(2, "0")}`;
+    $("rpPlay").textContent = replay.playing ? "❚❚" : "▶";
+    if (replay.lastShown !== replay.i) { replay.lastShown = replay.i; renderLog(); $("status").textContent = `REPLAY ${f.t} s · ${f.ac.length} targets · RWY ${f.rwy}`; }
+  }
+  $("rpPos").addEventListener("input", (e) => { replay.i = +e.target.value; replay.playing = false; });
+  $("rpPlay").addEventListener("click", () => { replay.playing = !replay.playing; if (replay.playing && replay.i >= replay.rec.frames.length - 1) replay.i = 0; });
+  $("rpClose").addEventListener("click", closeReplay);
+  $("rpSave").addEventListener("click", () => download(`towertrainer-${apt ? apt.icao : "rec"}-replay.json`, JSON.stringify(replay.rec.toJSON ? replay.rec.toJSON(replay.logs) : replay.rec)));
+
   // ---------- main loop ----------
   let last = performance.now(), slowT = 0, bcT = 0;
   function frame(now) {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
     if (sim && speed > 0) for (let i = 0; i < speed; i++) sim.step(dt);
     if (sim) {
-      radar.draw({ ac: sim.snapshot(selectedId), arrEnd: sim.arrEnd, closed: sim.closedRunways, lvp: sim.lvp }, selectedId);
+      recorder.tick(sim, logs);
+      if (replay.on) drawReplay(dt);
+      else radar.draw({ ac: sim.snapshot(selectedId), arrEnd: sim.arrEnd, closed: sim.closedRunways, lvp: sim.lvp }, selectedId);
       slowT += dt; bcT += dt;
       if (slowT > 0.5) {
         slowT = 0;
+        if (scenario && sim.t >= scenarioEndsAt) endScenario();
         renderBoard(); renderDel(); renderTabs(); renderCoach(); renderInfo(); renderSeq();
         const st = sim.stats;
-        $("status").textContent = `${fmtClock(sim)}  DEP ${st.departures}  ARR ${st.arrivals}  G/A ${st.goArounds}  ALERTS ${st.alerts}  AC ${sim.ac.length}` +
+        if (!replay.on) $("status").textContent = `${fmtClock(sim)}  DEP ${st.departures}  ARR ${st.arrivals}  G/A ${st.goArounds}  ALERTS ${st.alerts}  AC ${sim.ac.length}` +
           (speed === 0 ? "  [PAUSED]" : speed > 1 ? `  [${speed}×]` : "");
       }
       if (bcT > 0.25) { bcT = 0; broadcast(false); }
@@ -1373,6 +1531,8 @@ function bootMain() {
     if (!sim || now - last < 400) return;
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
     if (speed > 0) for (let i = 0; i < speed; i++) sim.step(dt);
+    recorder.tick(sim, logs);
+    if (scenario && sim.t >= scenarioEndsAt) endScenario();
     bcT += dt; if (bcT > 0.25) { bcT = 0; broadcast(false); }
     slowT += dt; if (slowT > 1) { slowT = 0; renderBoard(); renderDel(); renderTabs(); renderInfo(); }
   }, 100);
@@ -1380,6 +1540,7 @@ function bootMain() {
   // for debugging and automated tests
   window.TT = { get sim() { return sim; }, get apt() { return apt; }, get positions() { return positions; }, get procs() { return procs; }, transmit, parse, radio, radar, guide, app,
     settings, setActive, setView, select: (id) => select(sim && sim.ac.find(a => a.id === id)), openDebrief, bridges, loadAirport, refreshVoices, get mp() { return mp; }, broadcast,
+    scenarios: { start: startScenario, end: endScenario, list: allScenarios, get current() { return scenario; } }, recorder, replay, openReplay, closeReplay, renderScen, get coachStats() { return coachStats; },
     applyStaffing: (mode, keys) => { settings.staff = { mode, keys }; save(); updateStaffBtn(); createSim(); } };
 }
 
