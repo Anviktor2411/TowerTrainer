@@ -3,18 +3,21 @@
 import { shortState, statePhrase, issueMarkers } from "./labels.js";
 
 export const BAYS = {
-  pending: "Pending", clearance: "Clearance", push: "Push", taxi: "Taxi", holding: "Holding", runway: "Runway",
+  incoming: "Incoming (accept)", pending: "Pending", clearance: "Clearance", push: "Push", taxi: "Taxi", holding: "Holding", runway: "Runway",
   airborne: "Airborne", approach: "Approach", final: "Final", landed: "Runway (arr)", taxiin: "Taxi in", enroute: "Enroute", live: "Live (XRadio)",
   vehicles: "Vehicles",
 };
 const POS_BAYS = {
   ALL: ["pending", "clearance", "push", "taxi", "holding", "runway", "airborne", "approach", "final", "landed", "taxiin", "vehicles", "live"],
-  DEL: ["pending", "clearance"],
-  GND: ["clearance", "push", "taxi", "holding", "taxiin", "vehicles", "live"],
-  TWR: ["holding", "runway", "airborne", "final", "landed", "taxiin", "vehicles", "live"],
-  APP: ["approach", "final", "airborne", "live"],
-  CTR: ["enroute", "airborne", "approach", "live"],
+  DEL: ["incoming", "pending", "clearance"],
+  GND: ["incoming", "clearance", "push", "taxi", "holding", "taxiin", "vehicles", "live"],
+  TWR: ["incoming", "holding", "runway", "airborne", "final", "landed", "taxiin", "vehicles", "live"],
+  APP: ["incoming", "approach", "final", "airborne", "live"],
+  CTR: ["incoming", "enroute", "airborne", "approach", "live"],
 };
+
+/** A strip handed to this position and not yet accepted sits in the Incoming bay, flashing. */
+export function incomingFor(a, pos) { return !!(a.handoff && !a.handoff.accepted && a.handoff.to === pos); }
 
 /** Natural bay for an aircraft's state. */
 export function autoBay(a) {
@@ -55,25 +58,32 @@ export function renderStrips(opts) {
   if (el.contains(document.activeElement) && document.activeElement.isContentEditable) return;
   const now = performance.now();
   const visible = ac.filter(a => !split || pos === "ALL" || a.freq === pos || (a.human && pos !== "DEL") ||
-    (pos === "DEL" && a.kind === "dep" && ["parked", "clr_req"].includes(a.state)))
+    (pos === "DEL" && a.kind === "dep" && ["parked", "clr_req"].includes(a.state)) || incomingFor(a, pos))
     .filter(a => !(a.veh && a.state === "idle"));
+  // a strip just handed off stays, greyed, on the board that gave it away until the other side accepts it
+  const outgoing = split && pos !== "ALL" ? ac.filter(a => a.handoff && !a.handoff.accepted && a.handoff.from === pos && !visible.includes(a)) : [];
   el.innerHTML = bays.map(b => {
-    const list = visible.filter(a => bayOf(a) === b || (!bays.includes(bayOf(a)) && b === bays[bays.length - 1] && false));
-    return `<div class="bay" data-bay="${b}"><h4>${BAYS[b]} ${list.length ? "(" + list.length + ")" : ""}</h4>${list.map(a => strip(a, selectedId, now)).join("")}</div>`;
+    const list = b === "incoming" ? visible.filter(a => incomingFor(a, pos)) : visible.filter(a => !incomingFor(a, pos) && bayOf(a) === b);
+    const out = b !== "incoming" ? outgoing.filter(a => bayOf(a) === b) : [];
+    if (b === "incoming" && !list.length) return "";
+    return `<div class="bay" data-bay="${b}"><h4>${BAYS[b]} ${list.length ? "(" + list.length + ")" : ""}</h4>${list.map(a => strip(a, selectedId, now, pos)).join("")}${out.map(a => strip(a, selectedId, now, pos, true)).join("")}</div>`;
   }).join("") + otherFreq(ac, visible, pos, split);
   if (!el._wired) wire(el, opts);
   el._opts = opts;
 }
 
-function strip(a, selectedId, now) {
+function strip(a, selectedId, now, pos, handedOff = false) {
   const d = a.stripData || {};
   const route = a.kind === "dep" ? `${a.other[0] === "VFR" ? "VFR " + esc(a.other[1]) : "→" + esc(a.other[0])}` : a.kind === "arr" ? `${esc(a.other[0])}→` : a.kind === "ovf" ? `${esc(a.other[0])}→${esc(a.other[1])}` : "";
   const sq = d.sq || a.assignedSq || "";
   const calling = a.callingUntil && a.callingUntil > Date.now();
-  const cls = `strip ${a.human ? "human" : a.veh ? "veh" : a.kind}${a.id === selectedId ? " sel" : ""}${calling ? " calling" : ""}${a.nordo ? " nordo" : ""}${a.mayday ? " mayday" : ""}`;
+  const incoming = incomingFor(a, pos);
+  const cls = `strip ${a.human ? "human" : a.veh ? "veh" : a.kind}${a.id === selectedId ? " sel" : ""}${calling ? " calling" : ""}${a.nordo ? " nordo" : ""}${a.mayday ? " mayday" : ""}${incoming ? " incoming" : ""}${handedOff ? " handedoff" : ""}`;
   const ed = (f, v, ph) => `<span contenteditable="true" spellcheck="false" data-f="${f}" title="${ph}">${esc(v)}</span>`;
+  const ho = incoming ? `<button class="accept" data-accept="${a.id}" title="Accept the handoff from ${esc(a.handoff.from)}">ACCEPT ${esc(a.handoff.from)}→</button>` :
+    handedOff ? `<span class="w" title="handed off, waiting for ${esc(a.handoff.to)} to accept">→${esc(a.handoff.to)} ${a.handoff.age}s</span>` : "";
   return `<div class="${cls}" draggable="true" data-id="${a.id}">` +
-    `<span class="cs">${esc(a.cs)}</span>` +
+    `<span class="cs">${esc(a.cs)}${ho}</span>` +
     `<span>${esc(a.type)}/${a.wtc}</span>` +
     `<span>${route} ${a.kind === "dep" ? ed("sid", d.sid ?? a.sid ?? "", "SID") : ""} ${ed("cfl", d.cfl ?? (a.cfl ? (a.cfl >= 6000 ? "F" + a.cfl / 100 : a.cfl) : ""), "CFL")}` +
     `${a.warn && a.warn.length ? ` <span class="w">${esc(a.warn.join(" "))}</span>` : ""}${issueMarkers(a).map(i => ` <span class="w ${i.level}">${esc(i.t)}</span>`).join("")}` +
@@ -93,8 +103,21 @@ function otherFreq(all, visible, pos, split) {
 function wire(el, opts0) {
   el._wired = true;
   el.addEventListener("click", (e) => {
+    const acc = e.target.closest("[data-accept]");
+    if (acc) { e.stopPropagation(); if (el._opts.onAccept) el._opts.onAccept(+acc.dataset.accept); return; }
+    const mv = e.target.closest("[data-moveto]");
+    if (mv) { e.stopPropagation(); el._opts.onMove(+mv.dataset.id, mv.dataset.moveto); el.querySelectorAll(".baymenu").forEach(x => x.remove()); return; }
     const s = e.target.closest(".strip");
-    if (s && !e.target.isContentEditable) el._opts.onSelect(+s.dataset.id);
+    if (!s || e.target.isContentEditable) return;
+    el._opts.onSelect(+s.dataset.id);
+    // touch boards cannot drag: a tap opens a bay menu under the strip
+    if (el._opts.touch) {
+      el.querySelectorAll(".baymenu").forEach(x => x.remove());
+      const bays = (POS_BAYS[el._opts.split ? el._opts.pos : "ALL"] || POS_BAYS.ALL).filter(b => b !== "incoming");
+      const menu = document.createElement("div"); menu.className = "baymenu";
+      menu.innerHTML = bays.map(b => `<button type="button" data-moveto="${b}" data-id="${s.dataset.id}">${BAYS[b]}</button>`).join("");
+      s.after(menu);
+    }
   });
   el.addEventListener("dragstart", (e) => {
     const s = e.target.closest(".strip"); if (!s) return;

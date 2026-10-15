@@ -10,6 +10,9 @@ import { wakeDepSeconds, wakeArrNm, ctotStatus, recatOf, departureSequence, arri
 import { parseMetar } from "../web/js/atis.js";
 import { synthMetar, WX_SCENARIOS } from "../web/js/ops.js";
 import { defaultVfrPoints } from "../web/js/vfr.js";
+import { buildPositions } from "../web/js/positions.js";
+import { incomingFor } from "../web/js/strips.js";
+import { suggestions } from "../web/js/autocomplete.js";
 
 let seed = 11;
 Math.random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
@@ -410,6 +413,43 @@ eq(ctotStatus(1000, 1700).state, "missed", "CTOT missed");
   // scheduled abnormal events when enabled
   sim.abnormals = { on: true, perHour: 60 }; sim.scheduleAbnormal();
   ok(sim.nextAbnormal < sim.t + 120, "abnormal scheduled within 2 min at 60/h");
+}
+
+// ---- Phase F: strip handoffs with acceptance, remote controllers, autocomplete ----
+{
+  const rad = [], alerts = [];
+  const pos = buildPositions(apt);
+  const sim = new Sim(apt, { positions: pos, staffing: new Set(["TWR"]), onRadio: (m) => rad.push(m), onAlert: (m) => alerts.push(m), onEvent: () => {}, populate: false });
+  sim.setRunway("26"); sim.nextDep = sim.nextArr = sim.nextOvf = sim.nextVfr = 1e9; sim.vfrPerHour = 0; sim.abnormals = { on: false, perHour: 0 };
+  const toGnd = (a) => sim.respond(a, parse(`${a.cs} contact ground ${pos.GND.freq}`, sim.ac).ins, { text: "", pos: "TWR" });
+  const holding = () => { const a = dep(sim); a.state = "holding"; a.freq = "TWR"; a.depEnd = sim.depEnd; a.onGround = true; return a; };
+  const d = dep(sim); d.state = "airborne"; d.freq = "TWR"; d.depEnd = sim.depEnd; d.onGround = false; d.alt = 2500;
+  const r = sim.respond(d, parse(`${d.cs} contact approach ${pos.APP.freq}`, sim.ac).ins, { text: "", pos: "TWR" });
+  ok(new RegExp(pos.APP.freq.replace(".", "\\.")).test(txt(r)), "frequency readback: " + txt(r));
+  run(sim, 20, () => d.freq === "APP");
+  ok(d.freq === "APP" && d.handoff && d.handoff.from === "TWR" && d.handoff.to === "APP" && !d.handoff.accepted, "the frequency change offers the strip to Approach");
+  const snap = sim.snapshot().find(x => x.id === d.id);
+  ok(snap && snap.handoff && !snap.handoff.accepted && incomingFor(snap, "APP") && !incomingFor(snap, "TWR"), "snapshot carries the handoff; the strip is incoming on Approach's board only");
+  run(sim, 10, () => d.handoff.accepted);
+  ok(d.handoff.accepted && d.handoff.by === "AI", "an AI position accepts within seconds");
+  // Ground is now worked by a remote controller: the strip waits for a human
+  sim.remoteStaff.GND = "liisa"; sim.staffing.add("GND");
+  ok(sim.userWorks("GND"), "a claimed position counts as worked by a human");
+  const d2 = holding(); toGnd(d2); run(sim, 20, () => d2.freq === "GND"); run(sim, 12);
+  ok(d2.freq === "GND" && d2.handoff && !d2.handoff.accepted, "no automatic acceptance on a human position");
+  ok(sim.acceptHandoff(d2, "liisa") && d2.handoff.accepted && d2.handoff.by === "liisa" && !sim.acceptHandoff(d2, "x"), "the remote controller accepts; a second accept does nothing");
+  ok((sim.stats.handoffs || 0) >= 2, "handoffs are counted: " + sim.stats.handoffs);
+  const d3 = holding(); toGnd(d3); run(sim, 20, () => d3.freq === "GND"); run(sim, 50);
+  ok(alerts.some(m => /not accepted for 45 s/.test(String(m))), "an unanswered handoff is flagged after 45 s");
+  // autocomplete: callsigns first, then the next instruction for the aircraft
+  const d4 = holding();
+  const s1 = suggestions({ text: "", sim, pos: "TWR", selected: null, app: null });
+  ok(s1.some(x => x.label.startsWith(d4.cs)) && s1.every(x => x.insert.endsWith(" ")), "empty line: the callsigns on my frequency");
+  ok(!suggestions({ text: "", sim, pos: "TWR", selected: null, app: null }).some(x => x.label.startsWith(d2.cs)), "an aircraft on Ground is not offered on Tower");
+  const s2 = suggestions({ text: `${d4.cs} cleared for`, sim, pos: "TWR", selected: null, app: null });
+  ok(s2.length > 0 && s2.every(x => /cleared for/.test(x.hint)) && s2.some(x => /cleared for takeoff/.test(x.insert)), "typing 'cleared for' narrows to the takeoff clearances: " + s2.map(x => x.hint).join(" | "));
+  const s3 = suggestions({ text: `${d4.cs} `, sim, pos: "TWR", selected: null, app: null });
+  ok(s3.some(x => /next expected/.test(x.label)) && s3.some(x => /line up and wait/.test(x.hint)), "after the callsign: the next expected call and the usual options");
 }
 
 console.log(fails ? `${fails} FAILED of ${n}` : `ALL ${n} PASSED`);

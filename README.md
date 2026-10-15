@@ -44,8 +44,34 @@ frequency (or private to a pilot) is handled exactly like typing in the trainer.
 ## XRadio (optional, off by default)
 
 Settings → XRadio: server, port, password, ATC callsign/frequency, and toggles for AI traffic into X-Plane,
-real pilots on the radar, text, and voice (WebCodecs Opus). `xradio/protocol.py` is vendored from
-XRadio v0.5.7 (MIT). AI pilot speech is text-only on XRadio (no server-side TTS/Opus encoder installed).
+real pilots on the radar, text, voice both ways (WebCodecs Opus in the browser; AI pilots' speech is rendered
+on the server and encoded with PyAV or opuslib when one is installed, text otherwise), weather from or to the
+flight, ATIS on its own frequency and optional transcripts of the pilots (Vosk/Whisper, never acting on their
+own). `xradio/protocol.py` is vendored from XRadio v0.6.0 (MIT, protocol 6); a v0.5.7 server still works with
+the older feature set. The status pill shows `XR: v6 · 3 pilots · 12 AI`; the XRadio settings have a short
+"how to fly with TowerTrainer ATC" text for the pilots.
+
+## Several controllers, several screens
+
+* **Windows** – any position, or a single panel of it (radar, strips, log, Delivery list, weather, sequence,
+  chat), opens in its own window from the position tab's ⧉ or **Layout** (Alt+L). Presets put the windows on
+  your monitors (Chrome/Edge ask once for the window-management permission; Firefox reopens them where you
+  left them); every window has a ⛶ full-screen button. Audio only ever plays in the main window.
+* **Multiplayer** – **Multiplayer** (Alt+M) → *Host a session*: you get a six-letter code and a link.
+  Others on your network open the link (start the server with `python server.py --host 0.0.0.0`) and join
+  as a controller, spectator or instructor with just a nickname. A controller claims a position by clicking
+  its tab; the host's tab shows who works it, and a position whose controller drops goes back to the AI after
+  30 s. Handoffs between positions must be accepted (the incoming strip flashes with ACCEPT), coordination
+  requests (release / crossing / approval / point-out) go to whoever works the other position (an AI position
+  answers in a few seconds), there is a text chat, private notes from the instructor, kick/ban, and an
+  intercom (hold Alt+Shift or 🎧) over WebRTC between the controllers. Everything travels over one WebSocket
+  relay in `server.py` (`ws.py`, stdlib only).
+* **Strip board on a phone or tablet** – `http://<host>:8780/?join=CODE&role=board&pos=TWR`: big strips,
+  tap a strip to move it between bays, tap ACCEPT for incoming ones.
+* **Command line** – suggestions as you type (callsigns on your frequency, then the next instruction for that
+  aircraft); Tab accepts, / focuses the line, Alt+1…5 switch views, Alt+Q/W/E/R/T positions. Clicking a
+  taxiway on the map appends it to the taxi instruction you are typing. Push-to-talk works in Firefox too:
+  the server's Vosk or Whisper recognises what you said, biased with the callsigns in use.
 
 ## Tests
 
@@ -54,5 +80,8 @@ node tests/unit.test.mjs                      # phraseology, voices, squawks, re
 node tests/flow.test.mjs EGLL [RWY|-|-0] [SEED]   # full departure + arrival at a cached airport
 python tests/fsd_test.py                      # EuroScope / FSD protocol
 set XRADIO_DIR=...\xradio-0.5.7 && python tests/xradio_test.py   # against XRadio's own server + fake client
-node tests/browser.test.mjs                   # real page in headless Chrome incl. pop-out and the whole guide
+node tests/browser.test.mjs                   # real page in headless Chrome incl. pop-outs, a multiplayer session and the whole guide
+node tests/ops.test.mjs                       # operations, weather, handoffs, autocomplete
+python tests/ws_test.py                       # the multiplayer relay (WebSocket framing, roles, claims, kick/ban)
+node tests/firefox.mjs                        # the same page in headless Firefox over WebDriver BiDi (TT_BROWSER=edge runs browser.test in Edge)
 ```

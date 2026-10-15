@@ -41,6 +41,7 @@ export class Sim {
     this.region = regionOf(apt.icao);
     this.rates = { readbackError: 0, sayAgain: 0, oldAtis: 0, ...(opts.rates || {}) };
     this.positions = opts.positions || null;
+    this.remoteStaff = {};                      // pos -> nickname of the remote controller working it (multiplayer)
     this.staffing = opts.staffing || new Set(["ALL"]);
     this.events = !!opts.events;          // scripted 7600/7700 events
     this.overflights = this.positions ? (opts.overflights ?? true) : false;
@@ -538,6 +539,7 @@ export class Sim {
       this.checkReadbacks();
       this.opsTick();
       this.eventsTick();
+      this.handoffTick();
       if (this.split) this.aiTick();
       if (this.events && this.t >= this.nextEvent) this.scriptedEvent();
     }
@@ -1059,8 +1061,32 @@ export class Sim {
     a.freq = to.key;
     if (a.prevFreq === "TWR" && a.kind === "dep" && !a.onGround) a.handedOff = true;
     a.checkInAt = this.t + rint(3, 8);
+    // the strip follows the aircraft: the receiving position accepts it (an AI position after a moment)
+    if (this.split && this.positions && this.positions[to.key] && a.prevFreq !== to.key) {
+      a.handoff = { from: a.prevFreq, to: to.key, t: this.t, accepted: false };
+      this.onEvent({ type: "handoff", ac: a, from: a.prevFreq, to: to.key });
+    }
     // the first call on the new frequency is predictable: render it now
     if (!a.nordo && a.kind === "dep" && to.key === "GND" && ["cleared", "parked"].includes(a.state)) this.scheduleCall(a, "push", {}, "GND", a.checkInAt);
+  }
+
+  /** The receiving position takes the strip (F1). */
+  acceptHandoff(a, by = "") {
+    if (!a.handoff || a.handoff.accepted) return false;
+    a.handoff.accepted = true; a.handoff.by = by; a.handoff.acceptedAt = this.t;
+    this.stats.handoffs = (this.stats.handoffs || 0) + 1;
+    this.onEvent({ type: "handoffAccepted", ac: a, to: a.handoff.to, by });
+    return true;
+  }
+  /** Every second: AI positions accept their incoming strips; an unanswered human handoff is flagged. */
+  handoffTick() {
+    for (const a of this.ac) {
+      const h = a.handoff;
+      if (!h || h.accepted) continue;
+      const human = this.userWorks(h.to) && !(this.remoteStaff && this.remoteStaff[h.to] === null);
+      if (!human) { if (this.t - h.t > rint(2, 6)) this.acceptHandoff(a, "AI"); continue; }
+      if (this.t - h.t > 45 && !h.flagged) { h.flagged = true; this.alert(`Handoff of ${a.cs} to ${h.to} not accepted for 45 s.`, "ho" + a.cs, false); }
+    }
   }
 
   /** First call on a new frequency. */
@@ -2105,6 +2131,7 @@ export class Sim {
       cond: a.cond && a.cond.ac ? `behind ${a.cond.ac.cs}` : "", priority: a.priority || "", pan: !!a.pan, broken: !!a.broken, towing: !!a.towing,
       heli: !!a.heli, touchGo: !!a.touchGo, circuits: a.circuits || 0, wants: a.wants || "", rwyChanged: !!a.rwyChanged, giveWay: a.giveWay && a.giveWay.ac ? a.giveWay.ac.cs : "",
       fpStatus: a.fpStatus || "", liveTx: !!a.tx, liveAi: !!a.ai,
+      handoff: a.handoff ? { from: a.handoff.from, to: a.handoff.to, accepted: !!a.handoff.accepted, age: Math.round(this.t - a.handoff.t), by: a.handoff.by || "" } : null,
     }));
   }
 

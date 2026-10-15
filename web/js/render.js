@@ -702,10 +702,11 @@ export class Radar {
       const prev = this.autoOff.get(a.id);
       let chosen = null;
       if (prev) { const b = this.boxFor(v.s, prev, lines); if (!overlaps(b)) { chosen = prev; v.box = b; } }
-      if (!chosen) {
-        for (const off of LABEL_OFFSETS) { const b = this.boxFor(v.s, off, lines); if (!overlaps(b)) { chosen = off; v.box = b; break; } }
-      }
+      const fits = (offsets, ls, k = 1) => { for (const off of offsets) { const o = k === 1 ? off : [off[0] * k, off[1] * k]; const b = this.boxFor(v.s, o, ls); if (!overlaps(b)) { chosen = o; v.box = b; v.lines = ls; return true; } } return false; };
+      if (!chosen) fits(LABEL_OFFSETS, lines);
+      if (!chosen) fits(LABEL_OFFSETS, lines, 1.6) || fits(LABEL_OFFSETS, lines, 2.3);                    // a longer leader line
       if (!chosen && (a.state === "parked" || a.quiet) && !sel) { v.lines = []; v.off = prev || LABEL_OFFSETS[0]; v.box = { x: 0, y: 0, w: 0, h: 0 }; continue; }   // no room: a parked aircraft keeps quiet
+      if (!chosen && lines.length > 1 && !sel) fits(LABEL_OFFSETS, lines.slice(0, 1)) || fits(LABEL_OFFSETS, lines.slice(0, 1), 1.6);   // the callsign alone
       if (!chosen) { chosen = prev || LABEL_OFFSETS[0]; v.box = this.boxFor(v.s, chosen, lines); }
       this.autoOff.set(a.id, chosen);
       v.off = chosen; placed.push(v.box);

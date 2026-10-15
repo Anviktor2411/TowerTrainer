@@ -6,7 +6,10 @@ import { Radio } from "./radio.js";
 import { Radar, VIEWS } from "./render.js";
 import { parse } from "./commands.js";
 import { buildPositions, fmtFreq } from "./positions.js";
-import { renderStrips } from "./strips.js";
+import { renderStrips, incomingFor } from "./strips.js";
+import { suggestions } from "./autocomplete.js";
+import { Relay, Intercom } from "./remote.js";
+import { Ptt } from "./speech.js";
 import { coach, coachHints } from "./coach.js";
 import { Bridges, XR_PILOT_HELP } from "./bridges.js";
 import { Guide } from "./guide.js";
@@ -37,6 +40,7 @@ const DEFAULTS = {
   accents: "natural", rate: 1, effect: 0.85, preset: "good", voices: true, blocked: true, rbErr: 4, sayAgain: 2, oldAtis: 10, events: false,
   dep: 10, arr: 8, coach: false, lang: "en", graph: false, monitor: [], occupancy: 70, vehicles: -1, waves: true, osm: true, realMix: true, nightAuto: true,
   wx: "live", lvp: false, recat: false, vfr: 2, abnormals: false, abnormalRate: 2, seq: true,
+  nick: "", layouts: {}, layout: "",
   staff: { mode: "combined", keys: ["TWR"] },
   xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false,
     weather: "off", aiVoice: true, atisVoice: false, transcribe: false },
@@ -44,7 +48,7 @@ const DEFAULTS = {
 
 const radar = new Radar($("radar"));
 
-if (POPOUT) bootPopout(); else bootMain();
+if (POPOUT || params.get("join")) bootPopout(); else bootMain();
 
 // =====================================================================================
 //  MAIN WINDOW
@@ -253,7 +257,7 @@ function bootMain() {
       occupancy: (+settings.occupancy || 0) / 100, waves: !!settings.waves,
       serviceVehicles: +settings.vehicles >= 0 ? +settings.vehicles : undefined,
       recat: !!settings.recat, abnormals: !!settings.abnormals, abnormalRate: +settings.abnormalRate || 2, vfrPerHour: +settings.vfr || 0,
-      onRadio: (m) => { radio.enqueue(m); bridges.transmission(m); },
+      onRadio: (m) => { radio.enqueue(m); bridges.transmission(m); mp.radio(m); },
       onAlert: alertBox,
       onEvent: onSimEvent,
     });
@@ -427,15 +431,20 @@ function bootMain() {
   setInterval(pollMetar, 600000);
 
   // ---------- positions, tabs, views ----------
+  /** Positions worked by a human: me, or a remote controller in a multiplayer session. */
   function staffedKeys() { return sim && sim.split ? POS_ORDER.filter(k => sim.userWorks(k)) : ["ALL"]; }
+  /** Positions I work myself (not an AI, not a remote controller). */
+  function isMine(k) { return !!sim && sim.userWorks(k) && !sim.remoteStaff[k]; }
+  function myKeys() { return sim && sim.split ? POS_ORDER.filter(isMine) : ["ALL"]; }
   function renderTabs() {
     if (!sim) return;
     const keys = sim.split ? POS_ORDER : ["ALL"];
     $("posTabs").innerHTML = keys.map(k => {
       const ai = sim.split && !sim.userWorks(k);
+      const remote = sim.split && sim.remoteStaff[k];
       const label = k === "ALL" ? "DEL/GND/TWR" : k;
-      const mon = ai ? `<button class="mon${radio.monitor.has(k) ? " on" : ""}" data-mon="${k}" title="${radio.monitor.has(k) ? "Monitoring this frequency (quiet) — click to stop" : "Monitor this frequency (quiet)"}">${radio.monitor.has(k) ? "🔈" : "🔇"}</button>` : "";
-      return `<div class="tab${k === activePos ? " on" : ""}${ai ? " ai" : ""}" data-pos="${k}" title="${ai ? "AI controller" : "you"}">${label}` +
+      const mon = ai || remote ? `<button class="mon${radio.monitor.has(k) ? " on" : ""}" data-mon="${k}" title="${radio.monitor.has(k) ? "Monitoring this frequency (quiet) — click to stop" : "Monitor this frequency (quiet)"}">${radio.monitor.has(k) ? "🔈" : "🔇"}</button>` : "";
+      return `<div class="tab${k === activePos ? " on" : ""}${ai ? " ai" : ""}${remote ? " remote" : ""}" data-pos="${k}" title="${ai ? "AI controller" : remote ? "worked by " + esc(remote) : "you"}">${label}${remote ? `<span class="who">${esc(remote)}</span>` : ""}` +
         `${unread[k] ? `<span class="badge">${unread[k]}</span>` : ""}${mon}<button class="pop" data-pop="${k}" title="Pop out">⧉</button></div>`;
     }).join("");
     $("viewTabs").innerHTML = Object.keys(VIEWS).map(v => `<button data-view="${v}" class="${radar.view === v ? "on" : ""}">${VIEWS[v]}</button>`).join("");
@@ -451,7 +460,7 @@ function bootMain() {
     $("logTitle").textContent = `Frequency ${sim.split ? (activePos === "ALL" ? "" : positions[activePos].freq) : ""}`;
     $("delPanel").classList.toggle("hidden", !(radar.view === "DEL" || activePos === "DEL"));
   }
-  function txPosition() { if (!sim || !sim.split) return "ALL"; return sim.userWorks(activePos) ? activePos : staffedKeys()[0]; }
+  function txPosition() { if (!sim || !sim.split) return "ALL"; return isMine(activePos) ? activePos : (myKeys()[0] || staffedKeys()[0] || "TWR"); }
   function setActive(k) { activePos = k; unread[k] = 0; setView(DEFAULT_VIEW[k] || "GND"); renderTabs(); renderLog(); }
   function setView(v) {
     radar.setView(v);
@@ -478,35 +487,107 @@ function bootMain() {
   $("viewTabs").addEventListener("click", (e) => { const b = e.target.closest("[data-view]"); if (b) setView(b.dataset.view); });
 
   // ---------- pop-out windows ----------
-  function popOut(pos) {
-    const w = window.open(`?popout=${pos}&icao=${apt ? apt.icao : ""}`, `tt-${pos}`, "width=1000,height=760");
-    if (!w) { sysLog("Pop-up blocked — allow pop-ups for this page."); return; }
-    const list = new Set(store.get("tt.popouts", [])); list.add(pos); store.set("tt.popouts", [...list]);
+  /**
+   * Any view in its own window (F3): a position (pos) and optionally a single panel of it -- "radar", "strips",
+   * "del", "wx", "log", "chat", "seq". Placement comes from the saved layout (Window Management API on Chrome
+   * puts it on the chosen screen; elsewhere the last known position is used).
+   */
+  function popOut(pos, panel = "", bounds = null) {
+    const key = panel ? `${pos}:${panel}` : pos;
+    const layout = settings.layouts[settings.layout || "default"] || {};
+    const b = bounds || layout[key] || null;
+    const feat = b ? `left=${b.x},top=${b.y},width=${b.w},height=${b.h}` : "width=1000,height=760";
+    const w = window.open(`?popout=${pos}${panel ? "&panel=" + panel : ""}&icao=${apt ? apt.icao : ""}`, `tt-${key}`, feat);
+    if (!w) { sysLog("Pop-up blocked — allow pop-ups for this page."); return null; }
+    const list = new Set(store.get("tt.popouts", [])); list.add(key); store.set("tt.popouts", [...list]);
+    return w;
   }
   const savedPop = store.get("tt.popouts", []);
   if (savedPop.length) {
     const b = $("restorePop"); b.textContent = `Restore windows: ${savedPop.join(", ")}`; b.classList.remove("hidden");
-    b.onclick = () => { savedPop.forEach(p => popOut(p)); b.classList.add("hidden"); };
+    b.onclick = () => { savedPop.forEach(p => { const [pos, panel] = p.split(":"); popOut(pos, panel || ""); }); b.classList.add("hidden"); };
     setTimeout(() => b.classList.add("hidden"), 20000);
   }
-  if (channel) channel.onmessage = (ev) => {
-    const m = ev.data;
-    if (m.type === "tx") transmit(m.text, m.pos, "pop-out");
-    else if (m.type === "strip") stripAction(m);
-    else if (m.type === "select") select(sim && sim.ac.find(a => a.id === m.id));
-    else if (m.type === "closed") { const list = new Set(store.get("tt.popouts", [])); list.delete(m.pos); store.set("tt.popouts", [...list]); }
-    else if (m.type === "hello") broadcast(true);
+  // ---------- layouts: presets of windows across screens ----------
+  const LAYOUT_PRESETS = {
+    "Tower (2 screens)": [{ pos: "TWR", panel: "radar", screen: 1 }, { pos: "TWR", panel: "strips", screen: 1, half: "right" }],
+    "Ground + Tower": [{ pos: "GND", panel: "", screen: 1 }, { pos: "TWR", panel: "", screen: 2 }],
+    "Delivery + strips": [{ pos: "DEL", panel: "del", screen: 1 }, { pos: "ALL", panel: "strips", screen: 1, half: "right" }],
+    "Approach radar": [{ pos: "APP", panel: "radar", screen: 1 }],
+    "Weather + chat": [{ pos: "TWR", panel: "wx", screen: 1, half: "left", small: true }, { pos: "TWR", panel: "chat", screen: 1, half: "right", small: true }],
   };
-  function broadcast(full) {
-    if (!channel || !sim) return;
-    channel.postMessage({ type: "state", icao: apt.icao, t: fmtClock(sim), ac: sim.snapshot(selectedId), split: sim.split,
+  async function screensInfo() {
+    // Window Management API (Chrome/Edge): every screen's position; elsewhere just this one
+    try {
+      if ("getScreenDetails" in window) {
+        const d = await window.getScreenDetails();
+        return d.screens.map(s => ({ x: s.availLeft, y: s.availTop, w: s.availWidth, h: s.availHeight, primary: s.isPrimary, label: s.label || "" }));
+      }
+    } catch (e) { sysLog("Window placement: " + e.message + " (allow the window-management permission for multi-screen placement)"); }
+    return [{ x: screen.availLeft || 0, y: screen.availTop || 0, w: screen.availWidth, h: screen.availHeight, primary: true, label: "this screen" }];
+  }
+  async function applyLayout(name) {
+    const preset = LAYOUT_PRESETS[name]; if (!preset) return;
+    const screens = await screensInfo();
+    settings.layout = name; save();
+    for (const p of preset) {
+      const s = screens[Math.min(p.screen - 1, screens.length - 1)] || screens[0];
+      const w = p.half ? Math.floor(s.w / 2) : s.w, h = p.small ? Math.floor(s.h / 2) : s.h;
+      const x = p.half === "right" ? s.x + Math.floor(s.w / 2) : s.x, y = s.y;
+      const win = popOut(p.pos, p.panel, { x, y, w: w - 10, h: h - 60 });
+      if (!win) break;
+      await new Promise(r => setTimeout(r, 250));
+    }
+    sysLog(`Layout "${name}" opened on ${screens.length} screen${screens.length === 1 ? "" : "s"}. Windows remember where you drag them.`);
+  }
+  function renderLayoutDialog() {
+    const cur = settings.layouts[settings.layout || "default"] || {};
+    $("layoutBody").innerHTML = `<p class="small muted">Presets open windows on your screens (Chrome/Edge place them on other monitors with the window-management permission; Firefox reopens them where you last left them). Every pop-out has a ⛶ full-screen button.</p>` +
+      Object.keys(LAYOUT_PRESETS).map(n => `<button type="button" data-layout="${esc(n)}">${esc(n)}</button>`).join(" ") +
+      `<h4>Single windows</h4>` + ["GND", "TWR", "APP", "CTR", "DEL", "ALL"].map(p => `<span class="row small">${p}: ` + ["", "radar", "strips", "log", "del", "wx", "seq", "chat"].map(k => `<button type="button" data-pop="${p}" data-panel="${k}">${k || "full"}</button>`).join(" ") + "</span>").join("") +
+      `<h4>Saved positions (${esc(settings.layout || "default")})</h4><div class="small muted">${Object.keys(cur).length ? Object.entries(cur).map(([k, b]) => `${esc(k)}: ${b.x},${b.y} ${b.w}×${b.h}`).join(" · ") : "none yet — drag a pop-out and it is remembered"}</div>` +
+      `<div class="row"><button type="button" id="layoutForget">Forget saved positions</button></div>`;
+  }
+  $("layoutBtn").addEventListener("click", () => { renderLayoutDialog(); $("layoutDialog").showModal(); });
+  $("layoutBody").addEventListener("click", (e) => {
+    const l = e.target.closest("[data-layout]"); if (l) { $("layoutDialog").close(); applyLayout(l.dataset.layout); return; }
+    const p = e.target.closest("[data-pop]"); if (p) { popOut(p.dataset.pop, p.dataset.panel || ""); return; }
+    if (e.target.id === "layoutForget") { settings.layouts[settings.layout || "default"] = {}; save(); renderLayoutDialog(); }
+  });
+  /** What a pop-out window or a remote controller sends back: the same handling for both links. */
+  function handleLink(m, guest) {
+    if (m.type === "tx") {
+      if (guest && guest.role !== "guest") return;                       // spectators and boards do not transmit
+      if (guest && mp.claims[guest.id] !== m.pos && !(mp.claims[guest.id] && m.pos === "ALL")) { mp.to(guest.id, { type: "alert", msg: `You do not work ${m.pos} — claim a position first.` }); return; }
+      transmit(m.text, m.pos, guest ? `${guest.name}` : "pop-out");
+    } else if (m.type === "strip") { if (guest) m.by = guest.name; stripAction(m); }
+    else if (m.type === "select") { if (!guest) select(sim && sim.ac.find(a => a.id === m.id)); }
+    else if (m.type === "closed") { const list = new Set(store.get("tt.popouts", [])); list.delete(m.pos); store.set("tt.popouts", [...list]); }
+    else if (m.type === "hello") { broadcast(true); if (guest) mp.sendClaims(); }
+    else if (m.type === "chat" && !guest) { if (mp.relay) mp.relay.send({ type: "chat", text: String(m.text || "").slice(0, 400) }); }
+    else if (m.type === "bounds") { if (m.key) { settings.layouts[settings.layout || "default"] ||= {}; settings.layouts[settings.layout || "default"][m.key] = m.bounds; save(); } }
+    else if (guest) mp.fromGuest(m, guest);
+  }
+  if (channel) channel.onmessage = (ev) => handleLink(ev.data, null);
+  function stateMessage(full) {
+    return { type: "state", icao: apt.icao, t: fmtClock(sim), ac: sim.snapshot(selectedId), split: sim.split,
       positions, staffed: staffedKeys(), selectedId, rwy: sim.depEnd.name, arrEnd: sim.arrEnd.name, atis: $("atisBox").innerHTML,
-      logs: full ? logs : Object.fromEntries(Object.entries(logs).map(([k, v]) => [k, v.slice(-60)])) });
+      closed: [...sim.closedRunways], lvp: sim.lvp, seq: $("seqPanel").innerHTML, wx: $("wxPanel").innerHTML,
+      claims: mp.claims, roster: mp.roster, coords: mp.coords, remoteStaff: sim.remoteStaff, hostNick: settings.nick || "host",
+      del: $("clrList").innerHTML, seqOn: !$("seqPanel").classList.contains("hidden"), chat: mp.relay ? mp.chat.slice(-40) : [],
+      logs: full ? logs : Object.fromEntries(Object.entries(logs).map(([k, v]) => [k, v.slice(-60)])) };
+  }
+  function broadcast(full) {
+    if (!sim) return;
+    const msg = stateMessage(full);
+    if (channel) channel.postMessage(msg);
+    if (mp.relay && mp.role === "host") mp.relay.send(msg);
   }
 
   // ---------- strips ----------
   function stripAction(m) {
     const a = sim && sim.ac.find(x => x.id === m.id); if (!a) return;
+    if (m.accept) { if (sim.acceptHandoff(a, m.by || "me")) addLog(a.freq, "sys", `✓ strip ${esc(a.cs)} accepted${m.by ? " by " + esc(m.by) : ""}`); return; }
     if (m.bay) a.strip = { bay: m.bay, state: a.state };
     if (m.field) {
       a.stripData = { ...(a.stripData || {}), [m.field]: m.value };
@@ -518,7 +599,9 @@ function bootMain() {
     if (!sim) return;
     renderStrips({ el: $("stripBoard"), ac: sim.snapshot(selectedId), pos: activePos, selectedId, split: sim.split,
       onSelect: (id) => select(sim.ac.find(a => a.id === id)),
-      onMove: (id, bay) => stripAction({ id, bay }), onEdit: (id, field, value) => stripAction({ id, field, value }) });
+      onMove: (id, bay) => stripAction({ id, bay }), onEdit: (id, field, value) => stripAction({ id, field, value }),
+      onAccept: (id) => stripAction({ id, accept: true }) });
+    renderCoord();
   }
 
   // ---------- Delivery view ----------
@@ -528,7 +611,9 @@ function bootMain() {
     return { ...sg, code };
   }
   function renderDel() {
-    if (!sim || $("delPanel").classList.contains("hidden")) return;
+    if (!sim) return;
+    // rendered while visible here, or while a Delivery window / a remote controller may be showing it
+    if ($("delPanel").classList.contains("hidden") && !mp.relay && !store.get("tt.popouts", []).some(k => k.startsWith("DEL") || k.endsWith(":del"))) return;
     const req = sim.ac.filter(a => a.kind === "dep" && !a.ga && ["clr_req", "parked", "cleared"].includes(a.state) && (a.lastCall != null || a.state === "cleared"));
     // real pilots' flight plans from XRadio (PT_FLIGHTPLAN): the clearance with a squawk answers the plan
     const live = sim.ac.filter(a => a.human && a.fp && a.fpStatus !== "cancelled");
@@ -573,6 +658,19 @@ function bootMain() {
     renderBoard(); renderDel(); renderInfo();
   }
   radar.onSelect = (id) => select(sim && sim.ac.find(a => a.id === id));
+  // click-to-instruct (F2): a click on a taxiway builds the "via" of the taxi instruction being typed
+  radar.onEdgeClick = (e) => {
+    if (!sim || !e || !e.name) return;
+    const cmd = $("cmd");
+    let v = cmd.value.trimEnd();
+    const a = sim.ac.find(x => x.id === selectedId);
+    if (!v && a) v = a.kind === "arr" && a.stand ? `${callsignText(a)} taxi to stand ${a.stand.name}` : `${callsignText(a)} taxi to holding point runway ${(a.depEnd || sim.depEnd).name}`;
+    if (!v) { sysLog(`Taxiway ${e.name}: select an aircraft (or start typing) and click taxiways to build the route.`); return; }
+    const last = v.split(/\s+/).pop().toUpperCase();
+    if (last === e.name) return;
+    v += /\bvia\b/i.test(v) ? ` ${e.name}` : ` via ${e.name}`;
+    cmd.value = v + " "; cmd.focus(); renderSuggest();
+  };
 
   function renderInfo() {
     const el = $("acInfo");
@@ -673,6 +771,7 @@ function bootMain() {
       return;
     }
     radio.controller(text, pos);
+    mp.radio({ from: "atc", text, pos, by: source });
     if (source !== "typed" && source !== "voice") addLog(pos, "sys", `(${esc(source)})`);
     bridges.transmission({ from: "atc", text, pos });
     if (settings.coach) showCoach(coach({ text, parsed: pp, sim, pos, lang: settings.lang }), pos);
@@ -709,29 +808,69 @@ function bootMain() {
     e.preventDefault(); transmit($("cmd").value);
     const a = sim && sim.ac.find(x => x.id === selectedId);
     $("cmd").value = a ? `${callsignText(a)} ` : "";
+    hideSuggest();
   });
 
-  // ---------- push-to-talk ----------
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  let rec = null, recText = "", pttDown = false;
+  // ---------- autocomplete and keyboard shortcuts (F2) ----------
+  let sugList = [], sugPick = 0;
+  function renderSuggest() {
+    const box = $("suggest"), cmd = $("cmd");
+    if (!sim || document.activeElement !== cmd) { hideSuggest(); return; }
+    sugList = suggestions({ text: cmd.value, sim, pos: txPosition(), selected: sim.ac.find(x => x.id === selectedId) || null, app });
+    if (!sugList.length) { hideSuggest(); return; }
+    sugPick = Math.min(sugPick, sugList.length - 1);
+    box.innerHTML = sugList.map((s, i) => `<div class="${i === sugPick ? "on" : ""}" data-i="${i}">${esc(s.label)}</div>`).join("") +
+      `<div class="muted small">Tab = accept · ↑↓ · Esc</div>`;
+    box.classList.remove("hidden");
+  }
+  function hideSuggest() { $("suggest").classList.add("hidden"); sugList = []; sugPick = 0; }
+  function acceptSuggest(i = sugPick) {
+    const s = sugList[i]; if (!s) return false;
+    $("cmd").value = s.insert.endsWith(" ") ? s.insert : s.insert + " ";
+    sugPick = 0; renderSuggest();
+    return true;
+  }
+  $("cmd").addEventListener("input", () => { sugPick = 0; renderSuggest(); });
+  $("cmd").addEventListener("focus", renderSuggest);
+  $("cmd").addEventListener("blur", () => setTimeout(hideSuggest, 150));
+  $("cmd").addEventListener("keydown", (e) => {
+    if (e.key === "Tab" && sugList.length) { e.preventDefault(); acceptSuggest(); return; }
+    if (e.key === "ArrowDown" && sugList.length) { e.preventDefault(); sugPick = (sugPick + 1) % sugList.length; renderSuggest(); return; }
+    if (e.key === "ArrowUp" && sugList.length) { e.preventDefault(); sugPick = (sugPick + sugList.length - 1) % sugList.length; renderSuggest(); return; }
+    if (e.key === "Escape") { e.preventDefault(); if (sugList.length) hideSuggest(); else $("cmd").value = ""; }
+  });
+  $("suggest").addEventListener("mousedown", (e) => { const d = e.target.closest("[data-i]"); if (d) { e.preventDefault(); acceptSuggest(+d.dataset.i); $("cmd").focus(); } });
+  window.addEventListener("keydown", (e) => {
+    const typing = ["INPUT", "TEXTAREA"].includes(document.activeElement.tagName) || document.activeElement.isContentEditable;
+    if (e.key === "/" && !typing) { e.preventDefault(); $("cmd").focus(); return; }
+    if (!e.altKey || e.ctrlKey || e.metaKey) return;
+    const views = { 1: "GND", 2: "TWR", 3: "APP", 4: "CTR", 5: "DEL" };
+    const posKeys = { q: "DEL", w: "GND", e: "TWR", r: "APP", t: "CTR", a: "ALL" };
+    if (views[e.key]) { e.preventDefault(); setView(views[e.key]); }
+    else if (posKeys[e.key] && sim && (sim.split ? e.key !== "a" : e.key === "a")) { e.preventDefault(); setActive(posKeys[e.key]); }
+    else if (e.key === "s") { e.preventDefault(); $("settingsBtn").click(); }
+    else if (e.key === "p") { e.preventDefault(); setSpeed(speed ? 0 : 1); }
+    else if (e.key === "m") { e.preventDefault(); openMp(); }
+    else if (e.key === "l") { e.preventDefault(); $("layoutBtn").click(); }
+  });
+
+  // ---------- push-to-talk: the browser's recogniser, or the server's (Vosk / Whisper) where there is none ----------
+  const ptt = new Ptt({ onText: (t, engine) => { if (engine) sysLog(`🎙 (${engine}) ${t}`); transmit(t, undefined, "voice"); }, onPartial: (t) => { $("cmd").value = t; }, onInfo: sysLog, cmd: $("cmd"),
+    phrases: () => (sim ? sim.ac.filter(a => sim.hears(a, txPosition())).flatMap(a => [a.cs, `${a.tel} ${a.num}`.trim()]) : []) });
+  let pttDown = false;
   function pttStart() {
     if (pttDown) return;
     pttDown = true; $("mic").classList.add("live");
     radio.burst && radio.burst(0.03, 0.2);
     const pos = txPosition();
     if (bridges.voice) bridges.keyMic(true, sim && sim.split ? Math.round(positions[pos].mhz * 1000) : Math.round((parseFloat(settings.xr.freq) || (apt.freq.tower || { mhz: 118.1 }).mhz) * 1000));
-    if (!SR) { sysLog("Speech recognition needs Chrome or Edge — type instead."); return; }
-    recText = "";
-    rec = new SR(); rec.lang = "en-US"; rec.interimResults = true; rec.continuous = true;
-    rec.onresult = (e) => { recText = [...e.results].map(r => r[0].transcript).join(" "); $("cmd").value = recText; };
-    rec.onend = () => { if (recText) transmit(recText, undefined, "voice"); recText = ""; $("cmd").value = ""; };
-    try { rec.start(); } catch { /* already started */ }
+    ptt.start();
   }
   function pttStop() {
     if (!pttDown) return;
     pttDown = false; $("mic").classList.remove("live");
     bridges.keyMic(false);
-    setTimeout(() => rec && rec.stop(), 350);
+    ptt.stop();
   }
   $("mic").addEventListener("mousedown", pttStart);
   window.addEventListener("mouseup", pttStop);
@@ -1017,6 +1156,160 @@ function bootMain() {
   $("helpBtn").addEventListener("click", () => $("help").showModal());
   function setSpeed(n) { speed = n; $("speed").value = String(n); }
 
+  // ---------- multiplayer (F4): this browser hosts, others join over the relay in server.py ----------
+  const mp = {
+    relay: null, role: null, claims: {}, roster: [], coords: [], intercom: null, releaseAt: {}, chat: [], info: null, nextCoord: 1,
+    to(id, msg) { if (this.relay) this.relay.send({ type: "to", id, msg }); },
+    /** Radio traffic goes to the guests who work or monitor that frequency: they hear what you hear. */
+    radio(m) {
+      if (!this.relay || this.role !== "host" || m.from === "blocked") return;
+      const a = m.ac;
+      this.relay.send({ type: "radio", m: { from: m.from, text: m.text, say: m.say, pos: m.pos, speaker: m.speaker, kind: m.kind, ai: !!m.ai, by: m.by || "",
+        ac: a ? { id: a.id, cs: a.cs, tel: a.tel, num: a.num, nat: a.nat || "", ga: !!a.ga, veh: !!a.veh, human: !!a.human, kind: a.kind, type: a.type, crew: a.crew || null, pos: a.pos ? [a.pos[0], a.pos[1]] : null } : null } });
+    },
+    async host(pub) {
+      if (!apt) { sysLog("Load an airport first."); return; }
+      if (this.relay) this.relay.close();
+      this.role = "host"; this.claims = {}; this.roster = []; this.coords = [];
+      settings.nick = settings.nick || "host"; save();
+      let code = "";
+      try { code = (await (await fetch("/api/mp/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: `${apt.icao} ${settings.nick}`, public: pub }) })).json()).code; } catch { /* offline */ }
+      try { this.info = await (await fetch("/api/mp/info")).json(); } catch { this.info = null; }
+      this.relay = new Relay({ code, role: "host", name: settings.nick, sname: `${apt.icao} ${settings.nick}`, pub,
+        onStatus: (st, m) => { if (st === "connected") { sysLog(`Hosting session ${m.code}. Others join with the code or ${this.joinUrl()}.`); broadcast(true); } renderMp(); },
+        onMessage: (m) => this.fromRelay(m) });
+      this.intercom = new Intercom({ send: (m) => this.relay.send(m), log: sysLog, onSpeaking: () => renderMp() });
+      renderMp();
+    },
+    joinUrl() { const i = this.info || {}; const host = i.bind && i.bind !== "127.0.0.1" ? i.lan : location.hostname; return `${location.protocol}//${host}:${i.port || location.port}/?join=${this.relay ? this.relay.code : ""}`; },
+    stop() {
+      if (this.relay) this.relay.close();
+      this.relay = null; this.role = null;
+      if (this.intercom) this.intercom.closeAll();
+      if (sim) for (const k of Object.keys(sim.remoteStaff)) { delete sim.remoteStaff[k]; sim.staffing.delete(k); }
+      this.claims = {}; this.roster = []; this.releaseAt = {}; this.coords = [];
+      renderMp(); renderTabs(); renderCoord();
+    },
+    fromRelay(m) {
+      if (m.type === "joined") { sysLog(`${m.name} joined as ${m.role}.`); this.roster = this.roster.filter(r => r.id !== m.id).concat([{ id: m.id, name: m.name, role: m.role, pos: "" }]); this.sendClaims(); if (this.intercom && this.intercom.enabled && m.role !== "board") this.intercom.call(m.id); renderMp(); broadcast(true); }
+      else if (m.type === "left") { sysLog(`${m.name} left${m.pos ? " (" + m.pos + " unstaffed — AI takes it in 30 s)" : ""}.`); this.roster = this.roster.filter(r => r.id !== m.id); if (this.intercom) this.intercom.drop(m.id); const pos = this.claims[m.id]; delete this.claims[m.id]; if (pos) this.releaseAt[pos] = Date.now() + 30000; this.sendClaims(); renderMp(); }
+      else if (m.type === "roster") { this.roster = m.roster; renderMp(); }
+      else if (m.type === "chat") { this.chat.push(m); if (this.chat.length > 80) this.chat.shift(); renderChat(); }
+      else if (m.type === "rtc" && this.intercom) this.intercom.onSignal(m);
+      else if (m.type === "error") sysLog("Session: " + m.error);
+      else if (m.from) handleLink(m, { id: m.from, name: m.name, role: m.role });
+    },
+    /** A guest's request that is not a pop-out message: claims, coordination, instructor events. */
+    fromGuest(m, g) {
+      if (m.type === "claim") {
+        const pos = String(m.pos || "").toUpperCase();
+        for (const [id, p] of Object.entries(this.claims)) if (id === g.id && p) { delete sim.remoteStaff[p]; delete this.claims[id]; this.releaseAt[p] = Date.now() + 30000; }
+        if (pos && POS_ORDER.includes(pos) && sim.split && !isMine(pos) && !Object.values(this.claims).includes(pos) && g.role === "guest") {
+          this.claims[g.id] = pos; sim.remoteStaff[pos] = g.name; sim.staffing.add(pos); delete this.releaseAt[pos];
+          sysLog(`${g.name} now works ${pos}.`);
+        } else if (pos) this.to(g.id, { type: "alert", msg: `${pos} is not available${!sim.split ? " (the host works a combined position)" : ""}.` });
+        this.sendClaims(); renderTabs(); renderMp(); broadcast(true);
+      } else if (m.type === "coord") {
+        const c = { id: this.nextCoord++, from: g.name, fromId: g.id, fromPos: this.claims[g.id] || "", to: String(m.to || "").toUpperCase(), kind: m.kind || "approval", ac: m.ac || "", text: String(m.text || "").slice(0, 120), t: Date.now(), state: "open" };
+        this.coords.push(c); this.coordArrived(c);
+      } else if (m.type === "coordReply") { const c = this.coords.find(x => x.id === m.id); if (c && this.claims[g.id] === c.to) this.answerCoord(m.id, !!m.ok, g.name); }
+      else if (m.type === "event" && g.role === "instructor") { const r = sim.abnormalEvent(m.kind); sysLog(`Instructor ${g.name} triggered: ${r || m.kind + " (nothing suitable now)"}.`); }
+      else if (m.type === "note" && (g.role === "instructor" || g.role === "spectator")) { const target = this.roster.find(r => r.id === m.to); if (target) this.to(m.to, { type: "note", from: g.name, text: String(m.text || "").slice(0, 300) }); else { sysLog(`Note from ${g.name}: ${m.text}`); } }
+    },
+    sendClaims() { if (this.relay) this.relay.send({ type: "claims", claims: this.claims }); },
+    kick(id, ban) { if (this.relay) this.relay.send({ type: ban ? "ban" : "kick", id, reason: ban ? "banned by the host" : "removed by the host" }); },
+    /** Coordination requests (release / crossing / approval / point-out) between positions, answered by whoever works the target. */
+    request(kind, to, ac, text) {
+      const c = { id: this.nextCoord++, from: settings.nick || "host", fromId: "host", fromPos: txPosition(), to, kind, ac, text, t: Date.now(), state: "open" };
+      this.coords.push(c); this.coordArrived(c); renderCoord();
+    },
+    coordArrived(c) {
+      const human = sim.userWorks(c.to);
+      if (!human) { setTimeout(() => this.answerCoord(c.id, true, `${c.to} (AI)`), 4000 + Math.random() * 4000); }   // an AI position answers in a few seconds
+      addLog(c.to, "sys", `☎ ${esc(c.from)} (${esc(c.fromPos)}) → ${esc(c.to)}: ${esc(c.kind)} ${esc(c.ac)} ${esc(c.text)}`);
+      broadcast(false); renderCoord();
+    },
+    answerCoord(id, ok, by) {
+      const c = this.coords.find(x => x.id === id); if (!c || c.state !== "open") return;
+      c.state = ok ? "approved" : "denied"; c.by = by;
+      addLog(c.fromPos || "ALL", "sys", `☎ ${esc(c.to)} ${ok ? "approved" : "denied"} ${esc(c.kind)} ${esc(c.ac)} (${esc(by)})`);
+      if (c.fromId !== "host") this.to(c.fromId, { type: "coordResult", id, ok, by, ac: c.ac, kind: c.kind });
+      setTimeout(() => { this.coords = this.coords.filter(x => x.id !== id); broadcast(false); renderCoord(); }, 20000);
+      broadcast(false); renderCoord();
+    },
+    tick() {
+      for (const [pos, at] of Object.entries(this.releaseAt)) if (Date.now() >= at) { delete this.releaseAt[pos]; if (!Object.values(this.claims).includes(pos)) { delete sim.remoteStaff[pos]; sim.staffing.delete(pos); sysLog(`AI takes over ${pos}.`); renderTabs(); } }
+    },
+  };
+  setInterval(() => { if (sim && mp.role === "host") mp.tick(); }, 2000);
+  function openMp() { renderMp(); $("mpDialog").showModal(); }
+  function renderMp() {
+    const el = $("mpBody"); if (!el) return;
+    const r = mp.relay;
+    const guests = mp.roster.map(g => `<tr><td>${esc(g.name)}</td><td>${esc(g.role)}</td><td>${esc(mp.claims[g.id] || "—")}</td><td>${mp.intercom && mp.intercom.peers.has(g.id) ? "🎧" : ""}</td><td><button type="button" data-kick="${g.id}">Kick</button> <button type="button" data-ban="${g.id}">Ban</button></td></tr>`).join("");
+    el.innerHTML = `<div class="row"><label>My nickname <input id="mpNick" value="${esc(settings.nick)}" placeholder="nickname (no account needed)" size="12"></label></div>` +
+      (mp.role === "host" && r ? `<div class="mpcode">Session code <b>${esc(r.code)}</b> · others open <code>${esc(mp.joinUrl())}</code>${mp.info && mp.info.bind === "127.0.0.1" ? ' <span class="warnline">(start server.py with --host 0.0.0.0 so others on your network can reach it)</span>' : ""}</div>` +
+        `<table class="score"><tr><th>Controller</th><th>Role</th><th>Position</th><th>Intercom</th><th></th></tr>${guests || "<tr><td colspan=5 class='muted'>nobody has joined yet</td></tr>"}</table>` +
+        `<div class="row"><button type="button" id="mpStop">Stop hosting</button> <span class="small muted">Guests claim positions in their window; a position whose controller drops goes back to the AI after 30 s. Hold <b>Alt+Shift</b> or the Intercom button to talk to the other controllers.</span></div>`
+        : `<div class="row"><button type="button" id="mpHost">Host a session</button><label><input type="checkbox" id="mpPublic"> list it publicly on this server</label></div>` +
+          `<div class="row"><label>Join with code <input id="mpCode" size="8" placeholder="ABC123"></label><label>as <select id="mpRole"><option value="guest">controller</option><option value="spectator">spectator</option><option value="instructor">instructor</option></select></label><button type="button" id="mpJoin">Join</button></div>` +
+          `<div class="row small muted">Or paste the host's link (http://…/?join=CODE). Sessions on this server: <span id="mpList">…</span></div>` +
+          `<div class="row small muted">Phone / tablet strip board on the LAN: open <code>${location.origin}/?join=CODE&amp;role=board&amp;pos=TWR</code> on the device.</div>`);
+    if (mp.role !== "host") fetch("/api/mp/sessions").then(r => r.json()).then(j => { const l = $("mpList"); if (l) l.innerHTML = (j.sessions || []).filter(s => s.public || true).map(s => `<button type="button" data-join="${esc(s.code)}">${esc(s.name)} (${s.guests} joined${s.host ? "" : ", host away"})</button>`).join(" ") || "none"; }).catch(() => {});
+  }
+  $("mpBody").addEventListener("click", (e) => {
+    const nick = $("mpNick"); if (nick) { settings.nick = nick.value.trim().slice(0, 24); save(); }
+    if (e.target.id === "mpHost") { mp.host(!!($("mpPublic") && $("mpPublic").checked)); return; }
+    if (e.target.id === "mpStop") { mp.stop(); return; }
+    const j = e.target.closest("[data-join]"); const code = j ? j.dataset.join : e.target.id === "mpJoin" ? ($("mpCode").value || "").trim().toUpperCase() : "";
+    if (code) { const role = $("mpRole") ? $("mpRole").value : "guest"; location.href = `?join=${encodeURIComponent(code)}&role=${role}&name=${encodeURIComponent(settings.nick || "guest")}&icao=${apt ? apt.icao : ""}`; return; }
+    const k = e.target.closest("[data-kick]"); if (k) { mp.kick(k.dataset.kick, false); return; }
+    const b = e.target.closest("[data-ban]"); if (b) { mp.kick(b.dataset.ban, true); return; }
+  });
+  $("mpBtn").addEventListener("click", openMp);
+  // intercom push-to-talk: Alt+Shift held, or the button
+  let icDown = false;
+  const icKey = (on) => {
+    if (!mp.intercom || icDown === on) return;
+    icDown = on;
+    if (on && !mp.intercom.enabled) { mp.intercom.enabled = true; for (const g of mp.roster) if (g.role !== "board") mp.intercom.call(g.id); }
+    mp.intercom.key(on); $("icBtn").classList.toggle("live", on);
+  };
+  $("icBtn").addEventListener("mousedown", () => icKey(true)); window.addEventListener("mouseup", () => icKey(false));
+  window.addEventListener("keydown", (e) => { if (e.altKey && e.shiftKey && !e.repeat) icKey(true); });
+  window.addEventListener("keyup", (e) => { if (!(e.altKey && e.shiftKey)) icKey(false); });
+  // chat
+  function renderChat() {
+    const el = $("chatLog"); if (!el) return;
+    el.innerHTML = mp.chat.slice(-40).map(m => `<div><b>${esc(m.name)}</b> ${esc(m.text)}</div>`).join("");
+    el.scrollTop = el.scrollHeight;
+    $("chatPanel").classList.toggle("hidden", !mp.relay);
+  }
+  $("chatForm").addEventListener("submit", (e) => { e.preventDefault(); const t = $("chatIn").value.trim(); if (t && mp.relay) mp.relay.send({ type: "chat", text: t }); $("chatIn").value = ""; });
+  // coordination panel: open requests for the positions I work, with Approve / Deny
+  function renderCoord() {
+    const el = $("coordPanel"); if (!el) return;
+    const mine = mp.coords.filter(c => c.state === "open" && isMine(c.to));
+    const sent = mp.coords.filter(c => c.fromId === "host" && c.state !== "open");
+    if (!mine.length && !sent.length) { el.classList.add("hidden"); return; }
+    el.classList.remove("hidden");
+    el.innerHTML = mine.map(c => `<div class="coord"><b>${esc(c.from)}</b> (${esc(c.fromPos)}) asks ${esc(c.to)}: <b>${esc(c.kind)}</b> ${esc(c.ac)} ${esc(c.text)} <button type="button" data-ok="${c.id}">Approve</button><button type="button" data-no="${c.id}">Deny</button></div>`).join("") +
+      sent.map(c => `<div class="coord muted">${esc(c.to)} ${c.state} ${esc(c.kind)} ${esc(c.ac)}</div>`).join("");
+  }
+  $("coordPanel").addEventListener("click", (e) => {
+    const ok = e.target.closest("[data-ok]"), no = e.target.closest("[data-no]");
+    if (ok) mp.answerCoord(+ok.dataset.ok, true, settings.nick || "host");
+    if (no) mp.answerCoord(+no.dataset.no, false, settings.nick || "host");
+  });
+  $("coordBtn").addEventListener("click", () => {
+    if (!sim || !sim.split) { sysLog("Coordination needs split positions (Staffing)."); return; }
+    const a = sim.ac.find(x => x.id === selectedId);
+    const to = prompt("Coordinate with which position? (DEL, GND, TWR, APP, CTR)", activePos === "TWR" ? "GND" : "TWR");
+    if (!to) return;
+    const kind = prompt("Request: release / crossing / approval / point-out", "release") || "approval";
+    mp.request(kind.trim().toLowerCase(), to.trim().toUpperCase(), a ? a.cs : "", "");
+  });
+
   // ---------- guide ----------
   Object.defineProperties(app, { apt: { get: () => apt }, sim: { get: () => sim } });
   Object.assign(app, {
@@ -1073,10 +1366,20 @@ function bootMain() {
     requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
+  // Animation frames stop when this window is hidden (minimised, or covered on another monitor) but the
+  // pop-outs, remote controllers and XRadio pilots still need the simulation: step it on a timer meanwhile.
+  setInterval(() => {
+    const now = performance.now();
+    if (!sim || now - last < 400) return;
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    if (speed > 0) for (let i = 0; i < speed; i++) sim.step(dt);
+    bcT += dt; if (bcT > 0.25) { bcT = 0; broadcast(false); }
+    slowT += dt; if (slowT > 1) { slowT = 0; renderBoard(); renderDel(); renderTabs(); renderInfo(); }
+  }, 100);
   loadAirport(params.get("icao") || store.get("tt.icao", "EETN"));
   // for debugging and automated tests
   window.TT = { get sim() { return sim; }, get apt() { return apt; }, get positions() { return positions; }, get procs() { return procs; }, transmit, parse, radio, radar, guide, app,
-    settings, setActive, setView, select: (id) => select(sim && sim.ac.find(a => a.id === id)), openDebrief, bridges, loadAirport, refreshVoices,
+    settings, setActive, setView, select: (id) => select(sim && sim.ac.find(a => a.id === id)), openDebrief, bridges, loadAirport, refreshVoices, get mp() { return mp; }, broadcast,
     applyStaffing: (mode, keys) => { settings.staff = { mode, keys }; save(); updateStaffBtn(); createSim(); } };
 }
 
@@ -1086,66 +1389,254 @@ function fmtClock(sim) {
 }
 
 // =====================================================================================
-//  POP-OUT WINDOW (one position; the simulation runs in the main window)
+//  POP-OUT / REMOTE WINDOW: one position of the main window (?popout=GND), a single panel of it
+//  (?popout=TWR&panel=strips), or a controller who joined another host's session over the relay
+//  (?join=CODE&role=guest|spectator|instructor|board). The simulation runs in the host's main window;
+//  this window renders the state it receives and sends back what its controller does.
 // =====================================================================================
 async function bootPopout() {
+  const JOIN = (params.get("join") || "").toUpperCase();
+  const remote = !!JOIN;
+  const role = remote ? (params.get("role") || "guest") : "popout";     // popout | guest | spectator | instructor | board
+  const panel = (params.get("panel") || "").toLowerCase();
+  let pos = (POPOUT || params.get("pos") || "").toUpperCase() || (remote ? "TWR" : "ALL");
+  const key = panel ? `${pos}:${panel}` : pos;
+  const saved = store.get("tt.settings", {});
+  const nick = (params.get("name") || saved.nick || (role === "board" ? "board" : "guest")).slice(0, 24);
   document.body.classList.add("popout");
+  if (panel) document.body.classList.add("panel-only", "p-" + panel);
+  if (role === "board") document.body.classList.add("board");
+  if (remote) document.body.classList.add("remote");
   document.querySelectorAll(".main-only").forEach(e => e.classList.add("hidden"));
   $("restorePop").classList.add("hidden");
-  const pos = POPOUT;
-  document.title = `Tower Trainer — ${pos}`;
-  let apt = null, state = null, selectedId = null, aptIcao = null;
+  $("assignSq").classList.add("hidden");
+  document.title = `Tower Trainer — ${remote ? `${nick} (${role})` : pos}${panel ? " · " + panel : ""}`;
+  // audio: a pop-out of the main window never plays (the main window does); a remote controller hears their own frequency
+  const radio = new Radio();
+  radio.muted = !remote;
+  radio.onFrequency = () => [];
+  if (remote) Object.assign(radio, { accents: saved.accents || "natural", rate: +saved.rate || 1, effect: saved.effect ?? 0.85, preset: saved.preset || "good", tts: saved.voices !== false, blocked: false });
+  let apt = null, state = null, selectedId = null, aptIcao = null, myPos = remote ? "" : pos, claims = {}, roster = [], chat = [], hostHere = true, statusText = "";
+  const view = () => (remote ? myPos || pos : pos);
+  const canTx = () => (role === "guest" ? !!myPos : !remote);
   async function load(icao) {
     if (!icao || icao === aptIcao) return;
     aptIcao = icao;
     const d = await (await fetch(`/api/airport/${icao}`)).json();
     apt = new Airport(d);
     radar.setAirport(apt);
-    radar.setView(DEFAULT_VIEW[pos] || VIEWS[pos] ? (VIEWS[pos] ? pos : DEFAULT_VIEW[pos]) : "GND");
+    radio.airport = icao;
+    radar.setView(VIEWS[view()] ? view() : (DEFAULT_VIEW[view()] || "GND"));
   }
   if (params.get("icao")) await load(params.get("icao"));
+  // ---------- the link to the host: BroadcastChannel (same browser) or the relay (another computer) ----------
+  let relay = null, intercom = null;
+  const link = { id: null, send(m) { if (remote) { if (relay) relay.send(m); } else if (channel) channel.postMessage(m); } };
+  function alertMsg(text, ms = 12000) { const d = document.createElement("div"); d.textContent = text; $("alerts").appendChild(d); setTimeout(() => d.remove(), ms); }
+  function setStatus(t, warn) { statusText = t; renderBar(); if (warn) alertMsg(t); }
+  if (remote) {
+    relay = new Relay({ code: JOIN, role, name: nick, pos: role === "guest" ? pos : "",
+      onStatus: (st, m) => {
+        if (st === "connected") {
+          link.id = m.id; hostHere = m.host !== false; chat = m.chat || chat; roster = m.roster || roster;
+          link.send({ type: "hello", pos });
+          if (role === "guest" && POS_ORDER.includes(pos)) link.send({ type: "claim", pos });
+          setStatus(`in session ${m.name || m.code}`); renderChat();
+        } else if (st === "kicked") setStatus(m.reason || m.error || "removed from the session", true);
+        else if (st === "closed") setStatus("connection lost — reconnecting…");
+        renderBar();
+      },
+      onMessage: onLink });
+    intercom = new Intercom({ send: (m) => relay.send(m), log: (t) => alertMsg(t) });
+  } else if (channel) channel.onmessage = (ev) => onLink(ev.data);
+  /** Call everybody who can talk (the host and the other controllers), once the intercom is on. */
+  function callAll() {
+    if (!intercom || !intercom.enabled) return;
+    for (const id of ["host", ...roster.filter(r => r.id !== link.id && r.role !== "board").map(r => r.id)]) if (!intercom.peers.has(id)) intercom.call(id);
+  }
+  // ---------- the bar of a remote window: who I am, what I work, instructor tools, intercom, leave ----------
+  const bar = document.createElement("div"); bar.className = "guestbar";
+  if (remote) $("posTabs").parentElement.insertBefore(bar, $("posTabs"));
+  const EVENTS = ["medical", "birdstrike", "rto", "breakdown", "fod", "incursion", "unstable", "pan", "mayday", "7500", "7600", "7700"];
+  function renderBar() {
+    if (!remote) return;
+    bar.innerHTML = `<b>${esc(nick)}</b> <span class="muted">${esc(role)}${myPos ? " · working " + esc(myPos) : role === "guest" ? " · click a position tab to claim it" : ""}</span>` +
+      (hostHere ? "" : ' <span class="warnline">host away</span>') + ` <span class="muted">${esc(statusText)}</span><span class="sp"></span>` +
+      (role === "instructor" ? `<select id="insEv" title="Abnormal event to trigger in the host's simulation">${EVENTS.map(k => `<option>${k}</option>`).join("")}</select><button type="button" id="insGo">Trigger</button>` +
+        `<select id="insTo" title="Send a private note to">${roster.filter(r => r.id !== link.id).map(r => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join("")}<option value="host">host</option></select><input id="insNote" placeholder="private note" size="14"><button type="button" id="insSend">Note</button>` : "") +
+      (role !== "board" ? `<button type="button" id="icBtn2" class="${intercom && intercom.keyed ? "live" : ""}" title="Intercom to the other controllers: hold (or Alt+Shift)">🎧</button>` : "") +
+      `<button type="button" id="gstLeave" title="Leave the session">Leave</button>`;
+  }
+  bar.addEventListener("click", (e) => {
+    if (e.target.id === "gstLeave") { if (relay) relay.close(); location.href = `/?icao=${aptIcao || ""}`; }
+    if (e.target.id === "insGo") link.send({ type: "event", kind: $("insEv").value });
+    if (e.target.id === "insSend") { const t = $("insNote").value.trim(); if (t) { const to = $("insTo").value; if (to === "host") link.send({ type: "note", text: t }); else link.send({ type: "note", to, text: t }); $("insNote").value = ""; alertMsg("note sent"); } }
+  });
+  let icDown = false;
+  const icKey = (on) => {
+    if (!intercom || icDown === on) return;
+    icDown = on;
+    if (on && !intercom.enabled) { intercom.enabled = true; callAll(); }
+    intercom.key(on);
+    const b = $("icBtn2"); if (b) b.classList.toggle("live", on);
+  };
+  bar.addEventListener("mousedown", (e) => { if (e.target.id === "icBtn2") icKey(true); });
+  window.addEventListener("mouseup", () => icKey(false));
+  window.addEventListener("keydown", (e) => { if (e.altKey && e.shiftKey && !e.repeat) icKey(true); });
+  window.addEventListener("keyup", (e) => { if (!(e.altKey && e.shiftKey)) icKey(false); });
+  // ---------- tabs: the position this window shows; a controller claims one by clicking it ----------
+  function renderTabs() {
+    const keys = state && state.split ? POS_ORDER : ["ALL"];
+    const v = view();
+    $("posTabs").innerHTML = keys.map(k => {
+      const who = state && state.remoteStaff ? state.remoteStaff[k] : null;
+      const ai = state && state.split && !state.staffed.includes(k);
+      const mine = remote && k === myPos;
+      const title = mine ? "you work this position" : who ? `worked by ${who}` : ai ? (role === "guest" ? "AI controller — click to claim" : "AI controller") : "the host";
+      return `<div class="tab${k === v ? " on" : ""}${ai ? " ai" : ""}${who && !mine ? " remote" : ""}${mine ? " mine" : ""}" data-pos="${k}" title="${esc(title)}">${k === "ALL" ? "DEL/GND/TWR" : k}${who && !mine ? `<span class="who">${esc(who)}</span>` : ""}</div>`;
+    }).join("");
+  }
+  function onPosChange() {
+    if (!panel || panel === "radar") radar.setView(VIEWS[view()] ? view() : (DEFAULT_VIEW[view()] || "GND"));
+    if (remote) radio.audible = new Set([view(), "GUARD", "ALL"]);
+    document.title = `Tower Trainer — ${remote ? `${nick} (${role === "guest" && myPos ? myPos : role})` : pos}${panel ? " · " + panel : ""}`;
+    renderTabs(); renderBar();
+  }
+  $("posTabs").addEventListener("click", (e) => {
+    const t = e.target.closest("[data-pos]"); if (!t) return;
+    const k = t.dataset.pos;
+    if (role === "guest" && k !== myPos && k !== "ALL") link.send({ type: "claim", pos: k });   // the host answers with the claims
+    pos = k; onPosChange();
+  });
   $("viewTabs").innerHTML = Object.keys(VIEWS).map(v => `<button data-view="${v}">${VIEWS[v]}</button>`).join("");
   $("viewTabs").addEventListener("click", (e) => { const b = e.target.closest("[data-view]"); if (b) radar.setView(b.dataset.view); });
-  $("posTabs").innerHTML = `<div class="tab on">${pos === "ALL" ? "DEL/GND/TWR" : pos}</div>`;
-  $("delPanel").classList.toggle("hidden", pos !== "DEL");
-  $("assignSq").classList.add("hidden");
-  radar.onSelect = (id) => { selectedId = id; channel.postMessage({ type: "select", id }); };
-  channel.onmessage = async (ev) => {
-    const m = ev.data;
-    if (m.type === "airport") { aptIcao = null; await load(m.icao); }
-    if (m.type === "alert") { const d = document.createElement("div"); d.textContent = m.msg; $("alerts").appendChild(d); setTimeout(() => d.remove(), 12000); }
-    if (m.type !== "state") return;
+  radar.onSelect = (id) => { selectedId = id; if (!remote) link.send({ type: "select", id }); };
+  // ---------- chat and coordination (remote windows and the chat panel pop-out) ----------
+  function renderChat() {
+    const el = $("chatLog"); if (!el) return;
+    $("chatPanel").classList.toggle("hidden", !(remote || panel === "chat"));
+    const html = chat.slice(-40).map(m => `<div><b>${esc(m.name)}</b> ${esc(m.text)}</div>`).join("");
+    if (el._last !== html) { el.innerHTML = html; el._last = html; el.scrollTop = el.scrollHeight; }
+  }
+  $("chatForm").addEventListener("submit", (e) => { e.preventDefault(); const t = $("chatIn").value.trim(); if (t) link.send({ type: "chat", text: t }); $("chatIn").value = ""; });
+  $("coordBtn").addEventListener("click", () => {
+    if (!state || !state.split) { alertMsg("Coordination needs split positions."); return; }
+    if (remote && role !== "guest") { alertMsg("Only a controller working a position coordinates."); return; }
+    const a = state.ac.find(x => x.id === selectedId);
+    const to = prompt("Coordinate with which position? (DEL, GND, TWR, APP, CTR)", view() === "TWR" ? "GND" : "TWR"); if (!to) return;
+    const kind = prompt("Request: release / crossing / approval / point-out", "release") || "approval";
+    link.send({ type: "coord", to: to.trim().toUpperCase(), kind: kind.trim().toLowerCase(), ac: a ? a.cs : "", text: "" });
+  });
+  function renderCoord(coords) {
+    const el = $("coordPanel");
+    const mine = coords.filter(c => c.state === "open" && c.to === view() && (remote ? role === "guest" && c.to === myPos : true));
+    const sent = coords.filter(c => c.fromId === link.id && c.state !== "open");
+    if (!mine.length && !sent.length) { el.classList.add("hidden"); return; }
+    el.classList.remove("hidden");
+    const html = mine.map(c => `<div class="coord"><b>${esc(c.from)}</b> (${esc(c.fromPos)}) asks ${esc(c.to)}: <b>${esc(c.kind)}</b> ${esc(c.ac)} ${esc(c.text)} <button type="button" data-ok="${c.id}">Approve</button><button type="button" data-no="${c.id}">Deny</button></div>`).join("") +
+      sent.map(c => `<div class="coord muted">${esc(c.to)} ${esc(c.state)} ${esc(c.kind)} ${esc(c.ac)}</div>`).join("");
+    if (el._last !== html) { el.innerHTML = html; el._last = html; }
+  }
+  $("coordPanel").addEventListener("click", (e) => {
+    const ok = e.target.closest("[data-ok]"), no = e.target.closest("[data-no]");
+    if (ok) link.send({ type: "coordReply", id: +ok.dataset.ok, ok: true });
+    if (no) link.send({ type: "coordReply", id: +no.dataset.no, ok: false });
+  });
+  // ---------- messages from the host ----------
+  const acCache = new Map();
+  async function onLink(m) {
+    if (!m || typeof m !== "object") return;
+    switch (m.type) {
+      case "airport": aptIcao = null; await load(m.icao); return;
+      case "alert": alertMsg(m.msg); return;
+      case "note": alertMsg(`✉ ${m.from}: ${m.text}`, 20000); return;
+      case "coordResult": alertMsg(`☎ ${m.by || m.to || ""}: ${m.kind} ${m.ac} ${m.ok ? "APPROVED" : "DENIED"}`, 15000); return;
+      case "chat": chat.push(m); if (chat.length > 80) chat.shift(); renderChat(); return;
+      case "claims": claims = m.claims || {}; if (m.roster) roster = m.roster; applyClaims(); renderTabs(); renderBar(); return;
+      case "roster": roster = m.roster || []; renderBar(); callAll(); return;
+      case "hostLeft": hostHere = false; renderBar(); return;
+      case "hostBack": hostHere = true; renderBar(); link.send({ type: "hello", pos }); if (role === "guest" && (myPos || pos)) link.send({ type: "claim", pos: myPos || pos }); return;
+      case "rtc": if (intercom) intercom.onSignal(m); return;
+      case "radio": if (remote && m.m && m.m.by !== nick && radio.isAudible(m.m.pos)) { if (m.m.ac) { const c = acCache.get(m.m.ac.id) || {}; Object.assign(c, m.m.ac); acCache.set(c.id, c); m.m.ac = c; } radio.enqueue(m.m, m.m.from === "atc" && !m.m.ai ? 0.3 : undefined); } return;
+      case "state": break;
+      default: return;
+    }
     if (m.icao !== aptIcao) await load(m.icao);
     state = m;
-    selectedId = m.selectedId ?? selectedId;
-    const p = m.split && m.positions[pos];
-    $("posHead").innerHTML = p ? `<b>${esc(p.cs)}</b> · ${esc(p.name)} · <b>${p.freq}</b>${m.staffed.includes(pos) ? "" : " · <i>AI controller</i>"}` : `<b>combined</b>`;
-    $("txOn").textContent = p ? `TX ${pos} ${p.freq}` : "TX";
+    if (!remote) selectedId = m.selectedId ?? selectedId;
+    if (m.claims) { claims = m.claims; applyClaims(); }
+    if (m.roster) roster = m.roster;
+    const v = view();
+    const p = m.split && m.positions[v];
+    const worker = m.remoteStaff && m.remoteStaff[v];
+    $("posHead").innerHTML = p ? `<b>${esc(p.cs)}</b> · ${esc(p.name)} · <b>${p.freq}</b>${m.staffed.includes(v) ? (worker && worker !== nick ? ` · <i>${esc(worker)}</i>` : "") : " · <i>AI controller</i>"}` : `<b>combined DEL/GND/TWR</b>${m.hostNick ? " · " + esc(m.hostNick) : ""}`;
+    $("txOn").textContent = canTx() ? `TX ${v === "ALL" ? "" : v} ${p ? p.freq : ""}` : "RX";
     $("atisBox").innerHTML = m.atis;
     $("status").textContent = m.t;
-    const lg = (m.logs[m.split ? pos : "ALL"] || []);
+    if (m.wx != null) { $("wxPanel").innerHTML = m.wx; $("wxPanel").classList.toggle("hidden", !(panel === "wx" || (!panel && radar.view === "TWR"))); }
+    if (m.seq != null) { $("seqPanel").innerHTML = m.seq; $("seqPanel").classList.toggle("hidden", !(panel === "seq" || (!panel && m.seqOn))); }
+    if (m.del != null) $("clrList").innerHTML = m.del;
+    $("delPanel").classList.toggle("hidden", !(panel === "del" || (!panel && (v === "DEL" || radar.view === "DEL"))));
+    const lg = (m.logs[m.split ? v : "ALL"] || []);
     const box = $("log");
     const html = lg.map(e => `<div class="${e.cls}">${e.html}</div>`).join("");
     if (box._last !== html) { box.innerHTML = html; box._last = html; box.parentElement.scrollTop = box.parentElement.scrollHeight; }
-    renderStrips({ el: $("stripBoard"), ac: m.ac, pos: m.split ? pos : "ALL", selectedId, split: m.split,
-      onSelect: (id) => { selectedId = id; channel.postMessage({ type: "select", id }); },
-      onMove: (id, bay) => channel.postMessage({ type: "strip", id, bay }),
-      onEdit: (id, field, value) => channel.postMessage({ type: "strip", id, field, value }) });
-  };
+    renderStrips({ el: $("stripBoard"), ac: m.ac, pos: m.split ? v : "ALL", selectedId, split: m.split, touch: role === "board" || "ontouchstart" in window,
+      onSelect: (id) => { selectedId = id; if (!remote) link.send({ type: "select", id }); },
+      onMove: (id, bay) => link.send({ type: "strip", id, bay }),
+      onEdit: (id, field, value) => link.send({ type: "strip", id, field, value }),
+      onAccept: (id) => link.send({ type: "strip", id, accept: true }) });
+    renderCoord(m.coords || []);
+    if (m.chat && !remote) { chat = m.chat; renderChat(); }
+    renderTabs();
+  }
+  function applyClaims() {
+    if (!remote || !link.id) return;
+    const mine = claims[link.id] || "";
+    if (mine !== myPos) { myPos = mine; if (mine) pos = mine; onPosChange(); if (mine) alertMsg(`You now work ${mine}.`); }
+  }
+  // ---------- transmitting: typed, or push-to-talk (Ctrl+Space / the mic button) in a remote window ----------
   $("cmdForm").addEventListener("submit", (e) => {
     e.preventDefault();
-    channel.postMessage({ type: "tx", pos, text: $("cmd").value });
-    $("cmd").value = "";
+    const text = $("cmd").value.trim(); $("cmd").value = "";
+    if (!text) return;
+    if (!canTx()) { alertMsg(role === "guest" ? "Claim a position first (click its tab)." : "This window does not transmit."); return; }
+    link.send({ type: "tx", pos: remote ? myPos : pos, text });
   });
-  window.addEventListener("beforeunload", () => channel.postMessage({ type: "closed", pos }));
-  channel.postMessage({ type: "hello", pos });
-  function frame() {
-    if (state && apt) {
-      const arrEnd = apt.findRunwayEnd(state.arrEnd);
-      radar.draw({ ac: state.ac, arrEnd }, selectedId);
-    } else radar.draw({ ac: [], arrEnd: null }, null);
+  if (remote && role === "guest") {
+    const ptt = new Ptt({ onText: (t) => { if (canTx()) link.send({ type: "tx", pos: myPos, text: t }); }, onPartial: (t) => { $("cmd").value = t; }, onInfo: alertMsg, cmd: $("cmd"),
+      phrases: () => (state ? state.ac.filter(a => a.freq === myPos).flatMap(a => [a.cs, `${a.tel} ${a.num}`.trim()]) : []) });
+    const down = (on) => { if (!canTx()) return; $("mic").classList.toggle("live", on); if (on) { radio.burst && radio.burst(0.03, 0.2); ptt.start(); } else ptt.stop(); };
+    $("mic").addEventListener("mousedown", () => down(true));
+    window.addEventListener("mouseup", () => down(false));
+    window.addEventListener("keydown", (e) => { if (e.code === "Space" && e.ctrlKey && !e.repeat) { e.preventDefault(); down(true); } });
+    window.addEventListener("keyup", (e) => { if (e.code === "Space" || e.key === "Control") down(false); });
+  } else $("mic").classList.add("hidden");
+  // ---------- window placement: a pop-out tells the main window where it sits (restored by the layout) ----------
+  if (!remote) {
+    let last = "";
+    setInterval(() => {
+      const b = { x: window.screenX, y: window.screenY, w: window.outerWidth, h: window.outerHeight };
+      const s = JSON.stringify(b);
+      if (s !== last && b.w > 100) { last = s; link.send({ type: "bounds", key, bounds: b }); }
+    }, 2000);
+    window.addEventListener("beforeunload", () => link.send({ type: "closed", pos: key }));
+    link.send({ type: "hello", pos });
+  }
+  const fs = document.createElement("button"); fs.className = "fsbtn"; fs.type = "button"; fs.title = "Full screen (Esc leaves it)"; fs.textContent = "⛶";
+  fs.addEventListener("click", () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(() => {}); });
+  document.body.appendChild(fs);
+  renderChat(); renderBar(); renderTabs();
+  if (!panel || panel === "radar") {
+    function frame() {
+      if (state && apt) {
+        const arrEnd = apt.findRunwayEnd(state.arrEnd);
+        radar.draw({ ac: state.ac, arrEnd }, selectedId);
+      } else radar.draw({ ac: [], arrEnd: null }, null);
+      requestAnimationFrame(frame);
+    }
     requestAnimationFrame(frame);
   }
-  requestAnimationFrame(frame);
-  window.TT = { get state() { return state; }, pos };
+  window.TT = { get state() { return state; }, get pos() { return view(); }, get myPos() { return myPos; }, role, remote, key, radio,
+    get id() { return link.id; }, send: (m) => link.send(m), get chat() { return chat; }, get claims() { return claims; }, get roster() { return roster; } };
 }

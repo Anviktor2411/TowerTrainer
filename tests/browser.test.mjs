@@ -28,7 +28,8 @@ try {
   ok(await p.waitFor(`/AI/.test(document.getElementById("log").innerText) && /taxi to holding point/.test(document.getElementById("log").innerText)`, 40000), "Ground tab shows the AI controller's taxi instruction");
   await p.eval(`TT.setActive("TWR")`);
   ok(await p.waitFor(`!!document.querySelector('#stripBoard .strip[data-id="' + dep.id + '"]')`, 5000), "departure strip is on the Tower board");
-  // transmit from the main window on TWR
+  // transmit from the main window on TWR (once the runway is free: a landing aircraft would get "confirm takeoff")
+  await p.waitFor(`TT.sim.runwayFree(dep.depEnd.rwy, dep)`, 90000);
   await p.eval(`TT.transmit(dep.tel + " " + dep.num + " runway " + dep.depEnd.name + " cleared for takeoff")`);
   ok(await p.eval(`dep.state === "lineup" || dep.state === "lining" || dep.state === "roll"`), "takeoff clearance applied");
   await p.shot(join(OUT, "split-twr.png"));
@@ -45,6 +46,62 @@ try {
   ok(pop.errors.length === 0, "pop-out has no JS errors " + pop.errors.join(" | "));
   pop.close();
   await p.send("Page.bringToFront");          // a background tab gets no animation frames in headless Chrome
+
+  // ---- Phase F: multiplayer over the relay — a remote controller claims Ground, transmits, chats, accepts a handoff; a tablet strip board ----
+  await p.eval(`TT.settings.nick = "viktor"; TT.mp.host(false)`);
+  ok(await p.waitFor("TT.mp.relay && TT.mp.relay.code && TT.mp.relay.id === 'host'", 10000), "hosting a session over the relay");
+  const code = await p.eval("TT.mp.relay.code");
+  const g = await br.newPage(`http://localhost:8780/?join=${code}&role=guest&name=liisa&icao=EETN`);
+  await p.send("Page.bringToFront");          // the host simulation steps on animation frames: keep it in front
+  ok(await g.waitFor("window.TT && TT.remote && TT.state && TT.state.ac.length > 0", 15000), "remote controller receives the host's state " + g.errors.join(" | "));
+  await g.eval(`TT.radio.tts = false`);
+  await g.eval(`document.querySelector('#posTabs .tab[data-pos="GND"]').click()`);
+  ok(await p.waitFor(`TT.sim.remoteStaff.GND === "liisa" && TT.sim.userWorks("GND")`, 5000), "the guest claimed Ground: the host marks it as worked by liisa");
+  ok(await g.waitFor(`TT.myPos === "GND" && !!document.querySelector('#posTabs .tab.mine[data-pos="GND"]')`, 5000), "the guest's window shows GND as its own position");
+  ok(await p.eval(`!!document.querySelector('#posTabs .tab.remote[data-pos="GND"] .who')`), "the host's Ground tab shows who works it");
+  const d4 = await p.eval(`(() => { const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture({ ga: false }); if (d && !d.ga) { d.freq = "GND"; d.state = "push_req"; d.ifr = true; window.mpDep = d; return d.tel + " " + d.num; } if (d) s.putBack(d); } })()`);
+  await g.eval(`document.getElementById("cmd").value = ${JSON.stringify(d4 + " push and start approved")}; document.getElementById("cmdForm").requestSubmit();`);
+  ok(await p.waitFor(`mpDep.state === "pushing"`, 8000), "the guest's transmission on Ground is applied by the host");
+  await g.eval(`document.getElementById("chatIn").value = "hello tower"; document.getElementById("chatForm").requestSubmit()`);
+  ok(await p.waitFor(`TT.mp.chat.some(m => m.text === "hello tower" && m.name === "liisa")`, 5000), "chat from the guest reaches the host");
+  ok(await g.waitFor(`document.getElementById("chatLog").innerText.includes("hello tower")`, 5000), "and is shown in the guest's chat");
+  // a handoff Tower -> Ground: the guest's board shows the incoming strip and accepts it
+  const d5 = await p.eval(`(() => { const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture({ ga: false }); if (d && !d.ga) { d.freq = "TWR"; d.state = "holding"; d.depEnd = s.depEnd; d.onGround = true; window.hoDep = d; return d.tel + " " + d.num; } if (d) s.putBack(d); } })()`);
+  await p.eval(`TT.transmit(${JSON.stringify(d5)} + " contact ground " + TT.positions.GND.freq, "TWR")`);
+  ok(await p.waitFor(`hoDep.freq === "GND" && hoDep.handoff && !hoDep.handoff.accepted`, 15000), "the frequency change offers the strip to Ground (worked by the guest, so not auto-accepted)");
+  ok(await g.waitFor(`!!document.querySelector('#stripBoard .strip.incoming [data-accept]')`, 8000), "the guest's board shows the incoming strip with ACCEPT");
+  await g.eval(`(() => { const e = document.querySelector('#stripBoard .strip.incoming [data-accept]'); if (e) e.click(); })()`);
+  ok(await p.waitFor(`hoDep.handoff.accepted && hoDep.handoff.by === "liisa"`, 5000), "the guest accepted the handoff");
+  // a strip board on a tablet (role=board), then a kick
+  const b = await br.newPage(`http://localhost:8780/?join=${code}&role=board&pos=GND&name=tablet&icao=EETN`);
+  await p.send("Page.bringToFront");
+  ok(await b.waitFor("window.TT && TT.state && document.body.classList.contains('board') && document.querySelectorAll('#stripBoard .strip').length > 0", 15000), "a strip board (tablet) shows Ground's strips " + b.errors.join(" | "));
+  ok(await p.waitFor(`TT.mp.roster.some(r => r.name === "tablet" && r.role === "board")`, 5000), "the host's roster lists the board");
+  await p.eval(`TT.mp.kick(TT.mp.roster.find(r => r.name === "tablet").id, false)`);
+  ok(await p.waitFor(`!TT.mp.roster.some(r => r.name === "tablet")`, 5000), "the host kicked the board");
+  ok(await b.waitFor(`document.getElementById("alerts").innerText.includes("removed")`, 5000), "the board was told it was removed");
+  await g.shot(join(OUT, "mp-guest.png")); await b.shot(join(OUT, "mp-board.png"));
+  ok(g.errors.length === 0 && b.errors.length === 0, "remote windows have no JS errors " + g.errors.join(" | ") + b.errors.join(" | "));
+  await g.send("Page.navigate", { url: "about:blank" }); await b.send("Page.navigate", { url: "about:blank" });   // closing the CDP session alone leaves the tab open
+  g.close(); b.close();
+  ok(await p.waitFor(`!TT.mp.roster.some(r => r.name === "liisa")`, 8000), "the host learns the guest left");
+  await p.eval(`TT.mp.stop()`);
+  ok(await p.eval(`!TT.sim.remoteStaff.GND && !TT.mp.relay && !TT.sim.userWorks("GND")`), "stopping the session gives the claimed position back to the AI");
+  // a single panel of a position in its own window
+  const pp = await br.newPage("http://localhost:8780/?popout=TWR&panel=strips&icao=EETN");
+  await p.send("Page.bringToFront");
+  ok(await pp.waitFor("window.TT && TT.state && document.body.classList.contains('panel-only') && document.querySelectorAll('#stripBoard .strip').length > 0 && getComputedStyle(document.querySelector('.scope')).display === 'none'", 15000), "panel-only pop-out shows just the strips " + pp.errors.join(" | "));
+  ok(pp.errors.length === 0, "panel pop-out has no JS errors");
+  pp.close();
+  await p.send("Page.bringToFront");
+  // ---- F2: autocomplete on the command line (Tab accepts) ----
+  await p.eval(`(() => { const c = document.getElementById("cmd"); c.value = ""; c.focus(); c.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  ok(await p.waitFor(`!document.getElementById("suggest").classList.contains("hidden") && document.querySelectorAll("#suggest div").length > 0`, 3000), "an empty command line suggests the callsigns on my frequency");
+  await p.eval(`document.getElementById("cmd").dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }))`);
+  const accepted = await p.eval(`document.getElementById("cmd").value`);
+  ok(/^[A-Za-z]/.test(accepted) && accepted.endsWith(" "), "Tab accepts the first suggestion: " + accepted);
+  ok(await p.waitFor(`[...document.querySelectorAll("#suggest div")].some(d => /cleared|line up|taxi|push|hold|contact|next expected/i.test(d.innerText))`, 3000), "after the callsign the next instructions are offered");
+  await p.eval(`document.getElementById("cmd").value = ""; document.getElementById("cmd").blur()`);
 
   // ---- Delivery view, plain-language labels, info panel, light signals, voice status ----
   await p.eval(`TT.setView("DEL")`); await sleep(500);

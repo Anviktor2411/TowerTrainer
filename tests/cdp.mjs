@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const CHROME = ["C:/Program Files/Google/Chrome/Application/chrome.exe",
-  "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"].find(existsSync);
+// TT_BROWSER=edge (or a path to a Chromium-based browser) runs the same tests in another browser.
+const PICK = process.env.TT_BROWSER || "";
+const CHROME = (PICK === "edge" ? ["C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe"]
+  : PICK ? [PICK] : ["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"]).find(existsSync);
 
 export async function launch({ port = 9334, width = 1600, height = 900 } = {}) {
   const prof = join(tmpdir(), `tt-cdp-${port}`);

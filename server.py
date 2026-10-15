@@ -14,6 +14,7 @@ import io
 import json
 import mimetypes
 import re
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -27,6 +28,7 @@ import fsd
 import navdata
 import openflights
 import osm
+import ws
 from urllib.parse import parse_qs, urlparse
 
 FSD = None       # fsd.FSDServer
@@ -191,6 +193,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {"ok": xradio().send_voice_pcm(body.get("khz", 0), body.get("pcm", ""))})
             if path == "/api/xradio/fp":            # the controller answers a real pilot's flight plan
                 return self.send(200, {"ok": xradio().fp_ack(body)})
+            if path == "/api/mp/create":            # a multiplayer session code for this host
+                return self.send(200, ws.RELAY.create(str(body.get("name", ""))[:40], bool(body.get("public"))))
             return self.send(404, {"error": "unknown endpoint"})
         except Exception as e:
             return self.send(500, {"error": f"{type(e).__name__}: {e}"})
@@ -272,6 +276,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, xradio().status())
             if path == "/api/xradio/events":
                 return self.sse_voice(pcm=q.get("pcm") == "1")
+            if path == "/ws":                       # multiplayer relay / remote strip boards (ws.py)
+                sock = ws.WebSocket.upgrade(self)
+                if sock is None:
+                    return self.send(400, {"error": "expected a WebSocket upgrade"})
+                ws.RELAY.attach(sock, q, self.client_address[0])
+                return None
+            if path == "/api/mp/sessions":
+                return self.send(200, {"sessions": ws.RELAY.list(), "lan": lan_address(), "port": PORT})
+            if path == "/api/mp/info":
+                return self.send(200, {"lan": lan_address(), "port": PORT, "bind": BIND, "stt": stt().status()})
             m = re.fullmatch(r"/api/airport/([A-Za-z0-9]{3,7})", path)
             if m:
                 return self.send(200, load_airport(m.group(1)))
@@ -310,6 +324,22 @@ class Server(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
+PORT = 8780
+BIND = "127.0.0.1"
+
+
+def lan_address():
+    """This machine's address on the local network, for the join link shown to other controllers."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
 def xradio():
     """The XRadio bridge, created on first use (the feature is optional and off by default)."""
     global XR
@@ -322,6 +352,7 @@ def xradio():
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8780)
+    ap.add_argument("--host", default="127.0.0.1", help="bind address; 0.0.0.0 lets other controllers on the LAN join (multiplayer, phone strip board)")
     ap.add_argument("--fsd-port", type=int, default=6809, help="EuroScope (legacy FSD) port, 0 = off")
     ap.add_argument("--fsd-host", default="127.0.0.1", help="FSD bind address (127.0.0.1 = this PC only)")
     ap.add_argument("--xradio", default="", help="host:port of an XRadio server to bridge to (off by default)")
@@ -339,5 +370,6 @@ if __name__ == "__main__":
         xradio().configure({"enabled": True, "host": host or a.xradio, "port": int(port or 49100),
                             "password": a.xradio_password, "atc_cs": a.xradio_callsign})
         print(f"XRadio bridge -> {a.xradio}")
-    print(f"Tower Trainer: http://localhost:{a.port}")
-    Server(("127.0.0.1", a.port), Handler).serve_forever()
+    PORT, BIND = a.port, a.host
+    print(f"Tower Trainer: http://localhost:{a.port}" + (f"  (LAN: http://{lan_address()}:{a.port})" if a.host != "127.0.0.1" else "  (--host 0.0.0.0 to let others join)"))
+    Server((a.host, a.port), Handler).serve_forever()

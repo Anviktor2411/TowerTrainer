@@ -21,6 +21,9 @@
   <button id="guideBtn" type="button" class="main-only">Guide</button>
   <button id="debriefBtn" type="button" class="main-only">Debrief</button>
   <button id="settingsBtn" type="button" class="main-only">Settings</button>
+  <button id="layoutBtn" type="button" class="main-only" title="Windows on your screens (Alt+L)">Layout</button>
+  <button id="mpBtn" type="button" class="main-only" title="Host a session or join one (Alt+M)">Multiplayer</button>
+  <button id="icBtn" type="button" class="main-only small" title="Intercom to the other controllers: hold (or Alt+Shift)">🎧</button>
   <button id="helpBtn" type="button">Phraseology</button>
   <span id="navPill" class="pill hidden" title="Navigation data (SID/STAR source and AIRAC cycle)">NAV: –</span>
   <span id="voicePill" class="pill main-only" title="Voice engine that is speaking">Voices: …</span>
@@ -62,7 +65,9 @@
       <div id="fpEditor" class="fp muted">Select an aircraft.</div>
     </div>
     <div class="panel acinfo hidden" id="acInfo"></div>
+    <div class="panel coordp hidden" id="coordPanel"></div>
     <div class="panel strips" id="stripBoard"></div>
+    <div class="panel chat hidden" id="chatPanel"><h3>Controllers' chat <button type="button" id="coordBtn" class="small" title="Coordination request to another position">☎ Coordinate</button></h3><div id="chatLog"></div><form id="chatForm"><input id="chatIn" placeholder="message to the other controllers" autocomplete="off"></form></div>
     <div class="panel log"><h3 id="logTitle">Frequency</h3><div id="log"></div></div>
     <form id="cmdForm" class="cmd">
       <button type="button" id="mic" title="Hold to talk (or Ctrl+Space)">🎙</button>
@@ -74,8 +79,20 @@
   </aside>
 </main>
 
+<dialog id="mpDialog">
+  <h2>Multiplayer</h2>
+  <div id="mpBody"></div>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+<dialog id="layoutDialog">
+  <h2>Windows and screens</h2>
+  <div id="layoutBody"></div>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+
 <dialog id="help">
   <h2>Phraseology the pilots understand</h2>
+  <p class="small muted"><b>Keyboard:</b> <kbd>/</kbd> command line · <kbd>Tab</kbd> accept suggestion · <kbd>Esc</kbd> clear · <kbd>Alt</kbd>+<kbd>1</kbd>…<kbd>5</kbd> views (Ground, Tower, Approach, Centre, Delivery) · <kbd>Alt</kbd>+<kbd>Q/W/E/R/T</kbd> positions DEL/GND/TWR/APP/CTR (<kbd>Alt</kbd>+<kbd>A</kbd> combined) · <kbd>Alt</kbd>+<kbd>P</kbd> pause · <kbd>Alt</kbd>+<kbd>S</kbd> settings · <kbd>Alt</kbd>+<kbd>M</kbd> multiplayer · <kbd>Alt</kbd>+<kbd>L</kbd> layout · hold <kbd>Ctrl</kbd>+<kbd>Space</kbd> push-to-talk · hold <kbd>Alt</kbd>+<kbd>Shift</kbd> intercom. Click a taxiway on the map to add it to the "via" of the taxi instruction you are typing; drag strips between bays; an incoming strip shows ACCEPT.</p>
   <p class="muted">Start with the callsign (<code>FIN321</code> or <code>Finnair three two one</code>; GA <code>Echo Sierra Alpha Bravo Charlie</code>, abbreviated <code>Echo Bravo Charlie</code> after first contact). Several instructions can go in one transmission.</p>
   <table>
     <tr><th>Delivery</th><td><code>FIN321 cleared to Helsinki via flight planned route, climb 5000 feet, squawk 4201, contact Ground 131.905</code></td></tr>
