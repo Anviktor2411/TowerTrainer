@@ -406,9 +406,22 @@ export class Sim {
       this.onEvent({ type: "spawn", ac: a });
     }
     Object.assign(a, { cs: h.cs, type: h.type || "ZZZZ", pos: h.pos, alt: h.alt, hdg: h.hdg, spd: h.spd,
-      onGround: !!h.onGround, squawk: h.squawk, xpdr: h.xpdr || "C", seenAt: this.t });
+      onGround: !!h.onGround, squawk: h.squawk, xpdr: h.xpdr || "C", seenAt: this.t, ai: !!h.ai, tx: !!h.tx });
+    if (h.fp) this.humanFlightPlan(a, h.fp);
     return a;
   }
+
+  /** A real pilot's flight plan (XRadio PT_FLIGHTPLAN) fills the strip: route, type, cruise, rules. */
+  humanFlightPlan(a, fp) {
+    a.fp = fp;
+    a.other = [fp.dep || "", fp.dest || ""];
+    if (fp.ac_icao) a.type = fp.ac_icao;
+    if (fp.cruise_ft) a.cfl = fp.cruise_ft;
+    a.ifr = fp.rules !== "V";
+    a.assignedSq = fp.squawk ? String(fp.squawk).padStart(4, "0") : a.assignedSq;
+    a.fpStatus = fp.status || "filed";
+  }
+  humanByCs(cs) { return this.ac.find(x => x.human && x.cs === cs) || null; }
 
   distToThr(a) {
     const e = a.end || this.arrEnd;
@@ -2091,6 +2104,7 @@ export class Sim {
       ctot: a.ctot != null ? ctotStatus(a.ctot, this.t) : null, hot: a.hotUntil != null ? Math.round(a.hotUntil - this.t) : null, deiced: !!a.deiced,
       cond: a.cond && a.cond.ac ? `behind ${a.cond.ac.cs}` : "", priority: a.priority || "", pan: !!a.pan, broken: !!a.broken, towing: !!a.towing,
       heli: !!a.heli, touchGo: !!a.touchGo, circuits: a.circuits || 0, wants: a.wants || "", rwyChanged: !!a.rwyChanged, giveWay: a.giveWay && a.giveWay.ac ? a.giveWay.ac.cs : "",
+      fpStatus: a.fpStatus || "", liveTx: !!a.tx, liveAi: !!a.ai,
     }));
   }
 

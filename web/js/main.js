@@ -8,7 +8,7 @@ import { parse } from "./commands.js";
 import { buildPositions, fmtFreq } from "./positions.js";
 import { renderStrips } from "./strips.js";
 import { coach, coachHints } from "./coach.js";
-import { Bridges } from "./bridges.js";
+import { Bridges, XR_PILOT_HELP } from "./bridges.js";
 import { Guide } from "./guide.js";
 import { NAT_NAME } from "./data.js";
 import { suggestSid, procLines, runwayMatches } from "./procs.js";
@@ -38,7 +38,8 @@ const DEFAULTS = {
   dep: 10, arr: 8, coach: false, lang: "en", graph: false, monitor: [], occupancy: 70, vehicles: -1, waves: true, osm: true, realMix: true, nightAuto: true,
   wx: "live", lvp: false, recat: false, vfr: 2, abnormals: false, abnormalRate: 2, seq: true,
   staff: { mode: "combined", keys: ["TWR"] },
-  xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false },
+  xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false,
+    weather: "off", aiVoice: true, atisVoice: false, transcribe: false },
 };
 
 const radar = new Radar($("radar"));
@@ -529,13 +530,22 @@ function bootMain() {
   function renderDel() {
     if (!sim || $("delPanel").classList.contains("hidden")) return;
     const req = sim.ac.filter(a => a.kind === "dep" && !a.ga && ["clr_req", "parked", "cleared"].includes(a.state) && (a.lastCall != null || a.state === "cleared"));
-    $("clrList").innerHTML = req.length ? req.map(a => {
+    // real pilots' flight plans from XRadio (PT_FLIGHTPLAN): the clearance with a squawk answers the plan
+    const live = sim.ac.filter(a => a.human && a.fp && a.fpStatus !== "cancelled");
+    const liveHtml = live.map(a => {
+      const sg = suggestionFor(a);
+      return `<div class="clr live${a.id === selectedId ? " sel" : ""}" data-id="${a.id}"><span class="cs">${esc(a.cs)} <span class="muted">(live pilot)</span></span>` +
+        `<span>${esc(a.type)} ${esc(a.fp.rules || "V")}FR ${esc(a.fp.dep)} → ${esc(a.fp.dest)} ${esc(a.fp.route || "")} ${a.fp.cruise_ft ? a.fp.cruise_ft + " ft" : ""}</span>` +
+        `<span class="st">${a.fpStatus === "ack" || a.fpStatus === "cleared" ? "answered" + (a.assignedSq ? " · " + esc(a.assignedSq) : "") : "filed"}</span>` +
+        `<span class="sg">${sg.sid ? "SID " + esc(sg.sid) : "no SID"} · climb ${sg.climb} ft · squawk ${esc(sg.code)} ${a.fpStatus === "filed" ? `<button data-read="${a.id}" title="Put the clearance in the command line">Read clearance</button>` : ""}</span></div>`;
+    }).join("");
+    $("clrList").innerHTML = (liveHtml + (req.length ? req.map(a => {
       const sg = suggestionFor(a);
       const waiting = a.state === "cleared" ? "cleared" : `${Math.round(sim.t - (a.reqAt ?? a.lastCall ?? sim.t))}s`;
       return `<div class="clr${a.id === selectedId ? " sel" : ""}" data-id="${a.id}"><span class="cs">${esc(a.cs)}</span>` +
         `<span>${esc(a.type)}/${a.wtc} → ${esc(a.other[0])} ${esc(a.other[1])} · stand ${esc(a.stand ? a.stand.name : "")}</span><span class="st">${waiting}</span>` +
         `<span class="sg">${sg.sid ? "SID " + esc(sg.sid) : "no SID (radar vectors)"} · climb ${sg.climb} ft · squawk ${esc(sg.code)} ${a.state !== "cleared" ? `<button data-read="${a.id}" title="Put the clearance in the command line">Read clearance</button>` : ""}</span></div>`;
-    }).join("") : `<div class="muted small">No pending requests.</div>`;
+    }).join("") : "")) || `<div class="muted small">No pending requests.</div>`;
     const a = sim.ac.find(x => x.id === selectedId);
     const ed = document.activeElement && $("fpEditor").contains(document.activeElement);
     if (ed) return;
@@ -644,6 +654,14 @@ function bootMain() {
     text = String(text || "").trim();
     if (!text || !sim) return;
     pos = pos && pos !== "ALL" && sim.split ? pos : txPosition();
+    if (text.startsWith("@")) {   // a private message to one XRadio pilot: "@ESXYZ say again your type"
+      const sp = text.indexOf(" ");
+      const to = (sp > 1 ? text.slice(1, sp) : text.slice(1)).toUpperCase(), body = sp > 1 ? text.slice(sp + 1).trim() : "";
+      if (!body) { sysLog("Private message: @CALLSIGN followed by the text."); return; }
+      addLog(pos, "sys", `✉ to ${esc(to)}: ${esc(body)}`);
+      bridges.transmission({ from: "atc", text: body, pos, to });
+      return;
+    }
     const pp = parse(text, sim.ac, sim.ac.find(a => a.id === selectedId));
     const action = pp.ins.length && pp.ins.every(i => i.t === "light" || i.t === "followMe");
     if (action) {
@@ -738,21 +756,62 @@ function bootMain() {
       el.className = "pill" + (c.length ? " on" : "");
       $("setEs").innerHTML = `FSD server on <b>${esc(st.host)}:${st.port}</b>. ${c.length ? "Connected: " + c.map(x => `${esc(x.cs)}${x.freq ? " (" + x.freq + ")" : ""}`).join(", ") : "No EuroScope connected."}<br>EuroScope → Connect → Direct to VATSIM, untick "Connect to VATSIM", server 127.0.0.1, any callsign and password.`;
     },
+    getWeather: () => {
+      if (!sim || !apt) return null;
+      const dec = parseMetar(currentMetar());
+      const ceil = dec.clouds.filter(c => c.ft != null).map(c => ({ cover: c.cover, base_ft: c.ft }));
+      const d = new Date(sim.clockUtc + sim.t * 1000);
+      return { wind_dir: sim.wind.dir ?? 0, wind_kt: sim.wind.spd || 0, vis_m: dec.cavok ? 10000 : (dec.vis ?? 10000), qnh_hpa: dec.qnh || 1013,
+        temp_c: dec.temp ?? 12, dew_c: dec.dew ?? 8, clouds: ceil.slice(0, 3), rain: dec.wx.some(w => w.codes.some(c => ["RA", "DZ", "SH"].includes(c))) ? 0.6 : 0,
+        snow: dec.wx.some(w => w.codes.includes("SN")) ? 0.6 : 0, zulu_s: d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds(),
+        date_days: Math.floor((d - Date.UTC(d.getUTCFullYear(), 0, 1)) / 86400000) };
+    },
+    getAtis: () => (sim && apt ? { icao: apt.icao, khz: apt.freq.atis ? Math.round(apt.freq.atis.mhz * 1000) : 0, letter: sim.atisLetter(), text: atisText() } : null),
     onXrStatus: (st) => {
       const el = $("xrStatus");
       el.classList.toggle("hidden", !settings.xr.enabled);
       if (!st) return;
+      const v = st.voice || {};
       if (st.error) { el.textContent = "XR: error"; el.className = "pill err"; el.title = st.error; }
-      else if (st.running) { el.textContent = `XR: ${st.pilots || 0} pilot${st.pilots === 1 ? "" : "s"}`; el.className = "pill on"; el.title = (st.roster || []).map(r => r.cs).join(", "); }
+      else if (st.running) { el.textContent = `XR: v${st.proto || "?"} · ${st.pilots || 0} pilot${st.pilots === 1 ? "" : "s"} · ${st.ai_count || 0} AI`; el.className = "pill on"; el.title = (st.roster || []).map(r => r.cs).join(", "); }
       else { el.textContent = "XR: off"; el.className = "pill"; }
-      $("xrInfo").textContent = st.error ? st.error : st.running ? `Connected · ${st.ai_sessions || 0} AI aircraft in X-Plane · real pilots: ${(st.roster || []).map(r => r.cs).join(", ") || "none"}` : "Not connected.";
+      const stations = (st.atc_list || []).map(s => `${s.cs} ${(s.khz / 1000).toFixed(3)}`).join(", ");
+      $("xrInfo").innerHTML = st.error ? esc(st.error) : st.running
+        ? `Connected, protocol v${st.proto}${st.proto === 5 ? " (old server: one session per AI aircraft, no flight plans/ATIS)" : ""} · ${st.ai_count || 0} AI aircraft in X-Plane · real pilots: ${esc((st.roster || []).filter(r => !r.atc).map(r => r.cs).join(", ") || "none")}` +
+          ` · flight plans: ${st.fps_count || 0} · ATIS ${st.atis ? "published (" + esc(st.atis) + ")" : "not published"}` +
+          `<br>Stations in the flight: ${esc(stations || "none")} · voice: ${typeof AudioDecoder !== "undefined" ? "WebCodecs" : v.server_decode ? "server codec" : "text only"}${v.server_encode ? " · AI voice: on" : " · AI voice: off (" + esc(v.help || "pip install av") + ")"}${v.stt ? " · transcripts: on" : ""}` +
+          ` · weather: ${st.weather === "publish" ? "published" : st.weather === "follow" ? (st.weather_in ? "following the flight" : "waiting for the flight's sky") : "separate"}`
+        : "Not connected.";
       if (st.error && !xrErrShown) { xrErrShown = true; alertBox(st.error); }
     },
     onXrText: (t) => {
-      const pos = sim && sim.split ? (Object.values(positions).find(p => Math.round(p.mhz * 1000) === t.khz) || {}).key : "ALL";
-      addLog(pos || "ALL", "pilot human", `<b>${esc(t.from)}</b> ${esc(t.text)}`);
+      const pos = t.khz === 121500 ? "GUARD" : sim && sim.split ? (Object.values(positions).find(p => Math.round(p.mhz * 1000) === t.khz) || {}).key : "ALL";
+      const tag = t.to ? "✉ " : t.voice ? "🎙 " : "";
+      addLog(pos || "ALL", "pilot human", `${tag}<b>${esc(t.from)}</b> ${esc(t.text)}${t.to ? ' <span class="muted">(private)</span>' : t.voice ? ' <span class="muted">(transcript)</span>' : ""}`);
+      if (t.to) alertBox(`Private message from ${t.from}: ${t.text}`);
+    },
+    onXrFlightPlan: null,
+    onXrEvent: (e) => {
+      if (e.type === "fp") {
+        sysLog(e.status === "filed" ? `Flight plan from ${e.cs}: ${e.dep || "?"} → ${e.dest || "?"} — it is on the strip; clear them with a squawk to answer it.` : `Flight plan ${e.cs}: ${e.status}${e.squawk ? ", squawk " + String(e.squawk).padStart(4, "0") : ""}.`);
+        renderBoard(); renderDel();
+      }
+    },
+    onXrWeather: (w) => {
+      if (!sim || !w) return;
+      const key = JSON.stringify([Math.round(w.wind_dir), Math.round(w.wind_kt), Math.round(w.vis_m / 100), Math.round(w.temp_c)]);
+      if (key === xrWxKey) return;
+      xrWxKey = key;
+      sim.setWxScenario(null);
+      sim.wxOverride = { wind: { dir: w.wind_dir, spd: w.wind_kt, gust: 0 }, vis: w.vis_m, rvr: null, wx: w.snow > 0.2 ? ["SN"] : w.rain > 0.2 ? ["RA"] : [],
+        temp: w.temp_c, dew: w.temp_c - 3, qnh: Math.round(w.qnh_hpa), rwy: sim.depEnd.name, note: "weather from the XRadio flight" };
+      sim.setWind(sim.wxOverride.wind);
+      sim.weatherFromMetar(parseMetar(currentMetar()));
+      renderOps(); updateSky();
     },
   });
+  let xrWxKey = "";
+  $("xrHelp").innerHTML = XR_PILOT_HELP.map(s => `<li>${esc(s)}</li>`).join("");
   let xrErrShown = false;
   if (settings.xr.enabled) bridges.configureXr(settings.xr);
 
@@ -863,6 +922,7 @@ function bootMain() {
     $("xrEnabled").checked = x.enabled; $("xrHost").value = x.host; $("xrPort").value = x.port; $("xrPass").value = x.password;
     $("xrCs").value = x.cs || (apt ? `${apt.icao}_TWR` : ""); $("xrFreq").value = x.freq || (apt && apt.freq.tower ? fmtFreq(apt.freq.tower.mhz) : "");
     $("xrAi").checked = x.ai; $("xrHumans").checked = x.humans; $("xrText").checked = x.text; $("xrVoice").checked = x.voice;
+    $("xrWeather").value = x.weather || "off"; $("xrAiVoice").checked = x.aiVoice !== false; $("xrAtisVoice").checked = !!x.atisVoice; $("xrTranscribe").checked = !!x.transcribe;
     $("coachToggle").checked = settings.coach;
     renderVoiceTable(); renderEngines();
   }
@@ -871,7 +931,8 @@ function bootMain() {
     if (changedId === "setPreset") { settings.effect = PRESET_EFFECT[settings.preset] ?? settings.effect; $("setEffect").value = settings.effect; }
     settings.xr = { enabled: $("xrEnabled").checked, host: $("xrHost").value.trim() || "127.0.0.1", port: +$("xrPort").value || 49100,
       password: $("xrPass").value, cs: $("xrCs").value.trim().toUpperCase(), freq: $("xrFreq").value.trim(), ai: $("xrAi").checked,
-      humans: $("xrHumans").checked, text: $("xrText").checked, voice: $("xrVoice").checked };
+      humans: $("xrHumans").checked, text: $("xrText").checked, voice: $("xrVoice").checked,
+      weather: $("xrWeather").value, aiVoice: $("xrAiVoice").checked, atisVoice: $("xrAtisVoice").checked, transcribe: $("xrTranscribe").checked };
     save(); applyRadioSettings();
     if (sim) {
       sim.rates = { readbackError: settings.rbErr / 100, sayAgain: settings.sayAgain / 100, oldAtis: settings.oldAtis / 100 };

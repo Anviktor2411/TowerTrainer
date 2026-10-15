@@ -187,6 +187,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, xradio().sync(body))
             if path == "/api/xradio/voice":
                 return self.send(200, {"ok": xradio().send_voice(body.get("khz", 0), body.get("frames", []))})
+            if path == "/api/xradio/voice_pcm":     # a browser without WebCodecs: PCM in, Opus made here
+                return self.send(200, {"ok": xradio().send_voice_pcm(body.get("khz", 0), body.get("pcm", ""))})
+            if path == "/api/xradio/fp":            # the controller answers a real pilot's flight plan
+                return self.send(200, {"ok": xradio().fp_ack(body)})
             return self.send(404, {"error": "unknown endpoint"})
         except Exception as e:
             return self.send(500, {"error": f"{type(e).__name__}: {e}"})
@@ -215,15 +219,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, tts().kokoro_warmup())
         return self.send(404, {"error": "unknown endpoint"})
 
-    def sse_voice(self):
-        """Server-sent events: XRadio voice frames for the browser (WebCodecs Opus decoder)."""
+    def sse_voice(self, pcm=False):
+        """Server-sent events: XRadio voice frames for the browser (WebCodecs Opus decoder), or -- with
+        ?pcm=1 for a browser without WebCodecs -- decoded here to 16-bit 48 kHz PCM (needs av / opuslib)."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         try:
             while True:
-                frames = XR.take_voice() if XR else []
+                frames = XR.take_voice(pcm=pcm) if XR else []
                 if frames:
                     self.wfile.write(b"data: " + json.dumps(frames).encode() + b"\n\n")
                 else:
@@ -266,7 +271,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/xradio/status":
                 return self.send(200, xradio().status())
             if path == "/api/xradio/events":
-                return self.sse_voice()
+                return self.sse_voice(pcm=q.get("pcm") == "1")
             m = re.fullmatch(r"/api/airport/([A-Za-z0-9]{3,7})", path)
             if m:
                 return self.send(200, load_airport(m.group(1)))
@@ -310,7 +315,7 @@ def xradio():
     global XR
     if XR is None:
         import xradio_bridge
-        XR = xradio_bridge.XRadioBridge()
+        XR = xradio_bridge.XRadioBridge(tts=tts, stt=stt)   # the managers, for AI pilot voice and transcripts
     return XR
 
 

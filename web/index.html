@@ -175,9 +175,17 @@
         <label><input type="checkbox" id="xrAi"> AI traffic into X-Plane</label>
         <label><input type="checkbox" id="xrHumans"> Real pilots on my radar</label>
         <label><input type="checkbox" id="xrText"> Text</label>
-        <label><input type="checkbox" id="xrVoice"> Voice (WebCodecs Opus)</label>
+        <label><input type="checkbox" id="xrVoice"> Voice (WebCodecs Opus, or server codec)</label>
       </div>
+      <div class="row">
+        <label>Weather <select id="xrWeather"><option value="off">Separate</option><option value="publish">Publish TowerTrainer's weather to the flight</option><option value="follow">Follow the flight's weather</option></select></label>
+        <label><input type="checkbox" id="xrAiVoice"> AI pilot voices into X-Plane (server Opus)</label>
+        <label><input type="checkbox" id="xrAtisVoice"> ATIS voice loop</label>
+        <label><input type="checkbox" id="xrTranscribe"> Transcribe real pilots (local STT)</label>
+      </div>
+      <div class="row small muted">Server address, join code (K7M2Q-X4PB9) or an in-sim host's address all go in the Server field.</div>
       <div id="xrInfo" class="small muted"></div>
+      <details class="small"><summary>How to fly with TowerTrainer ATC (for XRadio pilots)</summary><ol id="xrHelp"></ol></details>
     </fieldset>
   </div>
   <h3>Voices per nationality</h3>
