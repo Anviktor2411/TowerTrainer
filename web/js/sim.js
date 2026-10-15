@@ -466,6 +466,18 @@ export class Sim {
     a.ifr = fp.rules !== "V";
     a.assignedSq = fp.squawk ? String(fp.squawk).padStart(4, "0") : a.assignedSq;
     a.fpStatus = fp.status || "filed";
+    // S3: what the pilot filed from XRadio (a SimBrief OFP, usually) shows on the strip and goes into EuroScope's $FP
+    if (fp.route) a.route = fp.route;
+    if (fp.altn) a.altn = fp.altn;
+    if (fp.cruise_ft) a.rfl = fp.cruise_ft;
+    const rem = String(fp.remarks || "");
+    if (rem) a.remarks = rem;
+    const eobt = /EOBT\/(\d{4})/.exec(rem), tas = /TAS\/(\d{3,4})/.exec(rem), reg = /REG\/([A-Z0-9]+)/.exec(rem), eq = /EQPT\/(\S+)/.exec(rem);
+    if (eobt) a.eobt = eobt[1];
+    if (tas) a.tas_plan = +tas[1];
+    if (reg) a.reg = reg[1];
+    if (eq) a.equip = eq[1];
+    if (/\bSIMBRIEF\b/.test(rem)) a.simbrief = true;
   }
   humanByCs(cs) { return this.ac.find(x => x.human && x.cs === cs) || null; }
 

@@ -116,6 +116,12 @@ ICAO equipment, cruise level, alternate and `/V/ SIMBRIEF` remarks. Nothing is
 fetched unless you press a button (plus at most one automatic load when a session starts, if ticked), nothing is
 scraped, and the last OFP is cached in `cache/simbrief/` (not committed). `simbrief.py` holds the parser.
 
+**From the cockpit (XRadio v0.6.0):** in X-Plane, XRadio → Flight plan → *Import from SimBrief* fetches
+the same OFP into the plugin (SimBrief username or Pilot ID in XRadio's Settings → SimBrief), lets the pilot
+edit it and *File* it to the controller; the plan arrives on the strip here with route, RFL, alternate,
+EOBT and equipment, and goes into EuroScope's `$FP` with the `SIMBRIEF` remark. The clearance you give
+(squawk, SID, level) shows up in XRadio next to the pilot's plan, with differences marked.
+
 ## Control from the tower in X-Plane
 
 With the XRadio plugin (v0.6.0) you can sit in the tower cab inside X-Plane and work the trainer's traffic

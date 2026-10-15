@@ -480,5 +480,23 @@ eq(ctotStatus(1000, 1700).state, "missed", "CTOT missed");
   ok(b && b.kind === "arr" && b.cs === "TTR123" && b.other[0] === "EETN" && b.star === "ABETI2A" && b.simbrief && !sim.ac.includes(a), "the same OFP as an arrival replaces the earlier spawn, with the STAR");
 }
 
+// ---- S3: a plan filed from XRadio (PT_FLIGHTPLAN, usually a SimBrief import) fills the strip and the EuroScope $FP ----
+{
+  const { sim } = mk();
+  const fp = { session_id: 7, callsign: "ESXYZ", ac_icao: "A320", rules: "I", status: "filed", squawk: 0, dep: "EETN", dest: "EVRA", altn: "EYVI", cruise_ft: 36000,
+    route: "ULGOT1G ULGOT N746 ABETI ABETI2A", remarks: "SIMBRIEF EOBT/0730 TAS/447 REG/ESTTR EQPT/SDE2E3FGHIRWXY/LB1D1" };
+  const h = sim.upsertHuman({ hid: 7, cs: "ESXYZ", type: "A320", pos: sim.ac.length ? sim.ac[0].pos : { x: 0, y: 0 }, alt: 131, hdg: 80, spd: 0, onGround: true, squawk: "2000", xpdr: "S", ai: false, tx: false, fp });
+  ok(h.human && h.other[0] === "EETN" && h.other[1] === "EVRA" && h.cfl === 36000 && h.ifr && h.fpStatus === "filed", "the XRadio plan sets destination, cruise and rules");
+  ok(h.route === "ULGOT1G ULGOT N746 ABETI ABETI2A" && h.altn === "EYVI" && h.rfl === 36000, "route, alternate and RFL come from the plan");
+  ok(h.eobt === "0730" && h.tas_plan === 447 && h.reg === "ESTTR" && h.equip === "SDE2E3FGHIRWXY/LB1D1" && h.simbrief === true, "EOBT, TAS, registration, equipment and the SimBrief mark are read from the remarks");
+  const snap = sim.snapshot().find(x => x.id === h.id);
+  ok(snap && snap.simbrief && snap.route === h.route && snap.eobt === "0730", "the strip snapshot shows the filed route as an OFP");
+  const es = bridgeAircraft(sim, apt).find(x => x.cs === "ESXYZ");
+  ok(es && es.route.includes("N746") && es.rfl === 36000 && es.altn === "EYVI" && es.equip === "SDE2E3FGHIRWXY/LB1D1" && es.eobt === "0730", "the EuroScope bridge carries the XRadio plan");
+  const plain = sim.upsertHuman({ hid: 8, cs: "N771AB", type: "C172", pos: h.pos, alt: 131, hdg: 80, spd: 0, onGround: true, squawk: "7000", xpdr: "S", ai: false, tx: false,
+    fp: { session_id: 8, callsign: "N771AB", ac_icao: "C172", rules: "V", status: "filed", squawk: 0, dep: "EETN", dest: "EEPU", altn: "", cruise_ft: 2500, route: "DCT", remarks: "" } });
+  ok(!plain.simbrief && !plain.eobt && plain.route === "DCT" && !plain.ifr, "a plain VFR plan without remarks stays plain");
+}
+
 console.log(fails ? `${fails} FAILED of ${n}` : `ALL ${n} PASSED`);
 process.exit(fails ? 1 : 0);
