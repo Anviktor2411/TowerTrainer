@@ -261,11 +261,18 @@ class FSDServer:
                 f"{int(a.get('alt', 0))}:{int(a.get('gs', 0))}:{pbh(0, 0, a.get('hdg', 0), a.get('onGround'))}:0")
 
     def _fp_line(self, a):
-        typ = f"{a.get('type', 'ZZZZ')}/{a.get('wtc', 'M')}-SDE2E3FGHIJ1RWY/LB1"
+        """The flight plan for EuroScope. A SimBrief flight (S2) carries its own equipment, cruise level, alternate,
+        EOBT and remarks ("/V/ SIMBRIEF ..."), so the flight plan window shows the real plan."""
+        equip = a.get("equip") or "SDE2E3FGHIJ1RWY/LB1"
+        typ = f"{a.get('type', 'ZZZZ')}/{a.get('wtc', 'M')}-{equip}"
         rules = "V" if a.get("vfr") else "I"
-        alt = int(a.get("cfl") or 5000)
-        return (f"$FP{a['cs']}:*A:{rules}:{typ}:{int(a.get('tas', 250))}:{a.get('dep', '')}:0000:0000:{alt}:"
-                f"{a.get('dest', '')}:01:30:03:00:{a.get('altn', '')}:/V/ TowerTrainer:{a.get('route', '')}")
+        alt = int(a.get("rfl") or a.get("cfl") or 5000)
+        tas = int(a.get("tas_plan") or a.get("tas") or 250)
+        eobt = a.get("eobt") or "0000"
+        rmk = ("/V/ SIMBRIEF " + str(a.get("remarks") or "")).strip() if a.get("simbrief") else "/V/ TowerTrainer"
+        rmk = rmk.replace(":", " ")
+        return (f"$FP{a['cs']}:*A:{rules}:{typ}:{tas}:{a.get('dep', '')}:{eobt}:{eobt}:{alt}:"
+                f"{a.get('dest', '')}:01:30:03:00:{a.get('altn', '')}:{rmk}:{str(a.get('route', '')).replace(':', ' ')}")
 
     def sync(self, aircraft, transmissions=()):
         """Called by the HTTP server with the browser's state. Returns messages for the browser."""

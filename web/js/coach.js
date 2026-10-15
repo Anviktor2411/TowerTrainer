@@ -39,6 +39,10 @@ const T = {
     wakeWait: (cs, s) => `wake turbulence behind ${cs} (heavy): ${s} s more before a lighter departure (ICAO 4444 §5.8, 2 min).`,
     spacing: (cs, nm, need) => `${nm} nm behind ${cs}, ${need} nm needed — reduce speed or break off the approach.`,
     rwyBusy: (cs) => `${cs} still on the runway with the next landing close — expedite vacating or send around.`,
+    planDest: (d) => `The filed plan goes to ${d} — the clearance limit should match the flight plan.`,
+    planSid: (s) => `The OFP plans SID ${s}; a different departure is fine if it fits the runway, but say so clearly.`,
+    planLevel: (l) => `Cleared above the filed cruise level (${l} ft) — the initial climb is normally below it.`,
+    planOk: "Clearance matches the filed plan (destination, SID, level).",
   },
   et: {
     noCallsign: "Kutsung puudub — alusta iga saadet kutsungiga.",
@@ -71,6 +75,10 @@ const T = {
     wakeWait: (cs, s) => `jälgturbulents ${cs} (heavy) järel: veel ${s} s enne kergema väljumist (ICAO 4444 §5.8, 2 min).`,
     spacing: (cs, nm, need) => `${nm} NM ${cs} taga, vaja ${need} NM — vähenda kiirust või katkesta lähenemine.`,
     rwyBusy: (cs) => `${cs} on veel rajal ja järgmine maanduja lähedal — kiirenda vabastamist või saada kordusringile.`,
+    planDest: (d) => `Esitatud plaan läheb ${d} — loa piir peab plaaniga klappima.`,
+    planSid: (s) => `OFP-s on SID ${s}; teine väljumine sobib, kui see on selle raja oma, aga ütle see selgelt.`,
+    planLevel: (l) => `Luba on üle esitatud reisilennutasandi (${l} ft) — algne tõus on tavaliselt sellest madalamal.`,
+    planOk: "Luba klapib esitatud plaaniga (sihtkoht, SID, tasand).",
   },
 };
 
@@ -103,6 +111,15 @@ export function coach({ text, parsed, sim, pos, lang = "en" }) {
     if (i.t === "lineup" && !i.rwy) warn(L.lineupRwy, ref.twr);
     if (i.t === "taxi" && !i.rwy && !/holding point/.test(s)) warn(L.taxiLimit, ref.twr);
     if (i.t === "clearance") {
+      if (ac.plan) {   // S2: the clearance against the pilot's filed (SimBrief) plan
+        const pd = (ac.plan.destination || {}).icao || "", ps = ac.plan.sid || "", pl = ac.plan.initial_alt_ft || 0;
+        let fine = true;
+        if (i.dest && pd && String(i.dest).toUpperCase() !== pd && !String(ac.other && ac.other[1] || "").toLowerCase().startsWith(String(i.dest).toLowerCase())) { warn(L.planDest(pd), ref.del); fine = false; }
+        if (i.sid && ps && i.sid !== "flight planned route" && String(i.sid).toUpperCase().replace(/ DEPARTURE$/, "") !== ps.toUpperCase()) { info(L.planSid(ps), ref.del); fine = false; }
+        const clearedFt = (() => { const m = String(i.alt || "").match(/flight level (\d+)/); if (m) return +m[1] * 100; const n = parseInt(String(i.alt || ""), 10); return isNaN(n) ? 0 : n; })();
+        if (clearedFt && pl && clearedFt > pl) { warn(L.planLevel(pl), ref.del); fine = false; }
+        if (fine && i.dest) info(L.planOk, ref.del);
+      }
       if (!i.dest) warn(L.clrDest, ref.del);
       if (!i.squawk) warn(L.clrSq, ref.del);
       if (!i.alt) warn(L.clrAlt, ref.del);

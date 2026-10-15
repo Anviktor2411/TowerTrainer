@@ -397,6 +397,51 @@ export class Sim {
     return f;
   }
 
+  /**
+   * The pilot's own SimBrief flight (S2) as traffic, with exactly the OFP's data: callsign, type, registration,
+   * a stand that fits, destination, route, SID (if it is one of this runway's), cruise level, EOBT as the TOBT.
+   * kind: "dep" when the OFP leaves this airport, "arr" when it arrives here.
+   */
+  spawnFromPlan(plan, kind = "dep") {
+    if (!plan || !plan.callsign) return null;
+    const icao = plan.aircraft.type || "A320";
+    const known = TYPES.find(t => t[0] === icao);
+    const ty = known || [icao, plan.aircraft.wtc || "M", plan.aircraft.wtc === "H" ? "heavy" : "jets", plan.aircraft.wtc === "L" ? 100 : 140];
+    const airline = plan.airline || plan.callsign.slice(0, 3);
+    const mixAl = this.mix && this.mix.airlines.find(a => a.icao === airline);
+    const tel = (mixAl && mixAl.tel) || (AIRLINES.find(a => a[0] === airline) || [])[1] || airline;
+    const nat = AIRLINE_NAT[airline] ? weighted(AIRLINE_NAT[airline]) : (mixAl && mixAl.nat) || "GB";
+    const existing = this.ac.find(a => a.cs === plan.callsign);
+    if (existing) this.ac.splice(this.ac.indexOf(existing), 1);
+    const far = kind === "dep" ? plan.destination : plan.origin;
+    const other = [far.icao || "ZZZZ", far.name ? far.name.split(" ")[0].replace(/^\w/, c => c.toUpperCase()).replace(/[A-Z]{2,}/g, w => w[0] + w.slice(1).toLowerCase()) : far.icao, far.lat || 0, far.lon || 0];
+    const f = { id: nextId++, cs: plan.callsign, tel, num: plan.flight_number || plan.callsign.replace(/^[A-Z]{3}/, ""), type: ty[0], wtc: ty[1], appSpd: ty[3] * KT, other, cargo: false, crossOk: new Set(), log: [] };
+    this.crewFor(f, nat);
+    const planned = { plan, reg: plan.aircraft.reg || "", equip: plan.aircraft.equip || "", route: plan.route || "", rfl: plan.initial_alt_ft || 0, planSid: plan.sid || "", planStar: plan.star || "",
+      eobt: plan.times && plan.times.eobt ? plan.times.eobt.hhmm : "", altn: plan.alternate ? plan.alternate.icao : "", remarks: plan.remarks || "", simbrief: true };
+    if (kind === "dep") {
+      let st = this.freeStands().find(s => standFits(s, ty)) || this.freeStands()[0] || this.freeStands(["gate", "misc"], false, true)[0];
+      if (!st) return null;
+      const placed = this.placeParked(f, st, false);
+      Object.assign(placed, planned, { callAt: this.t + rint(8, 20), sid: null });   // the SID comes with the clearance (suggested from the OFP when it fits the runway)
+      this.assignSlot(placed);
+      this.onEvent({ type: "planFlight", ac: placed });
+      return placed;
+    }
+    const e = this.arrEnd;
+    const spawnD = this.hasPos("APP") ? APP_SPAWN : FINAL_SPAWN;
+    const pos = [e.thr[0] - e.v[0] * spawnD, e.thr[1] - e.v[1] * spawnD];
+    const sq = this.squawks.next(this.t);
+    const stand = this.freeStands().find(s => standFits(s, ty)) || this.freeStands()[0] || null;
+    Object.assign(f, planned, { kind: "arr", state: "final", pos, hdg: e.hdg, spd: f.appSpd, alt: 0, onGround: false, end: e, landClr: false, squawk: sq, assignedSq: sq, xpdr: "C", ifr: true,
+      callAt: this.t + rint(3, 10), stand, cfl: 6000, freq: this.split ? (this.hasPos("APP") ? "APP" : "TWR") : "ALL", star: plan.star || "" });
+    f.alt = this.arrAlt(f);
+    this.ac.push(f);
+    this.onEvent({ type: "spawn", ac: f });
+    this.onEvent({ type: "planFlight", ac: f });
+    return f;
+  }
+
   /** Real pilots (XRadio): placed and moved from outside, never by the sim. */
   upsertHuman(h) {
     let a = this.ac.find(x => x.human && x.hid === h.hid);
@@ -2132,6 +2177,7 @@ export class Sim {
       heli: !!a.heli, touchGo: !!a.touchGo, circuits: a.circuits || 0, wants: a.wants || "", rwyChanged: !!a.rwyChanged, giveWay: a.giveWay && a.giveWay.ac ? a.giveWay.ac.cs : "",
       fpStatus: a.fpStatus || "", liveTx: !!a.tx, liveAi: !!a.ai,
       handoff: a.handoff ? { from: a.handoff.from, to: a.handoff.to, accepted: !!a.handoff.accepted, age: Math.round(this.t - a.handoff.t), by: a.handoff.by || "" } : null,
+      simbrief: !!a.simbrief, route: a.route || "", rfl: a.rfl || 0, eobt: a.eobt || "", reg: a.reg || "", planSid: a.planSid || "",
     }));
   }
 

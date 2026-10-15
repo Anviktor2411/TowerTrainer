@@ -216,3 +216,7 @@ body.board .guestbar { font-size: 15px; } body.board .posTabs .tab { font-size: 
 .scen .lvl { display: inline-block; min-width: 18px; text-align: center; border: 1px solid var(--line); border-radius: 9px; font-size: 10px; margin-right: 6px; color: var(--muted); }
 .scenform { display: grid; grid-template-columns: repeat(4, auto); gap: 6px 12px; font-size: 12px; } .scenform label { display: flex; flex-direction: column; gap: 2px; } .scenform .wide { grid-column: 1 / -1; }
 .result.pass { color: var(--atc); font-weight: 600; } .result.fail { color: var(--warn); font-weight: 600; }
+.ofpp { flex: 0 1 auto; max-height: 45%; border-bottom: 1px solid var(--line); } .ofpp h3 .inline { font-weight: normal; letter-spacing: 0; text-transform: none; margin-left: 8px; }
+.ofp { font-size: 12px; } .ofphead { margin-bottom: 4px; } .ofphead b { color: var(--atc); }
+.ofprow { display: grid; grid-template-columns: 64px 1fr; gap: 2px 8px; padding: 2px 0; border-top: 1px solid #18222c; } .ofprow > span:first-child { color: var(--muted); }
+.ofp .mono { font: 11px ui-monospace, Consolas, monospace; white-space: pre-wrap; } .ofp .warn { color: var(--warn); } .ofp details { margin-top: 4px; } .ofp summary { cursor: pointer; color: var(--muted); }

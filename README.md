@@ -98,6 +98,35 @@ EuroScope and XRadio with a green/red light and a fix line each. Nothing is writ
 shows, nothing is overwritten without ticking "allow overwriting", every action has a dry run, and `setup.log`
 keeps the record. `python server.py` on another PC does not expose the wizard.
 
+## SimBrief: your real flight plan in the trainer
+
+Settings → SimBrief: your SimBrief username or Pilot ID (kept in this browser only) and the units. The **OFP**
+button opens the panel: *Fetch latest OFP* asks SimBrief's documented API for your latest flight
+(`xml.fetcher.php?username=…&json=1`; HTTP 400 means an unknown user or no flight planned yet, and the panel
+says so), *Plan on SimBrief* opens SimBrief's own new-flight page (with an API key from SimBrief support it uses
+the official API form flow instead), *Import JSON* loads an OFP file you downloaded by hand. The panel shows the
+callsign, type and registration, planned runways, SID/STAR and route, level and step climbs, times, fuel, weights
+against their limits, equipment, the ICAO flight-plan string, every waypoint with wind and time, the METAR/TAF at
+both ends and the link to the full OFP; the route is drawn on the Tower/Approach/Centre pictures. **Add my
+flight** spawns the OFP as a departure (when the trainer's airport is its origin) or an arrival (its destination)
+with exactly the plan's data — callsign, type, registration, a stand that fits, route, SID when it is one of the
+runway's, cruise level, the EOBT — so Delivery can give a clearance that matches the real plan; the coach
+compares your clearance with it (destination, SID, level), and EuroScope receives it as a full `$FP` with the
+ICAO equipment, cruise level, alternate and `/V/ SIMBRIEF` remarks. Nothing is
+fetched unless you press a button (plus at most one automatic load when a session starts, if ticked), nothing is
+scraped, and the last OFP is cached in `cache/simbrief/` (not committed). `simbrief.py` holds the parser.
+
+## Control from the tower in X-Plane
+
+With the XRadio plugin (v0.6.0) you can sit in the tower cab inside X-Plane and work the trainer's traffic
+from there. `server.py` opens a *tower link* on `127.0.0.1:8781` (`--tower-port 0` to switch it off,
+`--host 0.0.0.0` for another PC's X-Plane); tick Settings → XRadio → **X-Plane tower link** so the trainer's
+window hosts a session with the code `TOWER`, then Plugins → XRadio → *Tower mode* in X-Plane. The plugin
+is a remote controller of that session: it gets the same state as a pop-out window and sends back
+transmissions, strip acceptances and operations (LVP, runway, stop bars). The trainer stays the authority;
+the plugin only shows and asks. The setup wizard installs the plugin; details in XRadio's
+`docs/tower-mode.md`.
+
 ## Several controllers, several screens
 
 * **Windows** – any position, or a single panel of it (radar, strips, log, Delivery list, weather, sequence,
@@ -148,4 +177,6 @@ python tests/ws_test.py                       # the multiplayer relay (WebSocket
 node tests/firefox.mjs                        # the same page in headless Firefox over WebDriver BiDi (TT_BROWSER=edge runs browser.test in Edge)
 python tests/sector_test.py                   # generated EuroScope .sct/.ese/.asr/.prf for EETN and EGSS parse back
 python tests/setup_test.py                    # the setup wizard on a temporary folder, dry runs, its HTTP API
+python tests/towerlink_test.py                # the X-Plane tower link: hello, airport line, claims, transmissions, ops
+python tests/simbrief_test.py                 # the SimBrief OFP parser on a made-up fixture, fetch errors, cache, plan links
 ```

@@ -14,7 +14,9 @@ export function bridgeAircraft(sim, apt, { ownOnly = false } = {}) {
       cs: a.cs, squawk: a.squawk || "2000", mode: a.xpdr || "C", ident: !!a.identUntil, lat, lon, alt: Math.round(altFt),
       alt_m: altFt * FT_M, gs: Math.round(a.spd / 0.514444), gs_ms: a.spd, hdg: a.hdg, onGround: !!a.onGround, on_ground: !!a.onGround,
       type: a.type, wtc: a.wtc, dep: a.kind === "arr" ? a.other[0] : apt.icao, dest: a.kind === "arr" ? apt.icao : (a.other[0] === "VFR" ? "" : a.other[0]),
-      route: a.sid ? `${a.sid} DCT` : "DCT", cfl: a.cfl || 5000, tas: a.ga ? 110 : 280, vfr: !!a.ga, nat: a.nat || "",
+      route: a.route ? (a.sid ? `${a.sid} ${a.route}` : a.route) : (a.sid ? `${a.sid} DCT` : "DCT"), cfl: a.cfl || 5000, tas: a.ga ? 110 : 280, vfr: !!a.ga, nat: a.nat || "",
+      simbrief: !!a.simbrief, equip: a.equip || "", rfl: a.rfl || 0, altn: a.altn || "", remarks: a.remarks || "", eobt: a.eobt || "", reg: a.reg || "",
+      tas_plan: a.plan && a.plan.cruise_tas ? a.plan.cruise_tas : 0,
       xpdr: a.xpdr || "C", khz: pos ? Math.round(pos.mhz * 1000) : 0, human: !!a.human,
     };
   });

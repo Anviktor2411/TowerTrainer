@@ -76,6 +76,8 @@ if f:
     check(abs(((word >> 2) & 0x3FF) * 360 / 1024 - 263) < 1, "heading encoded in pbh")
 fp = es.find("$FPFIN321:*A:I:A320/M-")
 check(bool(fp) and ":EETN:" in fp[0] and ":EFHK:" in fp[0] and fp[0].endswith(":DCT"), "flight plan $FP: " + (fp[0] if fp else "none"))
+sb = srv._fp_line({"cs": "TTR123", "type": "A320", "wtc": "M", "dep": "EETN", "dest": "EVRA", "cfl": 5000, "simbrief": True, "equip": "SDE2E3FGHIRWXY/LB1D1", "rfl": 36000, "altn": "EYVI", "eobt": "0730", "tas_plan": 447, "remarks": "PBN/A1B1 REG/ESTTR", "route": "ULGOT1G ULGOT N746 ABETI ABETI2A"})
+check(sb.startswith("$FPTTR123:*A:I:A320/M-SDE2E3FGHIRWXY/LB1D1:447:EETN:0730:0730:36000:EVRA:") and ":EYVI:/V/ SIMBRIEF PBN/A1B1 REG/ESTTR:ULGOT1G ULGOT N746 ABETI ABETI2A" in sb, "a SimBrief flight files its OFP equipment, level, alternate, EOBT and remarks: " + sb)
 tm = es.find("#TMFIN321:@35905:")
 check(bool(tm) and "ready for departure" in tm[0], "pilot transmission as #TM on @35905")
 

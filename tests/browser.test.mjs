@@ -3,6 +3,7 @@
 //   node tests/browser.test.mjs [outDir]      (server.py must be running on :8780)
 import { launch, sleep } from "./cdp.mjs";
 import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const OUT = process.argv[2] || join(tmpdir(), "tt-browser");
@@ -87,14 +88,22 @@ try {
   ok(await p.waitFor(`!TT.mp.roster.some(r => r.name === "liisa")`, 8000), "the host learns the guest left");
   await p.eval(`TT.mp.stop()`);
   ok(await p.eval(`!TT.sim.remoteStaff.GND && !TT.mp.relay && !TT.sim.userWorks("GND")`), "stopping the session gives the claimed position back to the AI");
-  // a single panel of a position in its own window
+  // the X-Plane tower link setting hosts a session with the fixed code TOWER when a simulation starts
+  await p.eval(`TT.settings.xr.tower = true; TT.applyStaffing("split", ["TWR"])`);
+  ok(await p.waitFor(`TT.mp.relay && TT.mp.role === "host" && TT.mp.relay.code === "TOWER"`, 10000), "the X-Plane tower link setting hosts session TOWER automatically");
+  const tl = await p.eval(`fetch("/api/tower/status").then(r => r.json())`);
+  ok(tl && tl.enabled && tl.port === 8781, "the server's tower link is listening on 8781");
+  await p.eval(`TT.settings.xr.tower = false; TT.mp.stop()`);
+  // a single panel of a position in its own window (with a departure on Tower so the board has a strip)
+  await p.eval(`(() => { const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture({ ga: false }); if (d && !d.ga) { d.freq = "TWR"; d.state = "holding"; d.depEnd = s.depEnd; d.onGround = true; break; } if (d) s.putBack(d); } })()`);
   const pp = await br.newPage("http://localhost:8780/?popout=TWR&panel=strips&icao=EETN");
   await p.send("Page.bringToFront");
   ok(await pp.waitFor("window.TT && TT.state && document.body.classList.contains('panel-only') && document.querySelectorAll('#stripBoard .strip').length > 0 && getComputedStyle(document.querySelector('.scope')).display === 'none'", 15000), "panel-only pop-out shows just the strips " + pp.errors.join(" | "));
   ok(pp.errors.length === 0, "panel pop-out has no JS errors");
   pp.close();
   await p.send("Page.bringToFront");
-  // ---- F2: autocomplete on the command line (Tab accepts) ----
+  // ---- F2: autocomplete on the command line (Tab accepts); a departure is put on my Tower frequency first ----
+  await p.eval(`(() => { const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture({ ga: false }); if (d && !d.ga) { d.freq = "TWR"; d.state = "holding"; d.depEnd = s.depEnd; d.onGround = true; break; } if (d) s.putBack(d); } })()`);
   await p.eval(`(() => { const c = document.getElementById("cmd"); c.value = ""; c.focus(); c.dispatchEvent(new Event("input", { bubbles: true })); })()`);
   ok(await p.waitFor(`!document.getElementById("suggest").classList.contains("hidden") && document.querySelectorAll("#suggest div").length > 0`, 3000), "an empty command line suggests the callsigns on my frequency");
   await p.eval(`document.getElementById("cmd").dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }))`);
@@ -135,6 +144,20 @@ try {
   ok(wz.errors.length === 0, "wizard page has no JS errors " + wz.errors.join(" | "));
   await wz.send("Page.navigate", { url: "about:blank" }); wz.close();
   await p.send("Page.bringToFront");
+
+  // ---- S1: the SimBrief OFP panel from an imported (made-up) OFP ----
+  const fixture = readFileSync(new URL("./fixtures/simbrief_ofp.json", import.meta.url), "utf8");
+  const imp = await p.eval(`fetch("/api/simbrief/import", { method: "POST", headers: { "Content-Type": "application/json" }, body: ${JSON.stringify(fixture)} }).then(r => r.json())`);
+  ok(imp.plan && imp.plan.callsign === "TTR123", "an OFP JSON imports through the server");
+  await p.eval(`document.getElementById("ofpBtn").click()`);
+  ok(await p.waitFor(`!document.getElementById("ofpPanel").classList.contains("hidden") && /TTR123/.test(document.getElementById("ofpBody").innerText) && /ULGOT N746 ABETI/.test(document.getElementById("ofpBody").innerText) && /FL360/.test(document.getElementById("ofpBody").innerText) && /EETN 150620Z/.test(document.getElementById("ofpBody").innerText)`, 8000), "the OFP panel shows the plan: callsign, route, level, weather");
+  await p.eval(`TT.setView("APP")`); await sleep(400);
+  ok(await p.eval(`TT.radar.flightRoute.length >= 7 && TT.radar.flightRoute.some(f => f.id === "ULGOT")`), "the route is drawn on the radar picture");
+  await p.eval(`document.getElementById("ofpAdd").click()`); await sleep(400);
+  ok(await p.eval(`TT.sim.ac.some(a => a.cs === "TTR123" && a.simbrief && a.kind === "dep" && a.rfl === 36000)`), "Add my flight spawns the OFP's departure (EETN is its origin)");
+  await p.eval(`TT.setActive("DEL")`); await sleep(700);
+  ok(await p.waitFor(`!!document.querySelector('#stripBoard .strip .w[title*="OFP route"]')`, 8000), "its strip shows the OFP badge with the route and TOBT");
+  await p.eval(`TT.setActive("TWR"); document.getElementById("ofpHide").click(); TT.setView("TWR")`);
 
   // ---- Delivery view, plain-language labels, info panel, light signals, voice status ----
   await p.eval(`TT.setView("DEL")`); await sleep(500);

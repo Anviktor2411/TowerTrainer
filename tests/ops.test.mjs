@@ -13,6 +13,8 @@ import { defaultVfrPoints } from "../web/js/vfr.js";
 import { buildPositions } from "../web/js/positions.js";
 import { incomingFor } from "../web/js/strips.js";
 import { suggestions } from "../web/js/autocomplete.js";
+import { bridgeAircraft } from "../web/js/bridges.js";
+import { coach } from "../web/js/coach.js";
 
 let seed = 11;
 Math.random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
@@ -450,6 +452,32 @@ eq(ctotStatus(1000, 1700).state, "missed", "CTOT missed");
   ok(s2.length > 0 && s2.every(x => /cleared for/.test(x.hint)) && s2.some(x => /cleared for takeoff/.test(x.insert)), "typing 'cleared for' narrows to the takeoff clearances: " + s2.map(x => x.hint).join(" | "));
   const s3 = suggestions({ text: `${d4.cs} `, sim, pos: "TWR", selected: null, app: null });
   ok(s3.some(x => /next expected/.test(x.label)) && s3.some(x => /line up and wait/.test(x.hint)), "after the callsign: the next expected call and the usual options");
+}
+
+// ---- S2: the pilot's SimBrief flight as traffic, the clearance against the plan, the EuroScope flight plan ----
+{
+  const plan = JSON.parse(readFileSync(new URL("./fixtures/simbrief_plan.json", import.meta.url), "utf8"));   // simbrief.parse() of the made-up OFP (kept in sync by simbrief_test.py)
+  const { sim } = mk();
+  const a = sim.spawnFromPlan(plan, "dep");
+  ok(a && a.cs === "TTR123" && a.type === "A320" && a.wtc === "M" && a.reg === "ESTTR" && a.kind === "dep" && a.state === "parked" && a.simbrief, "the OFP spawns a parked departure with the callsign, type and registration");
+  ok(a.other[0] === "EVRA" && a.route === "DCT ULGOT N746 ABETI DCT" && a.rfl === 36000 && a.eobt === "0730" && a.planSid === "ULGOT1G" && a.altn === "EYVI" && a.equip === "SDE2E3FGHIRWXY/LB1D1", "destination, route, RFL, EOBT as TOBT, planned SID, alternate and equipment carried over");
+  ok(a.stand && a.stand.types && (a.stand.types.includes("jets") || a.stand.types.includes("heavy")), "on a stand that fits an A320: " + (a.stand && a.stand.name));
+  ok(a.num === "123" && a.tel === "TTR" && !!a.crew, "flight number and a telephony fallback for an unknown airline");
+  const snap = sim.snapshot().find(x => x.id === a.id);
+  ok(snap.simbrief && snap.route === a.route && snap.rfl === 36000 && snap.eobt === "0730" && snap.reg === "ESTTR", "the strip snapshot carries the OFP markers");
+  const es = bridgeAircraft(sim, apt).find(x => x.cs === "TTR123");
+  ok(es.simbrief && es.equip === "SDE2E3FGHIRWXY/LB1D1" && es.rfl === 36000 && es.altn === "EYVI" && es.eobt === "0730" && es.route === "DCT ULGOT N746 ABETI DCT" && es.dest === "EVRA" && es.remarks.includes("REG/ESTTR") && es.tas_plan === 447, "the EuroScope bridge gets equipment, RFL, alternate, EOBT, route and remarks");
+  const say = (text) => coach({ text, parsed: parse(text, sim.ac, a), sim, pos: "DEL", lang: "en" });
+  const okClr = say("TTR123 cleared to EVRA via ULGOT1G departure climb 5000 squawk 4521");
+  ok(okClr.some(x => /matches the filed plan/.test(x.msg)) && !okClr.some(x => x.level === "warn"), "a clearance matching the plan is confirmed by the coach");
+  const wrongDest = say("TTR123 cleared to EFHK via ULGOT1G departure climb 5000 squawk 4521");
+  ok(wrongDest.some(x => x.level === "warn" && /EVRA/.test(x.msg)), "a clearance to the wrong destination is flagged against the plan");
+  const highLevel = say("TTR123 cleared to EVRA via ULGOT1G departure climb flight level 380 squawk 4521");
+  ok(highLevel.some(x => x.level === "warn" && /36000/.test(x.msg)), "a clearance above the filed level is flagged");
+  const otherSid = say("TTR123 cleared to EVRA via LAPSA2B departure climb 5000 squawk 4521");
+  ok(otherSid.some(x => x.level === "info" && /ULGOT1G/.test(x.msg)), "a different SID than the OFP's is pointed out");
+  const b = sim.spawnFromPlan(plan, "arr");
+  ok(b && b.kind === "arr" && b.cs === "TTR123" && b.other[0] === "EETN" && b.star === "ABETI2A" && b.simbrief && !sim.ac.includes(a), "the same OFP as an arrival replaces the earlier spawn, with the STAR");
 }
 
 console.log(fails ? `${fails} FAILED of ${n}` : `ALL ${n} PASSED`);

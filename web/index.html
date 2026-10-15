@@ -26,6 +26,7 @@
   <button id="mpBtn" type="button" class="main-only" title="Host a session or join one (Alt+M)">Multiplayer</button>
   <button id="icBtn" type="button" class="main-only small" title="Intercom to the other controllers: hold (or Alt+Shift)">🎧</button>
   <button id="chartsBtn" type="button" class="main-only" title="SIDs, STARs, approaches and chart links for this airport">Charts</button>
+  <button id="ofpBtn" type="button" class="main-only" title="Your SimBrief flight plan (OFP)">OFP</button>
   <button id="helpBtn" type="button">Phraseology</button>
   <span id="navPill" class="pill hidden" title="Navigation data (SID/STAR source and AIRAC cycle)">NAV: –</span>
   <span id="voicePill" class="pill main-only" title="Voice engine that is speaking">Voices: …</span>
@@ -69,6 +70,7 @@
     </div>
     <div class="panel acinfo hidden" id="acInfo"></div>
     <div class="panel coordp hidden" id="coordPanel"></div>
+    <div class="panel ofpp hidden" id="ofpPanel"><h3>SimBrief OFP <span class="inline"><button type="button" id="ofpFetch" class="small" title="Fetch your latest OFP from SimBrief (the official API)">Fetch latest OFP</button> <button type="button" id="ofpPlan" class="small" title="Plan a new flight on SimBrief">Plan on SimBrief ↗</button> <button type="button" id="ofpImport" class="small" title="Load an OFP JSON file you downloaded from SimBrief">Import JSON</button> <button type="button" id="ofpAdd" class="small" title="Spawn my SimBrief flight as a departure or an arrival with exactly the OFP data">Add my flight</button><input type="file" id="ofpFile" accept=".json" class="hidden"> <button type="button" id="ofpHide" class="small">Hide</button></span></h3><div id="ofpBody"></div></div>
     <div class="panel strips" id="stripBoard"></div>
     <div class="panel chat hidden" id="chatPanel"><h3>Controllers' chat <button type="button" id="coordBtn" class="small" title="Coordination request to another position">☎ Coordinate</button></h3><div id="chatLog"></div><form id="chatForm"><input id="chatIn" placeholder="message to the other controllers" autocomplete="off"></form></div>
     <div class="panel log"><h3 id="logTitle">Frequency</h3><div id="log"></div></div>
@@ -192,6 +194,13 @@
       <div class="row small muted">Install: <code>pip install edge-tts</code> (free, unofficial) · <code>pip install piper-tts</code> + download a voice below (offline) · Azure key (free tier) · the browser's own voices are the last fallback.</div>
       <div id="piperList" class="small"></div>
     </fieldset>
+    <fieldset><legend>SimBrief — optional</legend>
+      <label>Username or Pilot ID <input id="sbUser" size="14" placeholder="e.g. 999999" autocomplete="off"></label>
+      <label>Units <select id="sbUnits"><option value="kg">kg</option><option value="lb">lb</option></select></label>
+      <label><input type="checkbox" id="sbAuto"> Load my OFP when a session starts (one fetch at most)</label>
+      <label title="Only needed to create flight plans through the API; SimBrief support issues keys. Without one the Plan button opens SimBrief's own page."><input id="sbKey" size="14" placeholder="API key (optional)" autocomplete="off"></label>
+      <div class="small muted">Stored in this browser only. Fetching happens when you press a button (SimBrief's documented xml.fetcher API); nothing is scraped.</div>
+    </fieldset>
     <fieldset class="span2"><legend>XRadio (X-Plane multiplayer &amp; radio) — optional</legend>
       <label><input type="checkbox" id="xrEnabled"> Connect to an XRadio server</label>
       <div class="row">
@@ -214,6 +223,7 @@
         <label><input type="checkbox" id="xrAiVoice"> AI pilot voices into X-Plane (server Opus)</label>
         <label><input type="checkbox" id="xrAtisVoice"> ATIS voice loop</label>
         <label><input type="checkbox" id="xrTranscribe"> Transcribe real pilots (local STT)</label>
+        <label title="Hosts a multiplayer session with the code TOWER that the XRadio plugin's Tower mode joins (server.py --tower-port, default 8781)"><input type="checkbox" id="xrTower"> X-Plane tower link (session code TOWER)</label>
       </div>
       <div class="row small muted">Server address, join code (K7M2Q-X4PB9) or an in-sim host's address all go in the Server field.</div>
       <div id="xrInfo" class="small muted"></div>

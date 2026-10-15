@@ -10,6 +10,7 @@ import { renderStrips, incomingFor } from "./strips.js";
 import { suggestions } from "./autocomplete.js";
 import { Relay, Intercom } from "./remote.js";
 import { Ptt } from "./speech.js";
+import { fetchOfp, importOfp, planUrl, renderOfp, routePoints } from "./simbrief.js";
 import { BUILTIN, WX_CHOICES, allScenarios, findScenario, saveScenario, deleteScenario, exportScenarios, importScenarios, normalize, scenarioSettings, evaluate, career, recordResult, levelOpen, history as sessionHistory, addHistory, overallScore, sparkline } from "./career.js";
 import { Recorder, frameAircraft, download, logsAsText } from "./replay.js";
 import { coach, coachHints } from "./coach.js";
@@ -45,7 +46,8 @@ const DEFAULTS = {
   nick: "", layouts: {}, layout: "", chartsUrl: "",
   staff: { mode: "combined", keys: ["TWR"] },
   xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false,
-    weather: "off", aiVoice: true, atisVoice: false, transcribe: false },
+    weather: "off", aiVoice: true, atisVoice: false, transcribe: false, tower: false },
+  simbrief: { user: "", units: "kg", apiKey: "", autoFetch: true },
 };
 
 const radar = new Radar($("radar"));
@@ -59,6 +61,7 @@ function bootMain() {
   const settings = { ...DEFAULTS, ...store.get("tt.settings", {}) };
   settings.staff = { ...DEFAULTS.staff, ...(settings.staff || {}) };
   settings.xr = { ...DEFAULTS.xr, ...(settings.xr || {}) };
+  settings.simbrief = { ...DEFAULTS.simbrief, ...(settings.simbrief || {}) };
   const save = () => store.set("tt.settings", settings);
   const radio = new Radio();
   let sim = null, apt = null, positions = null, metar = null, speed = 1, selectedId = null, procs = null, navInfo = null;
@@ -171,6 +174,9 @@ function bootMain() {
     loadProcedures(icao);
     loadTraffic(icao);
     loadOsm(icao);
+    // the pilot's OFP: the cached one, or at most one automatic fetch per page load when none is cached
+    if (settings.simbrief.user && settings.simbrief.autoFetch && !ofpAutoDone) { ofpAutoDone = true; loadOfp(false).then(p => { if (!p) loadOfp(true); }); }
+    else if (ofp) renderOfpPanel();
   }
 
   /** Airlines and destinations that really serve the airport (OpenFlights, cached by the server). */
@@ -226,6 +232,61 @@ function bootMain() {
     } catch { /* remote player: procedures are host-only */ }
     applyProcs();
   }
+  // ---------- S1: the pilot's SimBrief OFP ----------
+  let ofp = null, ofpAutoDone = false;
+  function renderOfpPanel() { $("ofpBody").innerHTML = renderOfp(ofp, { user: settings.simbrief.user }); radar.setFlightRoute(routePoints(ofp, apt)); }
+  async function loadOfp(refresh) {
+    const user = settings.simbrief.user;
+    $("ofpPanel").classList.remove("hidden");
+    if (refresh && !user) { sysLog("SimBrief: enter your username or pilot ID in Settings → SimBrief."); renderOfpPanel(); return null; }
+    try {
+      const p = await fetchOfp({ user, refresh });
+      if (p) { ofp = p; sysLog(`SimBrief OFP ${refresh ? "fetched" : "loaded"}: ${p.callsign} ${p.aircraft.type} ${p.origin.icao}→${p.destination.icao} ${p.route}.`); }
+      else if (refresh) sysLog("SimBrief: nothing came back.");
+    } catch (e) { sysLog(e.message); alertBox(e.message); }
+    renderOfpPanel();
+    return ofp;
+  }
+  $("ofpBtn").addEventListener("click", () => { const hidden = $("ofpPanel").classList.toggle("hidden"); if (!hidden) { if (ofp) renderOfpPanel(); else loadOfp(false); } });
+  $("ofpFetch").addEventListener("click", () => loadOfp(true));
+  $("ofpHide").addEventListener("click", () => $("ofpPanel").classList.add("hidden"));
+  $("ofpPlan").addEventListener("click", async () => {
+    if (!settings.simbrief.apiKey) {
+      window.open("https://www.simbrief.com/system/dispatch.php?newflight=1", "_blank", "noopener");
+      sysLog("SimBrief opened in a new tab: plan the flight there, then press Fetch latest OFP.");
+      return;
+    }
+    const orig = prompt("Origin (ICAO)", apt ? apt.icao : ""); if (!orig) return;
+    const dest = prompt("Destination (ICAO)", ofp ? ofp.destination.icao : ""); if (!dest) return;
+    const type = prompt("Aircraft type (ICAO)", ofp ? ofp.aircraft.type : "A320"); if (!type) return;
+    try {
+      const url = await planUrl({ orig: orig.toUpperCase(), dest: dest.toUpperCase(), type: type.toUpperCase(), airline: ofp ? ofp.airline : "", fltnum: ofp ? ofp.flight_number : "", units: settings.simbrief.units === "lb" ? "LBS" : "KGS" }, settings.simbrief.apiKey);
+      window.open(url, "_blank", "noopener");
+      sysLog("SimBrief: the plan request was opened on SimBrief's page (official API form). Press Fetch latest OFP when it is done.");
+    } catch (e) { sysLog(e.message); }
+  });
+  $("ofpImport").addEventListener("click", () => $("ofpFile").click());
+  $("ofpFile").addEventListener("change", async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    try { ofp = await importOfp(await f.text()); sysLog(`SimBrief OFP imported: ${ofp.callsign} ${ofp.origin.icao}→${ofp.destination.icao}.`); $("ofpPanel").classList.remove("hidden"); renderOfpPanel(); }
+    catch (err) { sysLog("Import failed: " + err.message); }
+    e.target.value = "";
+  });
+  $("ofpAdd").addEventListener("click", () => addPlanFlight());
+  function addPlanFlight(kindWanted) {
+    if (!ofp) { sysLog("SimBrief: fetch or import an OFP first."); return null; }
+    if (!sim) return null;
+    const here = apt.icao;
+    const kind = kindWanted || (ofp.origin.icao === here ? "dep" : ofp.destination.icao === here ? "arr" : null);
+    if (!kind) { sysLog(`SimBrief: the OFP is ${ofp.origin.icao}→${ofp.destination.icao}, this is ${here}. Load ${ofp.origin.icao} (departure) or ${ofp.destination.icao} (arrival) first.`); return null; }
+    const a = sim.spawnFromPlan(ofp, kind);
+    if (!a) { sysLog("SimBrief: no free stand that fits — try again in a moment."); return null; }
+    sysLog(`${a.cs} (${a.type}/${a.wtc}${a.reg ? ", " + a.reg : ""}) added as ${kind === "dep" ? "a departure on stand " + (a.stand ? a.stand.name : "?") + " to " + a.other[0] : "an arrival from " + a.other[0]}: route ${a.route}${a.rfl ? ", " + (a.rfl >= 6000 ? "FL" + Math.round(a.rfl / 100) : a.rfl + " ft") : ""}${a.eobt ? ", EOBT " + a.eobt + "z" : ""}${kind === "dep" ? (() => { const sg = sim.suggestDeparture(a); return sg.sid ? ", suggested SID " + sg.sid + (sg.note ? " (" + sg.note + ")" : "") : ""; })() : ""}.`);
+    select(a); renderBoard(); renderDel();
+    return a;
+  }
+  app.ofp = () => ofp; app.loadOfp = loadOfp; app.setOfp = (p) => { ofp = p; renderOfpPanel(); }; app.addPlanFlight = addPlanFlight;
+
   // ---------- G3: procedures & charts ----------
   const procFilter = new Set();
   function renderCharts() {
@@ -251,7 +312,15 @@ function bootMain() {
   function applyProcs() {
     if (!sim || !apt) return;
     const rwy = sim.depEnd.name;
-    sim.suggest = (a) => suggestSid(procs, rwy, { lat: apt.d.lat, lon: apt.d.lon, icao: apt.icao }, a.other, sim.region);
+    sim.suggest = (a) => {
+      const s = suggestSid(procs, rwy, { lat: apt.d.lat, lon: apt.d.lon, icao: apt.icao }, a.other, sim.region);
+      if (a.plan) {   // S2: the pilot's OFP wins when its SID is one of this runway's; its cruise level is the filed RFL
+        const sids = (procs && procs.sids) || [];
+        const ok = a.planSid && sids.some(p => p.name === a.planSid && p.runways.some(r => runwayMatches(r, rwy)));
+        return { ...s, sid: ok ? a.planSid : s.sid, rfl: a.rfl || 0, note: ok ? "SID from the OFP" : a.planSid ? `OFP SID ${a.planSid} is for runway ${a.plan.origin.rwy || "?"}; ${s.sid ? s.sid + " suggested" : "radar vectors"}` : s.note };
+      }
+      return s;
+    };
     // the published missed approach of the runway in use (D4): legs with lat/lon from the CIFP
     sim.missedFor = (end) => {
       const app = (procs && procs.apps || []).find(p => p.missed && p.missed.length && p.missed.some(l => l.lat != null) &&
@@ -291,6 +360,7 @@ function bootMain() {
     });
     sim.depPerHour = +settings.dep; sim.arrPerHour = +settings.arr;
     recorder.start({ icao: apt.icao, staff: settings.staff });
+    if (settings.xr.tower && !(mp.relay && mp.role === "host")) setTimeout(() => { if (sim && !(mp.relay && mp.role === "host")) mp.host(false, "TOWER"); }, 500);
     sim.setTrafficMix(settings.realMix ? trafficMix : null);
     if ($("rwySel").value) sim.setRunway($("rwySel").value);
     applyWeather();
@@ -604,6 +674,7 @@ function bootMain() {
       closed: [...sim.closedRunways], lvp: sim.lvp, seq: $("seqPanel").innerHTML, wx: $("wxPanel").innerHTML,
       claims: mp.claims, roster: mp.roster, coords: mp.coords, remoteStaff: sim.remoteStaff, hostNick: settings.nick || "host",
       del: $("clrList").innerHTML, seqOn: !$("seqPanel").classList.contains("hidden"), chat: mp.relay ? mp.chat.slice(-40) : [],
+      metar: currentMetar(), utc: Date.now(),
       logs: full ? logs : Object.fromEntries(Object.entries(logs).map(([k, v]) => [k, v.slice(-60)])) };
   }
   function broadcast(full) {
@@ -1090,7 +1161,8 @@ function bootMain() {
     $("xrEnabled").checked = x.enabled; $("xrHost").value = x.host; $("xrPort").value = x.port; $("xrPass").value = x.password;
     $("xrCs").value = x.cs || (apt ? `${apt.icao}_TWR` : ""); $("xrFreq").value = x.freq || (apt && apt.freq.tower ? fmtFreq(apt.freq.tower.mhz) : "");
     $("xrAi").checked = x.ai; $("xrHumans").checked = x.humans; $("xrText").checked = x.text; $("xrVoice").checked = x.voice;
-    $("xrWeather").value = x.weather || "off"; $("xrAiVoice").checked = x.aiVoice !== false; $("xrAtisVoice").checked = !!x.atisVoice; $("xrTranscribe").checked = !!x.transcribe;
+    $("xrWeather").value = x.weather || "off"; $("xrAiVoice").checked = x.aiVoice !== false; $("xrAtisVoice").checked = !!x.atisVoice; $("xrTranscribe").checked = !!x.transcribe; $("xrTower").checked = !!x.tower;
+    const sb = settings.simbrief; $("sbUser").value = sb.user || ""; $("sbUnits").value = sb.units || "kg"; $("sbKey").value = sb.apiKey || ""; $("sbAuto").checked = sb.autoFetch !== false;
     $("coachToggle").checked = settings.coach;
     renderVoiceTable(); renderEngines();
   }
@@ -1100,7 +1172,9 @@ function bootMain() {
     settings.xr = { enabled: $("xrEnabled").checked, host: $("xrHost").value.trim() || "127.0.0.1", port: +$("xrPort").value || 49100,
       password: $("xrPass").value, cs: $("xrCs").value.trim().toUpperCase(), freq: $("xrFreq").value.trim(), ai: $("xrAi").checked,
       humans: $("xrHumans").checked, text: $("xrText").checked, voice: $("xrVoice").checked,
-      weather: $("xrWeather").value, aiVoice: $("xrAiVoice").checked, atisVoice: $("xrAtisVoice").checked, transcribe: $("xrTranscribe").checked };
+      weather: $("xrWeather").value, aiVoice: $("xrAiVoice").checked, atisVoice: $("xrAtisVoice").checked, transcribe: $("xrTranscribe").checked, tower: $("xrTower").checked };
+    settings.simbrief = { user: $("sbUser").value.trim(), units: $("sbUnits").value, apiKey: $("sbKey").value.trim(), autoFetch: $("sbAuto").checked };
+    if (settings.xr.tower && sim && !(mp.relay && mp.role === "host")) mp.host(false, "TOWER");
     save(); applyRadioSettings();
     if (sim) {
       sim.rates = { readbackError: settings.rbErr / 100, sayAgain: settings.sayAgain / 100, oldAtis: settings.oldAtis / 100 };
@@ -1208,13 +1282,14 @@ function bootMain() {
       this.relay.send({ type: "radio", m: { from: m.from, text: m.text, say: m.say, pos: m.pos, speaker: m.speaker, kind: m.kind, ai: !!m.ai, by: m.by || "",
         ac: a ? { id: a.id, cs: a.cs, tel: a.tel, num: a.num, nat: a.nat || "", ga: !!a.ga, veh: !!a.veh, human: !!a.human, kind: a.kind, type: a.type, crew: a.crew || null, pos: a.pos ? [a.pos[0], a.pos[1]] : null } : null } });
     },
-    async host(pub) {
+    /** Host a session; a fixed code (TOWER for the X-Plane plugin) skips the server-made one. */
+    async host(pub, fixedCode = "") {
       if (!apt) { sysLog("Load an airport first."); return; }
       if (this.relay) this.relay.close();
       this.role = "host"; this.claims = {}; this.roster = []; this.coords = [];
       settings.nick = settings.nick || "host"; save();
-      let code = "";
-      try { code = (await (await fetch("/api/mp/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: `${apt.icao} ${settings.nick}`, public: pub }) })).json()).code; } catch { /* offline */ }
+      let code = fixedCode;
+      if (!code) try { code = (await (await fetch("/api/mp/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: `${apt.icao} ${settings.nick}`, public: pub }) })).json()).code; } catch { /* offline */ }
       try { this.info = await (await fetch("/api/mp/info")).json(); } catch { this.info = null; }
       this.relay = new Relay({ code, role: "host", name: settings.nick, sname: `${apt.icao} ${settings.nick}`, pub,
         onStatus: (st, m) => { if (st === "connected") { sysLog(`Hosting session ${m.code}. Others join with the code or ${this.joinUrl()}.`); broadcast(true); } renderMp(); },
@@ -1254,6 +1329,15 @@ function bootMain() {
         const c = { id: this.nextCoord++, from: g.name, fromId: g.id, fromPos: this.claims[g.id] || "", to: String(m.to || "").toUpperCase(), kind: m.kind || "approval", ac: m.ac || "", text: String(m.text || "").slice(0, 120), t: Date.now(), state: "open" };
         this.coords.push(c); this.coordArrived(c);
       } else if (m.type === "coordReply") { const c = this.coords.find(x => x.id === m.id); if (c && this.claims[g.id] === c.to) this.answerCoord(m.id, !!m.ok, g.name); }
+      else if (m.type === "ops" && g.role === "guest" && this.claims[g.id]) {
+        // operations requests from a remote controller (the X-Plane tower): the trainer stays the authority
+        const w = String(m.what || "");
+        if (w === "lvp") { sim.setLvp(!!m.value, `by ${g.name}`); sysLog(`${g.name}: LVP ${m.value ? "on" : "off"}.`); renderOps(); }
+        else if (w === "runway") { const name = String(m.value || "").toUpperCase(); if (apt.findRunwayEnd(name)) { sim.setRunway(name); $("rwySel").value = name; renderAtis(); applyProcs(); sysLog(`${g.name}: runway in use ${name}.`); } else this.to(g.id, { type: "alert", msg: `no runway ${name}` }); }
+        else if (w === "stopbars") { for (const b of apt.stopBars || []) sim.setStopBar(b, !!m.value); sysLog(`${g.name}: stop bars ${m.value ? "on" : "off"}.`); }
+        else if (w === "stopbar") { const b = (apt.stopBars || []).find(x => x.id === m.id); if (b) sim.setStopBar(b, !!m.value); }
+        broadcast(false);
+      }
       else if (m.type === "event" && g.role === "instructor") { const r = sim.abnormalEvent(m.kind); sysLog(`Instructor ${g.name} triggered: ${r || m.kind + " (nothing suitable now)"}.`); }
       else if (m.type === "note" && (g.role === "instructor" || g.role === "spectator")) { const target = this.roster.find(r => r.id === m.to); if (target) this.to(m.to, { type: "note", from: g.name, text: String(m.text || "").slice(0, 300) }); else { sysLog(`Note from ${g.name}: ${m.text}`); } }
     },

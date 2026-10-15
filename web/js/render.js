@@ -41,6 +41,7 @@ export class Radar {
     this.stopBars = [];             // [{p:[x,y], v:[dx,dy], lit:bool, id}] (D2)
     this.filter = { ground: true, air: true, maxAlt: 99999 };
     this.procs = [];
+    this.flightRoute = [];          // the pilot's OFP route (S1): [{p:[x,y], id, alt}]
     this.vfrPoints = [];            // VFR reporting points [{name, p, alt}] (D5)
     this.history = new Map();       // id -> [{p, t}]
     this.labelOff = new Map();      // id -> [dx, dy] screen offset of the data block (manual drags)
@@ -119,6 +120,7 @@ export class Radar {
   setOsm(osm) { this.osm = osm; this.staticKey = null; if (this.apt) this.t3d.setAirport(this.apt, osm); }
 
   /** SID/STAR polylines from procs.js procLines() (lat/lon). */
+  setFlightRoute(pts) { this.flightRoute = pts || []; this.staticKey = null; }
   setProcs(lines) {
     this.procs = this.apt ? lines.map(l => ({ ...l, xy: l.pts.map(p => ({ ...p, p: this.apt.toXY(p.lat, p.lon) })) })) : [];
     this.staticKey = null;
@@ -231,7 +233,7 @@ export class Radar {
   }
 
   drawStatic(arrEnd) {
-    const key = [this.cx, this.cy, this.scale, this.w, this.h, this.dpr, this.view, this.night, this.showGraph, this.showProcs, arrEnd ? arrEnd.name : "", !!this.osm].join("|");
+    const key = [this.cx, this.cy, this.scale, this.w, this.h, this.dpr, this.view, this.night, this.showGraph, this.showProcs, arrEnd ? arrEnd.name : "", !!this.osm, this.flightRoute.length, this.flightRoute.length ? this.flightRoute[0].id + this.flightRoute[this.flightRoute.length - 1].id : ""].join("|");
     if (key === this.staticKey && this.staticCv) return;
     this.staticKey = key;
     if (!this.staticCv) this.staticCv = document.createElement("canvas");
@@ -257,6 +259,22 @@ export class Radar {
         ctx.stroke();
       }
       ctx.setLineDash([]);
+    }
+    // the pilot's OFP route (S1): magenta, fixes named
+    if (radarView && this.flightRoute.length > 1) {
+      ctx.strokeStyle = "#e678d6"; ctx.lineWidth = 1.5 / k; ctx.setLineDash([]);
+      ctx.beginPath();
+      this.flightRoute.forEach((f, i) => (i ? ctx.lineTo(...f.p) : ctx.moveTo(...f.p)));
+      ctx.stroke();
+      ctx.save(); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.font = "10px ui-monospace, Consolas, monospace"; ctx.fillStyle = "#e678d6"; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+      for (const f of this.flightRoute) {
+        const s = this.toScreen(f.p);
+        if (s[0] < -20 || s[1] < -20 || s[0] > this.w + 20 || s[1] > this.h + 20) continue;
+        ctx.fillRect(s[0] - 2, s[1] - 2, 4, 4);
+        if (f.id) ctx.fillText(f.id, s[0] + 4, s[1] - 3);
+      }
+      ctx.restore();
     }
     // airport surfaces
     if (this.boundary && k > 0.01) { ctx.fillStyle = this.night ? "#080c0a" : "#0e1512"; ctx.fill(this.boundary); }

@@ -27,12 +27,16 @@ import aptdat
 import fsd
 import navdata
 import setup as setupwiz
+import towerlink
+import simbrief
 import openflights
 import osm
 import ws
 from urllib.parse import parse_qs, urlparse
 
 FSD = None       # fsd.FSDServer
+TOWER = None     # towerlink.TowerLink (X-Plane Tower mode)
+SB = None        # simbrief.Store (created below, after CACHE)
 TTS = None       # tts.TTSManager (created on first use)
 STT = None       # stt.STTManager (created on first use)
 _rate = {}       # ip -> [window start, count] for TTS/STT requests from remote players
@@ -166,6 +170,20 @@ class Handler(BaseHTTPRequestHandler):
             body = self.read_json()
             if path.startswith("/api/setup/"):
                 return self.setup_post(path, body)
+            if path == "/api/simbrief/import":          # an OFP JSON the pilot downloaded by hand
+                if not self.is_local():
+                    return self.send(403, {"error": "local only"})
+                try:
+                    return self.send(200, {"plan": sb().save("import", body)})
+                except (RuntimeError, ValueError) as e:
+                    return self.send(400, {"error": f"not a SimBrief OFP: {e}"})
+            if path == "/api/simbrief/plan":            # the official API form flow, needs the pilot's own API key
+                if not self.is_local():
+                    return self.send(403, {"error": "local only"})
+                try:
+                    return self.send(200, {"url": simbrief.api_form_url(body.get("params") or {}, str(body.get("api_key", "")), f"http://localhost:{PORT}/")})
+                except ValueError as e:
+                    return self.send(400, {"error": str(e)})
             if path == "/api/stt":
                 if not rate_ok(self.client_address[0], 20):
                     return self.send(429, {"error": "too many requests"})
@@ -352,6 +370,22 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             if path == "/api/mp/sessions":
                 return self.send(200, {"sessions": ws.RELAY.list(), "lan": lan_address(), "port": PORT})
+            if path == "/api/simbrief/latest":          # the pilot's latest OFP: cached, or fetched when asked (local PC only)
+                if not self.is_local():
+                    return self.send(403, {"error": "SimBrief is only available on the host PC"})
+                user = q.get("user", "").strip()
+                try:
+                    if q.get("refresh") == "1":
+                        if not user:
+                            return self.send(400, {"error": "SimBrief: enter your username or pilot ID (Settings → SimBrief)"})
+                        plan = sb().save(user, simbrief.fetch_latest(user))
+                    else:
+                        plan = sb().last()
+                    return self.send(200, {"plan": plan, "plan_url": simbrief.plan_url()})
+                except (RuntimeError, ValueError) as e:
+                    return self.send(400, {"error": str(e)})
+            if path == "/api/tower/status":             # X-Plane Tower mode link (towerlink.py)
+                return self.send(200, {"enabled": TOWER is not None, **(TOWER.status() if TOWER else {})})
             if path == "/api/mp/info":
                 return self.send(200, {"lan": lan_address(), "port": PORT, "bind": BIND, "stt": stt().status()})
             m = re.fullmatch(r"/api/airport/([A-Za-z0-9]{3,7})", path)
@@ -396,6 +430,26 @@ PORT = 8780
 BIND = "127.0.0.1"
 
 
+def sb():
+    global SB
+    if SB is None:
+        SB = simbrief.Store(CACHE)
+    return SB
+
+
+def tower_airport(icao):
+    """The 'airport' line of the tower link: datum, runways, stop bars, stands and the OSM tower of a cached airport."""
+    apt = load_airport(icao)
+    osm = None
+    p = CACHE / f"{icao}.osm.json"
+    if p.exists():
+        try:
+            osm = json.loads(p.read_text("utf-8"))
+        except ValueError:
+            osm = None
+    return towerlink.airport_line(apt, osm)
+
+
 def lan_address():
     """This machine's address on the local network, for the join link shown to other controllers."""
     try:
@@ -422,6 +476,7 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=8780)
     ap.add_argument("--host", default="127.0.0.1", help="bind address; 0.0.0.0 lets other controllers on the LAN join (multiplayer, phone strip board)")
     ap.add_argument("--fsd-port", type=int, default=6809, help="EuroScope (legacy FSD) port, 0 = off")
+    ap.add_argument("--tower-port", type=int, default=8781, help="X-Plane Tower mode link (XRadio plugin), 0 = off; binds the --host address")
     ap.add_argument("--fsd-host", default="127.0.0.1", help="FSD bind address (127.0.0.1 = this PC only)")
     ap.add_argument("--xradio", default="", help="host:port of an XRadio server to bridge to (off by default)")
     ap.add_argument("--xradio-password", default="")
@@ -439,5 +494,11 @@ if __name__ == "__main__":
                             "password": a.xradio_password, "atc_cs": a.xradio_callsign})
         print(f"XRadio bridge -> {a.xradio}")
     PORT, BIND = a.port, a.host
+    if a.tower_port:
+        try:
+            TOWER = towerlink.TowerLink(a.host, a.tower_port, tower_airport).start()
+            print(f"X-Plane tower link: {a.host}:{TOWER.port}")
+        except OSError as e:
+            print(f"tower link not started ({e})")
     print(f"Tower Trainer: http://localhost:{a.port}" + (f"  (LAN: http://{lan_address()}:{a.port})" if a.host != "127.0.0.1" else "  (--host 0.0.0.0 to let others join)"))
     Server((a.host, a.port), Handler).serve_forever()
