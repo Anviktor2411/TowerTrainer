@@ -6,6 +6,7 @@ import { sayNumbers, NEUTRAL_STYLE } from "./phrase.js";
 import { dist } from "./airport.js";
 
 const NM = 1852, KT = 0.5144;
+const MIC_ONLY_WAIT_MS = 4000;   // how long a transcript may take after the microphone is released
 const ORDER_DEP = ["DEL", "GND", "TWR", "APP", "CTR"];
 const ORDER_ARR = ["CTR", "APP", "TWR", "GND"];
 
@@ -43,7 +44,7 @@ export function checkReadback(text, items) {
     else if (it.k === "alt") ok = new RegExp("\\b" + v + "\\b").test(n);
     else if (it.k === "fl") ok = n.includes("FL" + v.padStart(3, "0"));
     else if (it.k === "rwy") ok = new RegExp("RUNWAY\\s*0?" + v.replace(/^0/, "") + "\\b").test(n);
-    else if (it.k === "word") ok = n.includes(v);
+    else if (it.k === "word") ok = n.includes(normalizeNumbers(v).toUpperCase());   // "stand A-12" read back as "stand A 12"
     if (!ok) missing.push(it);
   }
   return { ok: missing.length === 0, missing };
@@ -173,11 +174,13 @@ export class PilotAtc {
       if (!a.fp || a.fpStatus === "cancelled") continue;
       const F = this.flightOf(a);
       if (!F || F.done) continue;
-      // a keyed microphone without a transcript still counts as a call
-      if (a.tx && !F.txWas) F.txAt = sim.t;
-      if (!a.tx && F.txWas && F.txAt != null && sim.t - F.txAt > 0.8 && !F.textAt) this.heard(a.cs, "", null, true, true);
-      if (!a.tx && F.txWas) F.textAt = false;
+      // a keyed microphone counts as a call even without a transcript -- but a transcript, when one is coming,
+      // arrives a second or two after the release: wait for it, and answer the bare call only if none came
+      const now = Date.now();
+      if (a.tx && !F.txWas) F.txAt = now;
+      if (!a.tx && F.txWas && F.txAt != null && now - F.txAt > 800) F.micCallAt = now + MIC_ONLY_WAIT_MS;
       F.txWas = !!a.tx;
+      if (F.micCallAt && now >= F.micCallAt) { F.micCallAt = null; this.heard(a.cs, "", null, true, true); }
       this.watch(F);
       if (this.works(F.pos)) continue;                       // a human controller has them: nothing to say
       if (F.pending && sim.t - F.pending.askedAt > 25 && !F.pending.nudged) {
@@ -210,14 +213,15 @@ export class PilotAtc {
     const once = (key, every = 60) => { if (quiet) return false; if (F.warnedAt[key] != null && t - F.warnedAt[key] < every) return false; F.warnedAt[key] = t; return true; };
     const rwy = a.onGround ? this.onRunway(a) : null;
     if (F.dir === "dep") {
-      if (["filed", "clr_given", "cleared", "push"].includes(F.phase) && a.onGround && F.origin && dist(a.pos, F.origin) > 60 && a.spd > 2 * KT) {
+      // a pushback moves the aircraft too: allow it more room once push and start is approved
+      if (["filed", "clr_given", "cleared", "push"].includes(F.phase) && a.onGround && F.origin && dist(a.pos, F.origin) > (F.phase === "push" ? 150 : 60) && a.spd > 2 * KT) {
         if (once("moved")) { this.note(F, "moving without a taxi clearance", "warn"); this.say(F, F.pos, `${a.cs}, hold position, you are not cleared to taxi`); }
       }
       if (F.phase === "taxi" && F.taxi) {
         if (rwy && rwy.id !== sim.depEnd.rwy && !F.crossOk && once("rwy" + rwy.id, 30)) { this.note(F, `on runway ${rwy.label} without a crossing clearance`, "warn"); this.say(F, F.pos, `${a.cs}, stop immediately, you are on runway ${rwy.ends[0].name} without clearance`); }
         if (rwy && rwy.id === sim.depEnd.rwy && once("rwyDep", 30)) { this.note(F, `entered runway ${sim.depEnd.name} without a line-up clearance`, "warn"); this.say(F, F.pos, `${a.cs}, stop immediately, you are entering runway ${sim.depEnd.name} without clearance`); }
         const off = distToPolyline(a.pos, F.taxi.points);
-        if (!rwy && off > 60 && a.spd > 2 * KT && once("offroute", 60)) { this.note(F, `off the cleared taxi route (${Math.round(off)} m)`, "warn"); this.say(F, F.pos, `${a.cs}, you are off the cleared route, taxi via ${F.taxi.via.join(" ") || "the taxiway"} to holding point runway ${sim.depEnd.name}`); }
+        if (!rwy && !F.taxi.free && off > 60 && a.spd > 2 * KT && once("offroute", 60)) { this.note(F, `off the cleared taxi route (${Math.round(off)} m)`, "warn"); this.say(F, F.pos, `${a.cs}, you are off the cleared route, taxi via ${F.taxi.via.join(" ") || "the taxiway"} to holding point runway ${sim.depEnd.name}`); }
         const hp = F.taxi.points[F.taxi.points.length - 1];
         const twr = this.firstPos(ORDER_DEP, "GND");
         if (dist(a.pos, hp) < 300 && twr && twr !== F.pos && !F.toldTwr) {
@@ -251,7 +255,8 @@ export class PilotAtc {
     } else {
       if (F.phase === "approach" && this.sim.distToThr(a) < 10 * NM && !a.onGround) {
         const twr = this.firstPos(ORDER_ARR, "APP");
-        if (twr && twr !== F.pos && !F.toldTwr) { F.toldTwr = true; if (this.works(twr)) { F.pos = twr; F.phase = "final"; } else if (this.say(F, F.pos, `${a.cs}, ${this.contact(twr)}`)) { F.pos = twr; F.phase = "final"; } }
+        // Tower has not heard the pilot yet: no landing clearance before they check in on its frequency
+        if (twr && twr !== F.pos && !F.toldTwr) { F.toldTwr = true; if (this.works(twr)) { F.pos = twr; F.phase = "final"; F.checkedIn = false; } else if (this.say(F, F.pos, `${a.cs}, ${this.contact(twr)}`)) { F.pos = twr; F.phase = "final"; F.checkedIn = false; } }
         if (F.pos === "ALL") F.phase = "final";
       }
       if ((F.phase === "final" || F.phase === "approach") && !a.onGround && !F.landClr) {
@@ -281,7 +286,7 @@ export class PilotAtc {
     if (!a) return null;
     const F = this.flightOf(a);
     if (!F || F.done) return null;
-    if (!voiceOnly) F.textAt = this.sim.t;
+    if (!voiceOnly) F.micCallAt = null;                     // the transcript (or typed text) of that call came
     const tuned = this.posOf(khz);
     if (tuned && tuned !== F.pos) { this.note(F, `calls on ${tuned}`); F.pos = tuned; this.resync(F); }
     if (this.works(F.pos)) return null;                      // the human controller answers
@@ -319,7 +324,7 @@ export class PilotAtc {
     }
     if (p.kind === "taxi") { F.phase = "taxi"; F.times.taxi = sim.t; return true; }
     if (p.kind === "lineup") { F.phase = "lined_up"; F.lineup = true; return true; }
-    if (p.kind === "takeoff") { F.takeoff = true; F.lineup = true; F.phase = F.phase === "holding" ? "holding" : F.phase; return true; }
+    if (p.kind === "takeoff") { F.takeoff = true; F.lineup = true; return true; }
     if (p.kind === "climb") { F.phase = "climb"; return true; }
     if (p.kind === "cruise") { F.phase = "cruise"; return true; }
     if (p.kind === "approach") { F.phase = "approach"; return true; }
@@ -330,7 +335,6 @@ export class PilotAtc {
   departure(F, intent, text) {
     const sim = this.sim, a = F.a, cs = F.cs, fp = a.fp;
     const dest = (fp.dest || "").toUpperCase();
-    const atDel = F.pos === this.firstPos(ORDER_DEP);
     if (F.phase === "filed" || (F.phase === "clr_given" && intent === "clearance")) {
       if (intent !== "clearance" && intent !== "call" && intent !== "readback") {
         if (intent === "push" || intent === "taxi" || intent === "ready") return this.say(F, F.pos, `${cs}, negative, you have no clearance yet, say when ready to copy`);
@@ -350,8 +354,8 @@ export class PilotAtc {
     if (F.phase === "cleared" || F.phase === "push") {
       if (intent === "push" || (intent === "call" && F.phase === "cleared")) { F.phase = "push"; return this.say(F, F.pos, `${cs}, push and start approved${sim.deiceNeeded ? ", de-icing on request" : ""}`); }
       if (intent === "taxi" || intent === "ready" || (intent === "call" && F.phase === "push")) {
-        const r = this.taxiRoute(a);
-        if (!r) return this.say(F, F.pos, `${cs}, standby`);
+        // no taxi network in the airport's data: a direct clearance, and no off-route watch
+        const r = this.taxiRoute(a) || { nodes: [], points: [a.pos, sim.depEnd.thr], via: [], free: true };
         F.taxi = r; F.crossOk = false;
         const t = `${cs}, taxi to holding point runway ${sim.depEnd.name}${r.via.length ? " via " + r.via.join(" ") : ""}, hold short runway ${sim.depEnd.name}`;
         const ok = this.say(F, F.pos, t, [{ k: "rwy", v: sim.depEnd.name }, { k: "word", v: "hold short" }]);
@@ -430,8 +434,7 @@ export class PilotAtc {
       const stand = F.stand || (() => { const s = sim.freeStands(); return s && s.length ? s[0] : null; })();
       if (!stand) return this.say(F, F.pos, `${cs}, standby for a stand`);
       F.stand = stand;
-      const r = this.standRoute(a, stand);
-      if (!r) return this.say(F, F.pos, `${cs}, taxi to stand ${stand.name}`);
+      const r = this.standRoute(a, stand) || { nodes: [], points: [a.pos, stand.pos], via: [], free: true };
       F.taxi = r; F.crossOk = false;
       const ok = this.say(F, F.pos, `${cs}, taxi to stand ${stand.name}${r.via.length ? " via " + r.via.join(" ") : ""}`, [{ k: "word", v: "stand " + String(stand.name).toUpperCase() }]);
       if (ok && F.pending) { F.pending.kind = "stand"; F.pending.hint = "taxi to the stand"; }
@@ -444,7 +447,7 @@ export class PilotAtc {
   finish(F, how) {
     if (F.done) return;
     F.done = true; F.how = how; F.times.done = this.sim.t;
-    if (this.hooks.fpAck && F.dir === "dep" && how === "departed") this.hooks.fpAck(F.cs, { squawk: +F.squawk || 0, status: "cancel", remarks: "flight closed, debrief in TowerTrainer" });
+    // the flight plan stays open: it is valid to the destination, where another controller (or this one) takes the pilot
     this.note(F, `flight closed (${how}): debrief ready`);
     if (this.hooks.onDone) this.hooks.onDone(F);
   }

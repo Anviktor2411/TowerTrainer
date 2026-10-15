@@ -101,28 +101,28 @@ Legend: **DONE** works as asked · **PARTLY** exists but incomplete · **MISSING
 | S1 OFP parser + viewer | **MISSING** | — | **DONE** — `simbrief.py` (official `xml.fetcher.php?json=1`, HTTP 400 explained, cache in `cache/simbrief/`, apiv1 signed form flow when a key is given), `/api/simbrief/latest|import|plan`, `web/js/simbrief.js` OFP panel with route on the map and weather at both ends, *Open full OFP*; `tests/simbrief_test.py`, fixture `tests/fixtures/simbrief_ofp.json` |
 | S2 the pilot's flight as traffic, clearance vs plan, EuroScope $FP | **MISSING** | — | **DONE** — `sim.spawnFromPlan()` (exact OFP data, fitting stand, OFP SID via `sim.suggest`, RFL, EOBT as TOBT), strips show the OFP badge, `coach.js` checks destination / SID / level against the plan, `fsd.py _fp_line()` carries equipment, RFL, alternate, `/V/ SIMBRIEF`; `tests/ops.test.mjs` S2 block |
 | S3 pilot side in XRadio: import, file, .fms, clearance vs plan | **MISSING** | — | **DONE** — `plugin/src/simbrief.cpp` (fetch on a worker through the plugin's HTTP client, parser, `.fms` writer that never overwrites without a second press), Flight plan tab import → editable → *File* as `PT_FLIGHTPLAN`, OFP numbers, clearance next to the plan with differences; TowerTrainer puts the filed plan on the strip and in `$FP`; `tools/check_simbrief.sh`, `ui_logic_test` |
-| S4 AI ATC for the pilot's own flight | **MISSING** | — | **DONE** — `web/js/pilotatc.js`: Delivery/Ground/Tower/Radar/Control for XRadio pilots on unstaffed positions, readback checks, taxi watched against the real position, takeoff/landing against traffic, handoffs, debrief with score, silent where a human staffs; AI controllers voiced through the bridge; `tests/ops.test.mjs` S4 block |
-| S5 polish: wizard step, guide EN+ET, screenshots, end-to-end test | **MISSING** | — | **DONE** — XRadio wizard step 5 (SimBrief, optional) and the setup wizard's SimBrief field; guide steps *simbrief* / *aiatc* (EN + ET); `docs/screenshots/EETN-ofp.png`, `EETN-debrief.png`; `tests/aiatc.test.mjs` flies a scripted XRadio pilot (`fake_client.py --script`) EETN → EVRA under the AI controllers |
+| S4 AI ATC for the pilot's own flight | **MISSING** | — | **DONE** — `web/js/pilotatc.js`: Delivery/Ground/Tower/Radar/Control for XRadio pilots on unstaffed positions, readback checks, taxi watched against the real position, takeoff/landing against traffic, handoffs, debrief with score, silent where a human staffs; AI controllers voiced through the bridge; the plan stays open when the departure leaves the airspace, Tower clears to land only after the check-in, a bare microphone call waits 4 s for its transcript, the XRadio station overrides stay with the airport they were typed at; `tests/ops.test.mjs` S4 blocks |
+| S5 polish: wizard step, guide EN+ET, screenshots, end-to-end test | **MISSING** | — | **DONE** — XRadio wizard step 5 (SimBrief, optional) and the setup wizard's SimBrief field; guide steps *simbrief* / *aiatc* (EN + ET); `docs/screenshots/EETN-ofp.png`, `EETN-debrief.png`; `tests/aiatc.test.mjs` flies a scripted XRadio pilot (`fake_client.py --script`) from a stand at EETN to a stand at EVRA through XRadio's own server, the page loading Riga mid-flight (34 checks) |
 
 ## Phase U – the XRadio window
 
 | Item | Before | Evidence | After |
 |---|---|---|---|
-| U Dear ImGui window: tabs, overlay, toasts, themes, wizard, VR/pop-out, i18n | **MISSING** | text UI only (`ui.cpp`) | **DONE** — `plugin/src/ui2/` (model/actions, `app_ui.cpp` tabs Radio / ATC / Pilots / Messages / Flight plan / Host / Settings / Tower, cockpit overlay, toasts, dark + light themes with drawn icons, five-step wizard, EN + ET), `imgui_xp.cpp` host (shared Inter atlas via `XPLMBindTexture2d`, pop-out, VR, HiDPI), text UI kept as `-DXRADIO_UI_IMGUI=OFF`; `tools/harness/ui_logic_test.cpp`, `tools/ui_preview` → `docs/ui/*.png`, `docs/ui.md`, release notes; the Windows plugin links with XPMP2 + voice + ImGui |
+| U Dear ImGui window: tabs, overlay, toasts, themes, wizard, VR/pop-out, i18n | **MISSING** | text UI only (`ui.cpp`) | **DONE** — `plugin/src/ui2/` (model/actions, `app_ui.cpp` tabs Radio / ATC / Pilots / Messages / Flight plan / Host / Settings / Tower, cockpit overlay, toasts, dark + light themes with drawn icons, five-step wizard, EN + ET), `imgui_xp.cpp` host (shared Inter atlas via `XPLMBindTexture2d`, pop-out, VR, HiDPI), text UI kept as `-DXRADIO_UI_IMGUI=OFF`; `tools/harness/ui_logic_test.cpp`, `tools/ui_preview` → `docs/ui/*.png`, `docs/ui.md`, release notes; the Windows plugin links with XPMP2 + voice + ImGui; fonts embedded as uint32 arrays (MSVC refuses string literals over 64 KB), every source compiles for Linux and macOS with clang, CI installs the Linux GL headers |
 
 ## Test baseline (after)
 
 | Suite | Result |
 |---|---|
-| `node tests/unit.test.mjs` / `taxi` / `ops` | 221 / 28 / 254 pass |
+| `node tests/unit.test.mjs` / `taxi` / `ops` | 221 / 28 / 264 pass |
 | `node tests/flow.test.mjs EETN` | pass |
 | `python tests/ws_test.py` / `fsd` / `data` / `navdata` / `stt` / `tts` / `sector` / `setup` / `towerlink` / `simbrief` | all pass |
-| `node tests/browser.test.mjs` (Chrome; `TT_BROWSER=edge` for Edge) | 84 pass, no console errors (one multiplayer handoff check is timing-sensitive under heavy CPU load) |
+| `node tests/browser.test.mjs` (Chrome; `TT_BROWSER=edge` for Edge) | 84 pass in Chrome and in Edge, no console errors (the multiplayer handoff step runs without random readback errors: a wrong frequency read back used to fail it about one run in twenty-five) |
 | `node tests/firefox.mjs` | pass, no console errors |
 | `node tests/perf.mjs` | 60 fps with 150+ targets, no JS errors |
 | `python tests/xradio_test.py` (XRadio v0.5.7 and v0.6.0) | pass |
-| `node tests/aiatc.test.mjs` | 20 pass (end-to-end flight under the AI controllers) |
-| XRadio: `tools/harness/*`, `check_tower.sh`, `check_simbrief.sh`, `ui_logic_test`, `check_windows_build.sh`, parity | pass |
+| `node tests/aiatc.test.mjs` | 34 pass (stand at EETN to stand at EVRA under the AI controllers, through XRadio's own server) |
+| XRadio: `tools/harness/*`, `check_tower.sh`, `check_simbrief.sh`, `ui_logic_test`, `check_windows_build.sh`, parity | pass; the Windows plugin links; every source compiles for Linux and macOS with clang (Zig 0.13) |
 
 ## Test baseline (before)
 

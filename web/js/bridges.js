@@ -22,13 +22,25 @@ export function bridgeAircraft(sim, apt, { ownOnly = false } = {}) {
   });
 }
 
+/** The station callsign and frequency typed in Settings → XRadio belong to the airport they were typed at
+ *  (xr.forIcao): at another airport the station takes that airport's own names. Settings saved before
+ *  forIcao existed keep a callsign only when it starts with the current ICAO code. */
+export function xrOverrides(xr, icao) {
+  const own = !xr.forIcao || xr.forIcao === icao;
+  const cs = String(xr.cs || "").trim().toUpperCase();
+  return {
+    cs: own && cs && (xr.forIcao || cs.startsWith(icao)) ? cs : "",
+    mhz: own ? parseFloat(xr.freq) || 0 : 0,
+  };
+}
+
 /** A short "how to fly with TowerTrainer ATC" for XRadio pilots, shown in Settings. */
 export const XR_PILOT_HELP = [
-  "In X-Plane, open the XRadio window: the ATC online list shows this station and its frequency — click it to tune COM1.",
+  "In X-Plane, open the XRadio window: the ATC tab lists this station and its frequency — click it to tune COM1.",
   "Tune the ATIS on COM2 (click the ATIS entry) and note the information letter; say it on first contact.",
-  "File a flight plan in XRadio → Settings → ATC (departure, destination, route); the clearance and squawk come back there.",
-  "Talk with push-to-talk on the frequency, or type in the Say field. @CALLSIGN sends a private message; 121.500 is guard.",
-  "Standard phraseology works best: callsign first, read back runway, squawk and clearances.",
+  "Flight plan tab: Import from SimBrief (or type the plan) and press File — the clearance and squawk come back on the same tab, next to your plan.",
+  "Talk with push-to-talk on the frequency, or type on the Messages tab. @CALLSIGN sends a private message; 121.500 is guard.",
+  "Positions nobody works here are answered by TowerTrainer's AI controllers (Settings → XRadio). Standard phraseology works best: callsign first, read back runway, squawk and clearances.",
 ];
 
 export class Bridges {
@@ -99,11 +111,12 @@ export class Bridges {
     if (!this.xr.enabled || !sim || !apt) return;
     const center = { lat: apt.d.lat, lon: apt.d.lon, elev_m: (apt.d.elevation || 0) * FT_M };
     const positions = [];
+    const over = xrOverrides(this.xr, apt.icao);
     if (sim.split) {
-      for (const p of Object.values(sim.positions)) if (sim.userWorks(p.key) || this.xr.aiAtc !== false) positions.push({ cs: p.key === "TWR" && this.xr.cs ? this.xr.cs : p.cs, khz: Math.round(p.mhz * 1000) });
+      for (const p of Object.values(sim.positions)) if (sim.userWorks(p.key) || this.xr.aiAtc !== false) positions.push({ cs: p.key === "TWR" && over.cs ? over.cs : p.cs, khz: Math.round(p.mhz * 1000) });
     } else {
-      const mhz = parseFloat(this.xr.freq) || (apt.freq.tower ? apt.freq.tower.mhz : 118.1);
-      positions.push({ cs: this.xr.cs || `${apt.icao}_TWR`, khz: Math.round(mhz * 1000) });
+      const mhz = over.mhz || (apt.freq.tower ? apt.freq.tower.mhz : 118.1);
+      positions.push({ cs: over.cs || `${apt.icao}_TWR`, khz: Math.round(mhz * 1000) });
     }
     const body = { center, positions, aircraft: this.xr.ai ? bridgeAircraft(sim, apt, { ownOnly: true }) : [], tx: this.xrTx.splice(0),
       fp_acks: this.fpAcks.splice(0), weather: this.xr.weather === "publish" && this.getWeather ? this.getWeather() : null,

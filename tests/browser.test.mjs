@@ -66,11 +66,13 @@ try {
   await g.eval(`document.getElementById("chatIn").value = "hello tower"; document.getElementById("chatForm").requestSubmit()`);
   ok(await p.waitFor(`TT.mp.chat.some(m => m.text === "hello tower" && m.name === "liisa")`, 5000), "chat from the guest reaches the host");
   ok(await g.waitFor(`document.getElementById("chatLog").innerText.includes("hello tower")`, 5000), "and is shown in the guest's chat");
-  // a handoff Tower -> Ground: the guest's board shows the incoming strip and accepts it
+  // a handoff Tower -> Ground: the guest's board shows the incoming strip and accepts it. No random readback
+  // errors here: one of them is a wrong frequency read back, which sends the aircraft nowhere (LOST).
+  await p.eval(`TT.sim.rates = { readbackError: 0, sayAgain: 0, oldAtis: 0 }`);
   const d5 = await p.eval(`(() => { const s = TT.sim; for (let k = 0; k < 20; k++) { const d = s.spawnDeparture({ ga: false }); if (d && !d.ga) { d.freq = "TWR"; d.state = "holding"; d.depEnd = s.depEnd; d.onGround = true; window.hoDep = d; return d.tel + " " + d.num; } if (d) s.putBack(d); } })()`);
   await p.eval(`TT.transmit(${JSON.stringify(d5)} + " contact ground " + TT.positions.GND.freq, "TWR")`);
-  ok(await p.waitFor(`hoDep.freq === "GND" && hoDep.handoff && !hoDep.handoff.accepted`, 15000), "the frequency change offers the strip to Ground (worked by the guest, so not auto-accepted)");
-  ok(await g.waitFor(`!!document.querySelector('#stripBoard .strip.incoming [data-accept]')`, 8000), "the guest's board shows the incoming strip with ACCEPT");
+  ok(await p.waitFor(`hoDep.freq === "GND" && hoDep.handoff && !hoDep.handoff.accepted`, 30000), "the frequency change offers the strip to Ground (worked by the guest, so not auto-accepted)");
+  ok(await g.waitFor(`!!document.querySelector('#stripBoard .strip.incoming [data-accept]')`, 15000), "the guest's board shows the incoming strip with ACCEPT");
   await g.eval(`(() => { const e = document.querySelector('#stripBoard .strip.incoming [data-accept]'); if (e) e.click(); })()`);
   ok(await p.waitFor(`hoDep.handoff.accepted && hoDep.handoff.by === "liisa"`, 5000), "the guest accepted the handoff");
   // a strip board on a tablet (role=board), then a kick

@@ -6,7 +6,7 @@ on:
 
 jobs:
   unit:
-    # everything that needs no network: phraseology, voices, squawks, relay, FSD, data, setup wizard
+    # everything that needs no network: phraseology, voices, squawks, relay, FSD, data, setup wizard, tower link, SimBrief
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +22,8 @@ jobs:
       - run: python tests/stt_test.py
       - run: python tests/setup_test.py
       - run: python tests/sector_test.py
+      - run: python tests/towerlink_test.py
+      - run: python tests/simbrief_test.py
 
   airport:
     # suites that need a cached airport (fetched once from the X-Plane Scenery Gateway and OpenStreetMap)

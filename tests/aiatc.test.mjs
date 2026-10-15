@@ -1,7 +1,10 @@
-// S5: the AI controllers fly a real XRadio pilot from a stand at EETN to the edge of the airspace towards EVRA,
-// end to end -- XRadio's own server, tools/fake_client.py as the pilot (scripted over stdin: it files the plan,
+// S5: the AI controllers fly a real XRadio pilot from a stand at EETN to a stand at EVRA, end to end --
+// XRadio's own server, tools/fake_client.py as the pilot (scripted over stdin: it files the plan,
 // calls, reads back, moves), the page in headless Chrome with the XRadio bridge on and nobody staffed.
-//   node tests/aiatc.test.mjs            (server.py on :8780; XRADIO_DIR or ../xradio-main next to this checkout)
+// TowerTrainer works one airport at a time: after the departure leaves Tallinn's airspace the page loads Riga
+// through its own airport form, like a controller changing sectors, and Riga's AI controllers take the arrival.
+//   node tests/aiatc.test.mjs            (server.py on :8780; XRADIO_DIR or ../xradio-main next to this checkout;
+//                                         Riga is fetched into cache/ on first use, like any airport)
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -139,6 +142,62 @@ try {
   const deb = JSON.parse(d || "null");
   ok(deb && deb.done && deb.readbackErrors === 0 && deb.deviations === 0 && deb.score === 100 && /airborne: \+/.test(deb.text), "the debrief: a clean flight, score " + (deb && deb.score));
   ok(await p.eval(`(() => { const t = document.querySelector("#log").textContent; return /\\(AI\\)/.test(t) && /cleared for takeoff/.test(t); })()`), "the AI calls are in the controller's log");
+
+  // ---- the arrival: TowerTrainer now works Riga ----
+  await p.eval(`(() => { document.getElementById("aptIcao").value = "EVRA"; document.getElementById("aptForm").requestSubmit(); })()`);
+  ok(await p.waitFor(`!!(TT.apt && TT.apt.icao === "EVRA" && TT.sim && TT.sim.apt === TT.apt && TT.pilotAtc)`, 120000).catch(() => false), "TowerTrainer switched to Riga");
+  await p.eval(`(() => { const s = TT.sim; s.staffing.clear(); s.nextDep = s.nextArr = s.nextVfr = 1e9; s.vfrPerHour = 0; s.ac.splice(0, s.ac.length, ...s.ac.filter(a => a.human)); })()`);
+  const rk = JSON.parse(await p.eval(`JSON.stringify(Object.fromEntries(Object.entries(TT.positions).map(([k, v]) => [k, Math.round(v.mhz * 1000)])))`));
+  const relev = await p.eval(`TT.apt.d.elevation || 0`);
+  const at = async (nm, side = 0) => p.eval(`(() => { const e = TT.sim.arrEnd; return TT.apt.toLatLon([e.thr[0] - e.v[0] * ${nm} * 1852 - e.v[1] * ${side}, e.thr[1] - e.v[1] * ${nm} * 1852 + e.v[0] * ${side}]); })()`);
+  let q = await at(15);
+  from = lines.length;
+  send(`pos ${q[0]} ${q[1]} ${relev + 4000} 180 0 air`);
+  await p.waitFor(`TT.sim.ac.some(a => a.human && a.cs === "ESXYZ" && a.fp && a.fp.dest === "EVRA" && !a.onGround)`, 20000).catch(() => {});
+  ok(await p.eval(`TT.sim.ac.some(a => a.human && a.cs === "ESXYZ" && a.fp && a.fp.dest === "EVRA" && a.fpStatus !== "cancelled")`), "at Riga the pilot is on the radar with the plan still open");
+  ok(await waitLine(/atc: .*EVRA_APP/, 20000, 0) !== null, "the pilot's ATC list now shows Riga's stations");
+  send(`com1 ${rk.APP}`); await sleep(400);
+  const appr = await sayAndWait(`Riga Radar, ESXYZ, inbound, information Bravo, descending`, /EVRA_APP: ESXYZ, identified, descend 3000 feet, cleared ILS approach runway (\d\d[LRC]?), report established/);
+  ok(!!appr, "Riga Radar (AI) clears the approach: " + (appr || "nothing heard"));
+  const arwy = appr ? /runway (\d\d[LRC]?)/.exec(appr)[1] : await p.eval(`TT.sim.arrEnd.name`);
+  await sayAndWait(`descend 3000 feet, cleared ILS approach runway ${arwy}, ESXYZ`, /./, 1500);
+  await sleep(600);
+  ok(await p.eval(`(() => { const F = TT.pilotAtc.flights.get("ESXYZ"); return !!F && F.dir === "arr" && F.phase === "approach" && !F.pending; })()`), "approach readback accepted");
+  q = await at(8);
+  from = lines.length;
+  send(`pos ${q[0]} ${q[1]} ${relev + 2500} 160 0 air`);
+  const atwr = await waitLine(/EVRA_APP: ESXYZ, contact Tower (\d{3}\.\d+)/, 20000, from);
+  ok(!!atwr, "inside 10 NM: handed to Riga Tower: " + (atwr || "nothing heard"));
+  send(`com1 ${rk.TWR}`); await sleep(400);
+  const cont = await sayAndWait(`Riga Tower, ESXYZ, established ILS runway ${arwy}`, /EVRA_TWR: ESXYZ, continue approach/);
+  ok(!!cont, "Tower (AI): continue approach outside 6 NM: " + (cont || "nothing heard"));
+  q = await at(5);
+  from = lines.length;
+  send(`pos ${q[0]} ${q[1]} ${relev + 1600} 150 0 air`);
+  const land = await waitLine(/EVRA_TWR: ESXYZ, runway \d\d[LRC]?, cleared to land/, 20000, from);
+  ok(!!land, "inside 6 NM with the runway free: cleared to land: " + (land || "nothing heard"));
+  await sayAndWait(`runway ${arwy}, cleared to land, ESXYZ`, /./, 1500);
+  q = await at(-0.33);
+  send(`pos ${q[0]} ${q[1]} ${relev} 60 0 ground`);
+  ok(await p.waitFor(`TT.pilotAtc.flights.get("ESXYZ").phase === "landed"`, 20000).catch(() => false), "touchdown seen on Riga's radar");
+  q = await at(-0.5, 150);
+  from = lines.length;
+  send(`pos ${q[0]} ${q[1]} ${relev} 10 0 ground`);
+  const agnd = await waitLine(/EVRA_TWR: ESXYZ, contact Ground (\d{3}\.\d+)/, 20000, from);
+  ok(!!agnd, "off the runway: handed to Ground: " + (agnd || "nothing heard"));
+  send(`com1 ${rk.GND}`); await sleep(400);
+  const tst = await sayAndWait(`Riga Ground, ESXYZ, runway vacated, request taxi to the stand`, /EVRA_GND: ESXYZ, taxi to stand /);
+  ok(!!tst, "Ground (AI) gives a stand and the route: " + (tst || "nothing heard"));
+  const standName = await p.eval(`(() => { const F = TT.pilotAtc.flights.get("ESXYZ"); return F && F.stand ? String(F.stand.name) : ""; })()`);   // names can have spaces
+  await sayAndWait(`taxi to stand ${standName}, ESXYZ`, /./, 1500);
+  await sleep(600);
+  const sp = await p.eval(`(() => { const F = TT.pilotAtc.flights.get("ESXYZ"); return F && F.stand ? TT.apt.toLatLon(F.stand.pos) : null; })()`);
+  ok(!!sp && await p.eval(`TT.pilotAtc.flights.get("ESXYZ").phase === "to_stand"`), "stand readback accepted");
+  if (sp) send(`pos ${sp[0]} ${sp[1]} ${relev} 0 0 ground`);
+  ok(await p.waitFor(`(() => { const F = TT.pilotAtc.flights.get("ESXYZ"); return F && F.done && F.how === "arrived"; })()`, 20000).catch(() => false), "on the stand at Riga: the flight is closed");
+  const d2 = JSON.parse(await p.eval(`JSON.stringify(TT.pilotAtc.debrief("ESXYZ") || null)`) || "null");
+  ok(d2 && d2.readbackErrors === 0 && d2.deviations === 0 && d2.score === 100 && /landed: \+/.test(d2.text), "the arrival debrief: a clean flight, score " + (d2 && d2.score));
+
   const errs = await p.eval(`(window.__errors || []).length`).catch(() => 0);
   ok(!errs, "no page errors");
   send("end");

@@ -15,7 +15,7 @@ import { BUILTIN, WX_CHOICES, allScenarios, findScenario, saveScenario, deleteSc
 import { Recorder, frameAircraft, download, logsAsText } from "./replay.js";
 import { PilotAtc } from "./pilotatc.js";
 import { coach, coachHints } from "./coach.js";
-import { Bridges, XR_PILOT_HELP } from "./bridges.js";
+import { Bridges, XR_PILOT_HELP, xrOverrides } from "./bridges.js";
 import { Guide } from "./guide.js";
 import { NAT_NAME } from "./data.js";
 import { suggestSid, procLines, runwayMatches } from "./procs.js";
@@ -1184,7 +1184,8 @@ function bootMain() {
     if (+settings.vehicles < 0 && sim) $("setVehicles").value = sim.serviceVehicles;
     const x = settings.xr;
     $("xrEnabled").checked = x.enabled; $("xrHost").value = x.host; $("xrPort").value = x.port; $("xrPass").value = x.password;
-    $("xrCs").value = x.cs || (apt ? `${apt.icao}_TWR` : ""); $("xrFreq").value = x.freq || (apt && apt.freq.tower ? fmtFreq(apt.freq.tower.mhz) : "");
+    const xo = apt ? xrOverrides(x, apt.icao) : { cs: x.cs || "", mhz: parseFloat(x.freq) || 0 };   // overrides typed for another airport do not follow
+    $("xrCs").value = xo.cs || (apt ? `${apt.icao}_TWR` : ""); $("xrFreq").value = xo.mhz ? fmtFreq(xo.mhz) : (apt && apt.freq.tower ? fmtFreq(apt.freq.tower.mhz) : "");
     $("xrAi").checked = x.ai; $("xrHumans").checked = x.humans; $("xrText").checked = x.text; $("xrVoice").checked = x.voice;
     $("xrWeather").value = x.weather || "off"; $("xrAiVoice").checked = x.aiVoice !== false; $("xrAtisVoice").checked = !!x.atisVoice; $("xrTranscribe").checked = !!x.transcribe; $("xrTower").checked = !!x.tower; $("xrAiAtc").checked = x.aiAtc !== false;
     const sb = settings.simbrief; $("sbUser").value = sb.user || ""; $("sbUnits").value = sb.units || "kg"; $("sbKey").value = sb.apiKey || ""; $("sbAuto").checked = sb.autoFetch !== false;
@@ -1197,7 +1198,8 @@ function bootMain() {
     settings.xr = { enabled: $("xrEnabled").checked, host: $("xrHost").value.trim() || "127.0.0.1", port: +$("xrPort").value || 49100,
       password: $("xrPass").value, cs: $("xrCs").value.trim().toUpperCase(), freq: $("xrFreq").value.trim(), ai: $("xrAi").checked,
       humans: $("xrHumans").checked, text: $("xrText").checked, voice: $("xrVoice").checked,
-      weather: $("xrWeather").value, aiVoice: $("xrAiVoice").checked, atisVoice: $("xrAtisVoice").checked, transcribe: $("xrTranscribe").checked, tower: $("xrTower").checked, aiAtc: $("xrAiAtc").checked };
+      weather: $("xrWeather").value, aiVoice: $("xrAiVoice").checked, atisVoice: $("xrAtisVoice").checked, transcribe: $("xrTranscribe").checked, tower: $("xrTower").checked, aiAtc: $("xrAiAtc").checked,
+      forIcao: apt ? apt.icao : (settings.xr.forIcao || "") };
     settings.simbrief = { user: $("sbUser").value.trim(), units: $("sbUnits").value, apiKey: $("sbKey").value.trim(), autoFetch: $("sbAuto").checked };
     if (settings.xr.tower && sim && !(mp.relay && mp.role === "host")) mp.host(false, "TOWER");
     save(); applyRadioSettings();

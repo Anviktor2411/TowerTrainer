@@ -11,6 +11,7 @@ import { parseMetar } from "../web/js/atis.js";
 import { synthMetar, WX_SCENARIOS } from "../web/js/ops.js";
 import { defaultVfrPoints } from "../web/js/vfr.js";
 import { PilotAtc, normalizeNumbers, checkReadback, intentOf } from "../web/js/pilotatc.js";
+import { xrOverrides } from "../web/js/bridges.js";
 import { buildPositions } from "../web/js/positions.js";
 import { incomingFor } from "../web/js/strips.js";
 import { suggestions } from "../web/js/autocomplete.js";
@@ -569,7 +570,7 @@ eq(ctotStatus(1000, 1700).state, "missed", "CTOT missed");
   ok(/identified, climb flight level 360/.test(said[said.length - 1].text), "Control clears to the filed cruise level");
   atc.heard("ESXYZ", "climb flight level 360, ESXYZ", khz("CTR"), false);
   upd({ alt: 20000, pos: [e.v[0] * 40 * NM, e.v[1] * 40 * NM] }); sim.step(1); atc.tick();
-  ok(F.done && F.how === "departed" && /radar service terminated/.test(said[said.length - 1].text) && acks.some(x => x.status === "cancel"), "leaving the airspace closes the flight");
+  ok(F.done && F.how === "departed" && /radar service terminated/.test(said[said.length - 1].text) && !acks.some(x => x.status === "cancel"), "leaving the airspace closes the flight here; the plan stays open for the destination");
   const d = atc.debrief("ESXYZ");
   ok(d && d.readbackErrors === 1 && d.deviations === 2 && d.score === 50 && /airborne: \+/.test(d.text) && /off the cleared taxi route/.test(d.text) && d.lines.length > 12, "the debrief has the timings, the deviations and a score: " + d.score);
   ok(said.every(m => m.say && !/\d{4}/.test(m.say)), "every AI call has its spoken form");
@@ -622,6 +623,58 @@ eq(ctotStatus(1000, 1700).state, "missed", "CTOT missed");
     up3({ pos: [G.stand.pos[0], G.stand.pos[1]], spd: 0 }); s3.step(1); atc3.tick();
     ok(G.done && G.how === "arrived" && atc3.debrief("LN771").score === 100 && /landed: \+/.test(atc3.debrief("LN771").text), "on the stand: the flight is closed with a clean debrief");
   }
+
+  // Tower does not clear an aircraft that has not called it yet, and clears it at once when it calls inside 6 NM
+  {
+    const said4 = [];
+    const s4 = mk({ positions: pos, staffing: new Set([]) }).sim;
+    const atc4 = new PilotAtc(s4, { say: (m) => said4.push(m), fpAck: () => {}, log: () => {} });
+    const a = s4.arrEnd;
+    const fp4 = { session_id: 12, callsign: "BTI4X", ac_icao: "BCS3", rules: "I", status: "filed", squawk: 0, dep: "EVRA", dest: "EETN", altn: "", cruise_ft: 20000, route: "DCT", remarks: "" };
+    let c4 = { pos: [a.thr[0] - a.v[0] * 12 * NM, a.thr[1] - a.v[1] * 12 * NM], alt: 3000, hdg: 260, spd: 160 * KT, onGround: false };
+    const up4 = (x) => { c4 = { ...c4, ...x }; return s4.upsertHuman({ hid: 12, cs: "BTI4X", type: "BCS3", squawk: "4526", xpdr: "C", ai: false, tx: false, fp: fp4, ...c4 }); };
+    up4({}); s4.step(1); atc4.tick();
+    atc4.heard("BTI4X", "Tallinn Radar, BTI4X, inbound", khz("APP"), false);
+    atc4.heard("BTI4X", `descend 3000 feet, cleared ILS runway ${a.name}, BTI4X`, khz("APP"), false);
+    up4({ pos: [a.thr[0] - a.v[0] * 8 * NM, a.thr[1] - a.v[1] * 8 * NM] }); s4.step(1); atc4.tick();
+    ok(/contact Tower/.test(said4[said4.length - 1].text), "handed to Tower inside 10 NM");
+    const n4 = said4.length;
+    up4({ pos: [a.thr[0] - a.v[0] * 4 * NM, a.thr[1] - a.v[1] * 4 * NM], alt: 1300 }); s4.step(1); atc4.tick();
+    ok(said4.length === n4, "Tower does not clear an aircraft that has not called it yet");
+    atc4.heard("BTI4X", `Tallinn Tower, BTI4X, established ILS ${a.name}`, khz("TWR"), false);
+    ok(new RegExp(`runway ${a.name}, cleared to land`).test(said4[said4.length - 1].text), "the check-in inside 6 NM gets the landing clearance at once");
+  }
+
+  // a bare microphone call waits for its transcript; without one, the keyed call counts
+  {
+    const said5 = [];
+    const s5 = mk({ positions: pos, staffing: new Set([]) }).sim;
+    const atc5 = new PilotAtc(s5, { say: (m) => said5.push(m), fpAck: () => {}, log: () => {} });
+    const realNow = Date.now; let fake = realNow(); Date.now = () => fake;
+    try {
+      const base = { hid: 13, cs: "ESMIC", type: "C172", pos: [stand.pos[0], stand.pos[1]], alt: 0, hdg: 80, spd: 0, onGround: true, squawk: "7000", xpdr: "S", ai: false,
+        fp: { ...fp, session_id: 13, callsign: "ESMIC" } };
+      s5.upsertHuman({ ...base, tx: true }); s5.step(1); atc5.tick();
+      fake += 2000; s5.upsertHuman({ ...base, tx: false }); s5.step(1); atc5.tick();
+      ok(said5.length === 0, "a released microphone is not answered at once: a transcript may follow");
+      atc5.heard("ESMIC", "Tallinn Delivery, ESMIC, request clearance to Riga", khz("DEL"), true);
+      fake += 5000; s5.step(1); atc5.tick();
+      ok(said5.length === 1 && /cleared to EVRA/.test(said5[0].text), "the transcript is answered once and the bare call is dropped");
+      s5.upsertHuman({ ...base, tx: true }); s5.step(1); atc5.tick();
+      fake += 2000; s5.upsertHuman({ ...base, tx: false }); s5.step(1); atc5.tick();
+      fake += 5000; s5.step(1); atc5.tick();
+      ok(said5.length === 2 && /readback correct/.test(said5[1].text), "with no transcript the keyed call counts and the readback is taken as correct");
+    } finally { Date.now = realNow; }
+  }
+}
+
+// ---- the XRadio station callsign / frequency typed in Settings stay with the airport they were typed at ----
+{
+  const typed = { cs: "EETN_TWR", freq: "118.100", forIcao: "EETN" };
+  ok(xrOverrides(typed, "EETN").cs === "EETN_TWR" && xrOverrides(typed, "EETN").mhz === 118.1, "the overrides apply at their own airport");
+  ok(xrOverrides(typed, "EVRA").cs === "" && xrOverrides(typed, "EVRA").mhz === 0, "at another airport the station takes that airport's names");
+  ok(xrOverrides({ cs: "TLL_TWR", forIcao: "EETN" }, "EETN").cs === "TLL_TWR", "a custom callsign is kept where it was typed");
+  ok(xrOverrides({ cs: "EETN_TWR", freq: "118.1" }, "EETN").cs === "EETN_TWR" && xrOverrides({ cs: "EETN_TWR" }, "EVRA").cs === "", "settings from before: the callsign only where it names the airport");
 }
 
 console.log(fails ? `${fails} FAILED of ${n}` : `ALL ${n} PASSED`);

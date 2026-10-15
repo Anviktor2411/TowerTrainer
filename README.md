@@ -134,13 +134,17 @@ plan (SID, initial climb, a squawk), a readback check ("negative, squawk 4521, r
 pushback and a taxi route from where you really are, watching the real position (moving without a
 clearance, leaving the route, entering a runway: you are told and it goes into the debrief), Tower with
 line-up and takeoff against the trainer's traffic, Radar and Control with the climb and the handoffs,
-and for an arrival the approach, landing, vacating and the stand. Whatever position you staff yourself
-stays yours: the AI is silent there and the strip, the Delivery panel and the coach work as always.
-Spoken numbers in transcripts ("four five two one", "flight level one two zero") are understood; with
-transcripts off, a keyed microphone counts as a call and readbacks are taken as correct. Settings →
-XRadio: *AI controllers handle real pilots where nobody is staffed*. Delivery panel → **Debrief**:
-every call, the deviations, the timings and a score, downloadable. `web/js/pilotatc.js` holds the
-logic; `tests/ops.test.mjs` flies a departure and an arrival through it.
+and for an arrival the approach, the landing clearance once you have checked in with Tower, vacating
+and a stand. Leaving the departure airspace ends the departure there, not your flight plan: load the
+destination in TowerTrainer (it works one airport at a time) and its AI controllers take the arrival.
+Whatever position you staff yourself stays yours: the AI is silent there and the strip, the Delivery
+panel and the coach work as always. Spoken numbers in transcripts ("four five two one", "flight level
+one two zero") are understood. With transcripts off, a keyed microphone counts as a call -- after four
+seconds, in case a transcript is still coming -- and readbacks are taken as correct. Settings → XRadio:
+*AI controllers handle real pilots where nobody is staffed*. Delivery panel → **Debrief**: every call,
+the deviations, the timings and a score, downloadable. `web/js/pilotatc.js` holds the logic;
+`tests/ops.test.mjs` flies a departure and arrivals through it, and `tests/aiatc.test.mjs` flies a
+scripted XRadio pilot from a stand at EETN to a stand at EVRA through XRadio's own server.
 
 ## Control from the tower in X-Plane
 
