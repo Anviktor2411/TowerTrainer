@@ -4,7 +4,7 @@ import { Airport } from "./airport.js";
 import { Sim } from "./sim.js";
 import { Radio } from "./radio.js";
 import { Radar, VIEWS } from "./render.js";
-import { parse, navVocab } from "./commands.js";
+import { parse, navVocab, setVfrNames } from "./commands.js";
 import { installNavUi } from "./navui.js";
 import { buildPositions, fmtFreq } from "./positions.js";
 import { renderStrips, incomingFor } from "./strips.js";
@@ -73,7 +73,10 @@ function bootMain() {
     if (!sim) return;
     sim.setVfrPoints(pts && pts.length ? pts : null);
     radar.vfrPoints = sim.vfrPoints(); radar.staticKey = null;
+    syncVfrNames();
   }
+  /** B2: the parser knows the real VFR point names ("report Bravo"); generic placeholders are not names to check against. */
+  function syncVfrNames() { const v = sim ? sim.vfrPoints() : []; setVfrNames(v.map(p => p.name), !v.length || v.every(p => p.generic)); }
   let sim = null, apt = null, positions = null, metar = null, speed = 1, selectedId = null, procs = null, navInfo = null;
   let activePos = "ALL";
   const logs = {};                 // pos -> [{cls, html}]
@@ -393,6 +396,7 @@ function bootMain() {
     applyWeather();
     if (navUi.vfr && navUi.vfr.points.length) sim.setVfrPoints(navUi.vfr.points.map(p => ({ ...p, p: apt.toXY(p.lat, p.lon) })));
     radar.vfrPoints = sim.vfrPoints();
+    syncVfrNames();
     // F4: fixes and navaids by ident, for "direct LAKUT" and the AI traffic's routes
     sim.navPoint = (id) => { const n = navVocab(); const x = n && n.ids.get(String(id).toUpperCase()); return x && x.lat != null ? apt.toXY(x.lat, x.lon) : null; };
     updateSky();

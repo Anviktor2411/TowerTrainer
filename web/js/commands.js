@@ -7,6 +7,14 @@ let KNOWN_TAXIWAYS = null;
 /** Taxiway / taxilane names of the loaded airport, so "via" accepts apron lane names like "L3A" too. */
 export function setTaxiNames(set) { KNOWN_TAXIWAYS = set ? new Set([...set].map(x => String(x).toUpperCase())) : null; }
 
+// ---- VFR reporting points of the airport (B2): real names when there are real points, lower case as normalised
+let VFR_NAMES = [], VFR_MAP = new Map();
+export function setVfrNames(names, generic = false) {
+  VFR_MAP = new Map(generic ? [] : (names || []).map(n => [normalize(String(n)), String(n)]).filter(([k]) => k));
+  VFR_NAMES = [...VFR_MAP.keys()];
+}
+export function vfrNames() { return [...VFR_MAP.values()]; }
+
 // ---- nav data (F3/F4): fixes, navaids and procedures near the airport, by ident and by their spoken name
 let NAV = null;
 const spokenKey = (s) => normalize(String(s)).replace(/\b(vor|ndb|dme|vortac)\b/g, "").replace(/[^a-z0-9]/g, "");
@@ -186,6 +194,14 @@ export function parseInstructions(s) {
   add(new RegExp(`\\bland after ${TRAFFIC_WORDS}(?=,? runway|,|$)`), (m) => ({ t: "landAfter", phase: m[1] || "landing", subject: m[2].trim() }));
   add(/\bgo around\b/, () => ({ t: "goaround" }));
   add(/\bexpect (?:runway |an? |the |ils )?([a-z0-9 ]{2,40}?)(?=,|$| squawk| climb| contact)/, (m) => ({ t: "expect", what: m[1].trim() }));
+  // B2: VFR reporting points by their real names ("report Bravo", "report overhead Kilo", "via Kilo at 1500 feet")
+  if (VFR_NAMES.length) {
+    const alt = VFR_NAMES.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).sort((a, b) => b.length - a.length).join("|");
+    add(new RegExp(`\\breport (?:overhead |over |at )?(${alt})\\b`), (m) => ({ t: "report", what: VFR_MAP.get(m[1]) || m[1], vfrPoint: true }));
+    add(new RegExp(`\\b(?:leave|leaving|exit|join|enter|inbound|route)(?: the (?:zone|control zone|ctr))? via (${alt})(?: at (\\d{3,4}) feet)?`), (m) => ({ t: "vfrVia", point: VFR_MAP.get(m[1]) || m[1], alt: m[2] ? +m[2] : null }));
+  } else {
+    add(/\breport (?:overhead |over )?(november|echo|sierra|whiskey|n|e|s|w)\b(?! ?\d)/, (m) => ({ t: "report", what: m[1], vfrPoint: true, unknownPoint: true }));
+  }
   add(/\breport (vacated|vacating|runway vacated|established|localizer established|final|short final|ready|airborne|downwind|base|passing (?:\d{3,5})(?: feet)?|holding short|reaching (?:\d{3,5})(?: feet)?|overhead|the field in sight|field in sight)\b/, (m) => ({ t: "report", what: m[1].replace("runway vacated", "vacated").replace("localizer established", "established").replace("short final", "final").replace("the field in sight", "field in sight") }));
   add(new RegExp(`\\bgive way to ${TRAFFIC_WORDS}(?=,|$| then| and)`), (m) => ({ t: "giveWay", phase: m[1] || "", subject: m[2].trim() }));
   add(new RegExp(`\\bfollow ${TRAFFIC_WORDS}(?=,|$| to| via)`), (m) => /^(me|the follow)/.test(m[2]) ? null : ({ t: "follow", phase: m[1] || "", subject: m[2].trim() }));
@@ -267,6 +283,9 @@ export function parse(text, aircraft, selected) {
   const clr = ins.find(i => i.t === "clearance" && i.sid && i.sid !== "flight planned route");
   if (clr && NAV) { const p = resolveProc(clr.sid.replace(/ departure$/i, "")); clr.sidKnown = p.known; if (p.known) clr.sid = p.name + " departure"; }
   const warnings = navWarnings(ins, ac);
+  // B2: the generic placeholder names where the airport has real VFR points
+  const gen = VFR_NAMES.length && /\breport (?:overhead )?(n|e|s|w)\b(?! ?\d)/.exec(rest);
+  if (gen && !VFR_MAP.has(gen[1])) warnings.push(`${({ n: "November", e: "Echo", s: "Sierra", w: "Whiskey" })[gen[1]]} is not a VFR reporting point here — the points are ${vfrNames().join(", ")}`);
   if (clr && clr.sidKnown === false) warnings.push(`${clr.sid.replace(/ departure$/i, "")} is not a published SID here`);
   return { ac, explicit, abbrev, ins, normalized: s, neg: /\b(negative|correction)\b/.test(s), warnings };
 }

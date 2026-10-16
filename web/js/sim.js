@@ -697,6 +697,7 @@ export class Sim {
     if (a.checkInAt && this.t >= a.checkInAt && !a.lostUntil) { a.checkInAt = null; this.checkIn(a); }
     if (a.veh) { this.updateVehicle(a, dt); if (a.removeAt && this.t >= a.removeAt) a.gone = true; return; }
     this.transponder(a);
+    if (a.ga && a.reports) this.vfrReportTick(a);
 
     if (s === "circuit" || (s === "inbound" && a.wps && a.wpi < a.wps.length)) {
       this.circuitMove(a, dt);
@@ -708,7 +709,8 @@ export class Sim {
         this.call(a, "stillWaitingGeneric", { what: `helicopter on the apron, request departure from present position, VFR to ${a.other[1]}` }, "GND");
         a.state = "taxi_req"; a.callAt = this.t + 150;
       } else if (s === "parked" && this.t >= a.callAt && a.ga) {
-        this.call(a, "gaTaxi", { dest: a.other[1] }, "GND");
+        if (!a.vfrExit && !a.wantCircuits) a.vfrExit = this.pickVfrExit(a);
+        this.call(a, "gaTaxi", { dest: `${a.other[1]}${a.vfrExit && !a.vfrExit.generic ? " via " + a.vfrExit.name : ""}` }, "GND");
         a.state = "taxi_req";
       } else if (s === "parked" && this.t >= a.callAt) {
         a.atisReported = Math.random() < this.rates.oldAtis && this.atisIdx > 0
@@ -1314,6 +1316,23 @@ export class Sim {
     }
     return true;
   }
+  /** B2: the reporting point a VFR departure leaves by: the one facing its direction ("VFR to the north"), else the
+   *  nearest. Real points when the airport has them; the generic ones otherwise. */
+  pickVfrExit(a) {
+    const pts = this.vfrPoints();
+    if (!pts.length) return null;
+    const dir = { north: 0, east: 90, south: 180, west: 270 }[(String(a.other && a.other[1] || "").match(/north|east|south|west/) || [])[0]];
+    if (dir == null) return pts[Math.floor(Math.random() * pts.length)];
+    return pts.reduce((b, p) => Math.abs(angDiff(dir, hdgOf(...p.p))) < Math.abs(angDiff(dir, hdgOf(...b.p))) ? p : b);
+  }
+  /** "report Bravo": the pilot calls when it gets there. */
+  vfrReportTick(a) {
+    if (!a.reports || a.onGround || a.nordo) return;
+    for (const pt of this.vfrPoints()) {
+      if (!a.reports[pt.name] || (a.reported && a.reported[pt.name])) continue;
+      if (dist(a.pos, pt.p) < 800) { a.reported = { ...(a.reported || {}), [pt.name]: true }; this.pilot(a, `${this.cs(a).d}, ${pt.name}, ${Math.round(a.alt / 100) * 100} feet`, "report"); }
+    }
+  }
   crossDanger(a, r) {
     if (a.state === "vacating" || a.state === "rollout") return false;
     const d = this.runwayDanger(r, a, { finalNm: 1.5, finalSec: 45 });
@@ -1450,6 +1469,15 @@ export class Sim {
         a.askedFreq = true;
         this.call(a, "freqChange", { alt: `${Math.round(a.alt / 100) * 100} feet`, greet: "" }, "TWR");
       }
+    }
+    // B2: a VFR departure leaves the zone via its reporting point (real names when the airport has real points)
+    if (a.state === "airborne" && a.ga && !a.wantCircuits && !a.inCircuit && a.alt > 300 && !a.navWps) {
+      if (!a.vfrExit) a.vfrExit = this.pickVfrExit(a);
+      if (a.vfrExit) a.navWps = [{ p: a.vfrExit.p, id: a.vfrExit.name }];
+    }
+    if (a.vfrExit && a.navWps && !a.vfrExitCalled && dist(a.pos, a.vfrExit.p) < 900) {
+      a.vfrExitCalled = true;
+      this.pilot(a, `${this.cs(a).d}, ${a.vfrExit.name}, ${Math.round(a.alt / 100) * 100} feet, leaving the zone`, "report");
     }
     // F4: once airborne the departure flies its real SID (or a "direct" it was given), else runway heading
     let route = null;
@@ -2278,6 +2306,15 @@ export class Sim {
         if (p) { const k = (a.wps || []).findIndex(w => w.id === i.fix); a.navWps = k >= 0 ? a.wps.slice(k) : [{ p, id: i.fix, leg: i.fix }]; a.wps = a.navWps; a.wpi = 0; }
         a.directTo = i.fix;
         return `direct ${i.fix}`;
+      }
+      case "vfrVia": {
+        // B2: "leave the zone via Kilo at 1500 feet" / "join via Kilo"
+        const pt = this.vfrPoints().find(p => p.name.toLowerCase() === String(i.point).toLowerCase());
+        if (!pt) return { unable: `Say again the reporting point` };
+        if (a.kind === "dep" || !a.onGround && a.kind !== "arr") { a.vfrExit = pt; a.navWps = null; a.vfrExitCalled = false; }
+        else if (a.kind === "arr" && a.state === "inbound") { a.vfrPoint = pt; a.wps = [{ p: pt.p, leg: pt.name, alt: i.alt || pt.alt }]; a.wpi = 0; }
+        if (i.alt) a.cfl = i.alt;
+        return `via ${pt.name}${i.alt ? " at " + i.alt + " feet" : ""}`;
       }
       case "holdAt": {
         if (i.known === false) return { unable: `Unable, confirm the holding fix` };

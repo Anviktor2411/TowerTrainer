@@ -67,7 +67,7 @@ def from_sector(folder, icao, lat, lon, radius_nm=30):
                 if len(parts) < 4:
                     continue
                 la, lo = navdata._sct_coord(parts[0]), navdata._sct_coord(parts[1])
-                group, name = parts[2], parts[3]
+                group, name = parts[2], re.sub(r"\s*\d{3,4}\s*(?:FT|')\s*$", "", parts[3].strip(), flags=re.I)
                 vfr = "VFR" in group.upper() and (icao in group.upper() or not re.search(r"[A-Z]{4}", group.upper().replace("VFR", "")))
             else:
                 continue
