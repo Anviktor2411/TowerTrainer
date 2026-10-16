@@ -12,6 +12,7 @@ import { installVfr } from "./vfr.js";
 import { installEvents, CHECKLISTS } from "./events.js";
 import { wakeDepSeconds, ctotStatus } from "./flow.js";
 import { installTraffic, spanOf } from "./traffic.js";
+import { installTcas } from "./tcas.js";
 export { CHECKLISTS };
 
 const TAXI_SPD = 18 * KT, TURN_SPD = 7 * KT, PUSH_SPD = 1.3;
@@ -686,11 +687,12 @@ export class Sim {
     if (this.t - this.atisAt > 1800) this.rollAtis();
     this.trafficTick();
     for (const a of this.ac) if (!a.human) this.update(a, dt);
+    this.tcasTick(dt);
     if (this.pendingAtc && this.pendingAtc.length) {
       // an AI controller's answer prepared by the traffic logic (a new route around a blocking aircraft)
       for (const m of this.pendingAtc.filter(m => this.t >= m.at)) {
         this.onRadio({ from: "atc", ai: true, pos: m.pos, text: m.text, say: sayNumbers(m.text, NEUTRAL_STYLE) });
-        if (!m.ac.gone) this.pilot(m.ac, readback([m.rb], this.cs(m.ac), m.ac.style || NEUTRAL_STYLE), "readback");
+        if (!m.ac.gone && m.rb) this.pilot(m.ac, readback([m.rb], this.cs(m.ac), m.ac.style || NEUTRAL_STYLE), "readback");
       }
       this.pendingAtc = this.pendingAtc.filter(m => this.t < m.at);
     }
@@ -818,6 +820,7 @@ export class Sim {
         /* handled by the ops / events ticks */
       }
     } else if (a.kind === "ovf") {
+      this.tcasControls(a, dt);
       a.pos = [a.pos[0] + Math.sin(a.hdg * Math.PI / 180) * a.spd * dt, a.pos[1] + Math.cos(a.hdg * Math.PI / 180) * a.spd * dt];
       if (this.t >= a.callAt && !a.calledIn) { a.calledIn = true; this.call(a, "overflight", { cfl: `flight level ${a.alt / 100}` }, "CTR"); }
       if (Math.hypot(...a.pos) > 45 * NM) a.gone = true;
@@ -1005,7 +1008,7 @@ export class Sim {
     a.hdg = this.turnToward(a.hdg, hdgOf(dx, dy), dt, a.ga ? 4.5 : 3);
     a.spd += Math.max(-2 * dt, Math.min(1.5 * dt, a.circuitSpd - a.spd));
     const want = a.circuitAlt;
-    a.alt += Math.max(-800 / 60 * dt, Math.min((a.ga ? 700 : 1500) / 60 * dt, want - a.alt));
+    if (!this.tcasControls(a, dt)) a.alt += Math.max(-800 / 60 * dt, Math.min((a.ga ? 700 : 1500) / 60 * dt, want - a.alt));
     const v = vecFromHdg(a.hdg);
     a.pos = [a.pos[0] + v[0] * a.spd * dt, a.pos[1] + v[1] * a.spd * dt];
     // reached: close to it, or passed abeam it (so a wide turn never circles a waypoint for ever)
@@ -1479,7 +1482,7 @@ export class Sim {
     } else {
       a.spd = Math.min(a.spd + 1.0 * dt, (this.split ? 250 : 220) * KT);
       const top = this.split ? a.cfl : Infinity;
-      if (a.alt < top) a.alt = Math.min(top, a.alt + (a.ga ? 700 : 2500) / 60 * dt);
+      if (!this.tcasControls(a, dt) && a.alt < top) a.alt = Math.min(top, a.alt + (a.ga ? 700 : 2500) / 60 * dt);
       const onTwr = !this.split ? !a.handedOff : a.freq === "TWR" || a.freq === "ALL";
       if (a.wantCircuits && a.alt > 500 && !a.inCircuit) {   // VFR: stays in the circuit for touch-and-goes
         a.inCircuit = true; a.touchGo = true; a.fullStop = false; a.reports = { downwind: true, final: true }; a.circuits = 0;
@@ -1543,7 +1546,9 @@ export class Sim {
         a.askedTwr = true;
         this.call(a, "stillWaitingGeneric", { what: `established runway ${e.name}, request tower frequency`, greet: "" }, "APP");
       }
-      a.alt = this.arrAlt(a);
+      if (!this.tcasControls(a, dt)) a.alt = this.arrAlt(a);
+      // D3: an RA close in on final ends the approach: go around once the manoeuvre has started
+      if (a.tcas && a.tcas.ra && d < 5 * NM && this.t - a.tcas.ra.t > 6 && !a.nordo) { this.goAround(a, "TCAS RA on final", "going around, TCAS RA"); return; }
       a.spd = this.split && !a.ga && d > 15000 ? Math.max(a.appSpd, 200 * KT - (46000 - d) * 0.0005) : a.appSpd;
       if (this.split && !a.ga && d <= 15000) a.spd = a.appSpd + Math.max(0, (d - 6000) / 9000) * 40 * KT;
       const occupied = this.runwayOccupants(e.rwy, a).length > 0;
@@ -1587,7 +1592,7 @@ export class Sim {
         if (a.landClr) this.stats.landings = (this.stats.landings || 0) + 1;
       }
     } else {
-      a.alt += 1800 / 60 * dt;
+      if (!this.tcasControls(a, dt)) a.alt += 1800 / 60 * dt;
       a.spd = Math.min(a.spd + 1 * dt, 180 * KT);
       a.pos = [a.pos[0] + e.v[0] * a.spd * dt, a.pos[1] + e.v[1] * a.spd * dt];
       if (a.rejoin && a.alt > (a.ga ? 900 : 1400)) { a.rejoin = false; this.startCircuit(a, e); }
@@ -1734,7 +1739,7 @@ export class Sim {
   // ---------- AI controllers for unstaffed positions ----------
   aiTick() {
     for (const a of this.ac) {
-      if (a.human || a.lostUntil) continue;
+      if (a.human || a.lostUntil || (a.tcas && a.tcas.ra)) continue;
       const pos = a.freq;
       if (!this.positions[pos] || this.userWorks(pos)) continue;
       if (this.t < (a.aiNext || 0)) continue;
@@ -1965,6 +1970,10 @@ export class Sim {
       if (/\b(affirm|affirmative)\b/.test(text) && a.confirmTO) ins = [{ t: "takeoff", affirm: true }];
       else if (neg) return readback(["roger"], csObj, st);
       else return pilotCall("sayAgain", { st, cs: csObj });
+    }
+    if (a.tcas && a.tcas.ra && ins.some(i => !["identified", "contact"].includes(i.t))) {
+      this.onEvent({ type: "tcasRefused", ac: a, text });
+      return capFirstObj(ph(st)`Unable, TCAS RA, ${csObj}`);
     }
     if (!opts.ai && this.rates.sayAgain > 0 && Math.random() < this.rates.sayAgain) {
       return pilotCall("sayAgain", { st, cs: csObj });
@@ -2443,7 +2452,8 @@ export class Sim {
       alt: a.alt, onGround: a.onGround, squawk: a.squawk, assignedSq: a.assignedSq, xpdr: a.xpdr, freq: a.freq,
       other: a.other, stand: a.stand ? a.stand.name : a.standName || "", rwy: (a.depEnd || a.end || {}).name || "",
       human: !!a.human, ga: !!a.ga, sid: a.sid || "", cfl: a.cfl || 0, warn: this.labelWarnings(a), ident: !!a.identUntil,
-      typeUnknown: !!a.typeUnknown, tcasRa: !!(a.tcas && a.tcas.ra), tcasTa: !!(a.tcas && a.tcas.ta && !a.tcas.ra), vs: a.vs || 0,
+      typeUnknown: !!a.typeUnknown, tcasRa: !!(a.tcas && a.tcas.ra), tcasTa: !!(a.tcas && a.tcas.ta && !a.tcas.ra), vs: a.vsFpm || 0,
+      raKind: a.tcas && a.tcas.ra ? a.tcas.ra.kind : "", stca: !!(a.stcaUntil && this.t < a.stcaUntil),
       nat: a.nat, path: a.id === selectedId && a.path && a.onGround ? a.path.slice(a.pi).map(p => [p[0], p[1]]) : null,
       dthr: a.kind === "arr" && a.state === "final" ? this.distToThr(a) : null, strip: a.strip || null,
       stripData: a.stripData || null, callingUntil: a.callingUntil || 0, vfr: !!a.ga && a.kind !== "arr",
@@ -2479,3 +2489,4 @@ installOps(Sim);
 installVfr(Sim);
 installEvents(Sim);
 installTraffic(Sim);
+installTcas(Sim);

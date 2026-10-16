@@ -44,7 +44,7 @@ const PRESET_EFFECT = { clean: 0, good: 0.85, distant: 1, old: 0.95 };
 const DEFAULTS = {
   accents: "natural", rate: 1, effect: 0.85, preset: "good", voices: true, blocked: true, rbErr: 4, sayAgain: 2, oldAtis: 10, events: false,
   dep: 10, arr: 8, coach: false, lang: "en", graph: false, monitor: [], occupancy: 70, vehicles: -1, waves: true, osm: true, realMix: true, nightAuto: true,
-  wx: "live", lvp: false, recat: false, vfr: 2, abnormals: false, abnormalRate: 2, seq: true,
+  wx: "live", lvp: false, recat: false, vfr: 2, abnormals: false, abnormalRate: 2, seq: true, tcas: true, tcasShow: true,
   nick: "", layouts: {}, layout: "", chartsUrl: "",
   staff: { mode: "combined", keys: ["TWR"] },
   xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false,
@@ -388,6 +388,7 @@ function bootMain() {
       onEvent: onSimEvent,
     });
     sim.depPerHour = +settings.dep; sim.arrPerHour = +settings.arr;
+    sim.tcasOn = settings.tcas !== false; radar.showTcas = settings.tcasShow !== false;
     makePilotAtc();
     recorder.start({ icao: apt.icao, staff: settings.staff });
     if (settings.xr.tower && !(mp.relay && mp.role === "host")) setTimeout(() => { if (sim && !(mp.relay && mp.role === "host")) mp.host(false, "TOWER"); }, 500);
@@ -448,6 +449,16 @@ function bootMain() {
     if (e.type === "rwyClosed") { sysLog(`Runway ${apt.runways[e.rwy].label} closed.`); renderOps(); }
     // PART A: shared traffic awareness
     if (e.type === "log") sysLog(e.text);
+    // PART D: TCAS and STCA
+    if (e.type === "tcas" && settings.tcasShow !== false) {
+      const ra = e.ra || {};
+      if (e.kind === "ta") addLog(e.ac.freq, "sys", `TCAS ${esc(e.ac.cs)}: traffic, traffic (${esc(e.intr.cs)})`);
+      else if (e.kind === "clear") addLog(e.ac.freq, "sys", `TCAS ${esc(e.ac.cs)}: clear of conflict`);
+      else addLog(e.ac.freq, "warn", `⚠ TCAS RA ${esc(e.ac.cs)}: ${esc(ra.kind || "")}${ra.vs ? " " + Math.round(ra.vs) + " fpm" : ""} against ${esc(e.intr.cs)}${e.intr.human ? " (real pilot)" : ""}${e.kind === "reversal" ? " — REVERSAL" : e.kind === "increase" ? " — INCREASE" : ""}`);
+      if (e.kind === "ra" && settings.coach) showCoach([{ level: "info", msg: `${e.ac.cs} is in a TCAS RA: no instructions until "clear of conflict" — answer "roger", give traffic information, then re-clear (ICAO Doc 4444 15.7.3).` }], activePos);
+    }
+    if (e.type === "tcasRefused" && settings.coach) showCoach([{ level: "warn", msg: `${e.ac.cs} is following a TCAS RA and will not take instructions until it reports "clear of conflict".` }], activePos);
+    if (e.type === "tcasInject") sysLog(`TCAS training: ${e.ac.map(a => a.cs).join(" and ")} are converging head-on, 500 ft apart — watch the STCA, then the RA. Do not instruct them during the RA.`);
     if (e.type === "humanType") { sysLog(`${e.ac.cs} now flies ${e.to}${e.ac.typeSource ? " (" + e.ac.typeSource + " by XRadio)" : ""}${e.ac.typeUnknown ? " — type unknown, medium wake assumed" : ""}.`); renderBoard(); }
     if (e.type === "blocked") addLog(e.ac.freq, "sys", `⛔ ${esc(e.ac.cs)} blocked by ${esc(e.by.cs)}${e.by.human ? " (real pilot)" : ""}${e.twy ? " at " + esc(e.twy) : ""} for a minute — it asks for another route`);
     if (e.type === "humanStale") sysLog(`${e.ac.cs}: no XRadio position for ${e.s} s — AI traffic only knows where it was (out of range or disconnected).`);
@@ -1249,6 +1260,7 @@ function bootMain() {
     ["depRate", "dep"], ["arrRate", "arr"], ["setCoach", "coach", "checked"], ["setLang", "lang"], ["setChartsUrl", "chartsUrl"], ["graph", "graph", "checked"],
     ["setOccupancy", "occupancy"], ["setVehicles", "vehicles"], ["setWaves", "waves", "checked"], ["setOsm", "osm", "checked"], ["setRealMix", "realMix", "checked"], ["setNight", "nightAuto", "checked"],
     ["setWx", "wx"], ["setLvp", "lvp", "checked"], ["setRecat", "recat", "checked"], ["setVfr", "vfr"], ["setAbnormals", "abnormals", "checked"], ["setAbnormalRate", "abnormalRate"], ["setSeq", "seq", "checked"],
+    ["setTcas", "tcas", "checked"], ["setTcasShow", "tcasShow", "checked"],
   ];
   function fillSettings() {
     for (const [id, k, prop] of bindings) $(id)[prop || "value"] = settings[k];
@@ -1286,6 +1298,7 @@ function bootMain() {
       if (changedId === "setRealMix") applyTraffic();
       if (changedId === "setOccupancy" && sim.occupancy > sim.ac.filter(a => a.state === "parked").length / Math.max(1, apt.stands.length)) sim.populate(sim.occupancy - sim.ac.filter(a => a.state === "parked").length / Math.max(1, apt.stands.length));
       sim.recat = !!settings.recat; sim.vfrPerHour = +settings.vfr || 0;
+      sim.tcasOn = settings.tcas !== false; radar.showTcas = settings.tcasShow !== false;
       sim.abnormals = { on: !!settings.abnormals, perHour: +settings.abnormalRate || 2 };
       if (changedId === "setAbnormals" || changedId === "setAbnormalRate") sim.scheduleAbnormal();
       if (changedId === "setLvp") { sim.lvpManual = !!settings.lvp; if (settings.lvp) sim.setLvp(true, "manual"); else applyWeather(); }
@@ -1342,6 +1355,7 @@ function bootMain() {
     return `<h3>${L ? "Lennujuhtimise vead ja rajale tungimised" : "ATC errors and runway incursions"} (${list.length})</h3>` + (list.length ? `<table class="score"><tr><th>${L ? "Aeg" : "Time"}</th><th>${L ? "Mis" : "What"}</th><th>${L ? "Kes" : "Who"}</th><th>${L ? "Oleks pidanud ütlema" : "What should have been said"}</th></tr>` +
       list.map(e => `<tr><td>${Math.floor(e.t / 60)}:${String(Math.floor(e.t % 60)).padStart(2, "0")}</td><td>${esc(KIND[e.kind] || e.kind)}<br><span class="muted small">${esc(e.text)}</span></td><td>${esc(e.by)}</td><td class="small">${esc(e.should)}</td></tr>`).join("") + `</table>` : `<div class="muted">—</div>`);
   }
+  $("tcasInject").addEventListener("click", () => { if (sim) { sim.injectTcasEvent(); $("settings").close(); } });
   function openDebrief(result = null) {
     if (!sim) return;
     const score = overallScore(coachStats), hist = sessionHistory(), Lx = settings.lang === "et";
@@ -1360,6 +1374,7 @@ function bootMain() {
         <tr><th>${L ? "Keskmine ooteaeg" : "Average delay"}</th><td>${avg.toFixed(0)} s</td><th>${L ? "Kordusringid" : "Go-arounds"}</th><td>${st.goArounds}</td></tr>
         <tr><th>${L ? "Korduse vead (parandatud)" : "Readback errors (caught)"}</th><td>${st.rbErrors} (${st.rbCaught})</td><th>${L ? "Märkamata vead" : "Missed readback errors"}</th><td>${st.missedRb}</td></tr>
         <tr><th>${L ? "Konfliktid" : "Conflicts"}</th><td>${st.conflicts}</td><th>${L ? "Hoiatused" : "Alerts"}</th><td>${st.alerts}</td></tr>
+        <tr><th>STCA</th><td>${st.stca || 0}</td><th>TCAS RA</th><td>${st.tcasRa || 0}</td></tr>
       </table>
       ${atcErrorsHtml(st, L)}
       <h3>${L ? "Fraseoloogia positsioonide kaupa" : "Phraseology per position"}</h3>

@@ -46,6 +46,7 @@ jobs:
       - run: node tests/traffic.test.mjs
       - run: node tests/vfr.test.mjs
       - run: node tests/humantype.test.mjs
+      - run: node tests/tcas.test.mjs
       - name: browser suite (headless Chrome)
         run: |
           python server.py --fsd-port 0 > server.log 2>&1 &

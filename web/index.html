@@ -178,6 +178,9 @@
       <label>Guide / coach language <select id="setLang"><option value="en">English</option><option value="et">Eesti</option></select></label>
       <label><input type="checkbox" id="graph"> Show taxi graph (generated stand links dashed)</label>
           <label>Charts link <input id="setChartsUrl" placeholder="https://skyvector.com/airport/{icao}" size="30" title="{icao} is replaced by the airport"></label>
+      <label title="Every AI aircraft has TCAS II: TA, RA, coordination, 'TCAS RA' / 'clear of conflict' calls"><input type="checkbox" id="setTcas"> TCAS for AI aircraft</label>
+      <label><input type="checkbox" id="setTcasShow"> Show TCAS events on the radar and in the log</label>
+      <button type="button" id="tcasInject" title="Two AI aircraft set up for an RA in your airspace: practise the ATC side">Inject TCAS event</button>
     </fieldset>
     <fieldset><legend>EuroScope</legend>
       <div id="setEs" class="small"></div>

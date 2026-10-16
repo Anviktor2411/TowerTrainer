@@ -17,7 +17,7 @@ export function bridgeAircraft(sim, apt, { ownOnly = false } = {}) {
       route: a.route ? (a.sid ? `${a.sid} ${a.route}` : a.route) : (a.sid ? `${a.sid} DCT` : "DCT"), cfl: a.cfl || 5000, tas: a.ga ? 110 : 280, vfr: !!a.ga, nat: a.nat || "",
       simbrief: !!a.simbrief, equip: a.equip || "", rfl: a.rfl || 0, altn: a.altn || "", remarks: a.remarks || "", eobt: a.eobt || "", reg: a.reg || "",
       tas_plan: a.plan && a.plan.cruise_tas ? a.plan.cruise_tas : 0,
-      xpdr: a.xpdr || "C", khz: pos ? Math.round(pos.mhz * 1000) : 0, human: !!a.human,
+      xpdr: a.xpdr || "C", khz: pos ? Math.round(pos.mhz * 1000) : 0, human: !!a.human, tcas: sim.tcasOn !== false, vs: (a.vsFpm || 0) * 0.00508,
     };
   });
 }

@@ -910,7 +910,9 @@ export class Radar {
     } else {
       const alt = String(Math.round((a.alt || 0) / 100)).padStart(3, "0");
       const hdg = this.view === "APP" || this.view === "CTR" ? ` H${String(Math.round(a.hdg) % 360).padStart(3, "0")}` : "";
-      lines.push({ t: `${a.type}${hdg}  A${alt}  ${String(kt).padStart(3, "0")}`, col: sel ? C.sel : C.text, font: F });
+      const trend = (a.vs || 0) > 400 ? "↑" : (a.vs || 0) < -400 ? "↓" : "";
+      lines.push({ t: `${a.type}${hdg}  A${alt}${trend}  ${String(kt).padStart(3, "0")}`, col: sel ? C.sel : C.text, font: F });
+      if (a.stca && this.showTcas !== false) lines.push({ t: "STCA", col: C.warn, font: "700 10px ui-monospace, Consolas, monospace" });
       const sq = squawkText(a);
       if (sq.t) lines.push({ t: sq.t + (sq.ident ? " IDENT" : ""), col: sq.mismatch ? C.amber : (sel ? C.sel : C.text), font: F });
       const gap = a._gap != null ? `  Δ${a._gap.toFixed(1)}${a._gapS != null ? "/" + Math.round(a._gapS) + "s" : ""}` : "";

@@ -727,7 +727,10 @@ class XRadioBridge:
         lights = LT_NAV | LT_BEACON | (LT_TAXI if on_ground and gs > 0.5 else 0) | (0 if on_ground else LT_STROBE | LT_LANDING)
         sq = a.get("squawk")
         return {"lat": lat, "lon": lon, "alt_m": a.get("alt_m", 0.0), "hdg": a.get("hdg", 0.0), "gs": gs, "on_ground": on_ground,
-                "lights": lights, "squawk": int(sq) if str(sq or "0").isdigit() else 0, "xpdr": XPDR.get(a.get("xpdr", "C"), P.XPDR_ALT),
+                "lights": lights, "squawk": int(sq) if str(sq or "0").isdigit() else 0,
+                # D5: an airborne AI aircraft with TCAS answers as a TA/RA (Mode S) transponder, so a real pilot's
+                # X-Plane TCAS sees it with its altitude and treats it as RA-capable traffic
+                "xpdr": P.XPDR_TA_RA if a.get("xpdr", "C") == "C" and not on_ground and a.get("tcas", True) else XPDR.get(a.get("xpdr", "C"), P.XPDR_ALT),
                 "ident": a.get("ident", False), "vs": a.get("vs", 0.0)}
 
     def _dead_reckon(self, s, cs, now):
