@@ -271,6 +271,27 @@ try {
   ok(await p.eval(`document.getElementById("debrief").open`), "guide ends with the debrief");
   ok(p.errors.length === 0, "main window has no JS errors " + p.errors.join(" | "));
   p.close();
+
+  // ---- PART E: automatic ATC from the header: auto for all, the log, take over / hand back (Alt+X), assist, watch ----
+  const q = await br.newPage("about:blank");
+  await q.eval(`localStorage.clear()`).catch(() => {});
+  await q.send("Page.navigate", { url: URL0 });
+  ok(await q.waitFor("window.TT && TT.sim && TT.apt && TT.apt.icao === 'EETN'"), "auto ATC: page loads");
+  await q.eval(`(() => { TT.radio.tts = false; TT.settings.voices = false; const s = document.getElementById("atcMode"); s.value = "auto"; s.dispatchEvent(new Event("change")); })()`);
+  ok(await q.waitFor(`TT.sim && TT.sim.split && ["DEL", "GND", "TWR", "APP", "CTR"].every(k => TT.sim.modeOf(k) === "auto")`, 10000), "header switch: every position on auto (split staffing switched on)");
+  await q.eval(`TT.radio.tts = false; for (let i = 0; i < 6000; i++) TT.sim.step(0.1)`);
+  ok(await q.waitFor(`!document.getElementById("autoPanel").classList.contains("hidden") && document.querySelectorAll("#autoLog > div").length > 0`, 10000), "the Auto ATC panel shows what the AI controllers said");
+  await q.eval(`TT.setActive("TWR"); window.dispatchEvent(new KeyboardEvent("keydown", { key: "x", altKey: true }))`);
+  ok(await q.eval(`TT.sim.modeOf("TWR") === "manual" && TT.sim.userWorks("TWR")`), "Alt+X: I take over Tower");
+  await q.eval(`window.dispatchEvent(new KeyboardEvent("keydown", { key: "x", altKey: true }))`);
+  ok(await q.eval(`TT.sim.modeOf("TWR") === "auto" && !TT.sim.userWorks("TWR")`), "Alt+X again: handed back to the AI");
+  await q.eval(`(() => { const s = document.getElementById("atcMode"); s.value = "assist"; s.dispatchEvent(new Event("change")); })()`);
+  ok(await q.eval(`TT.sim.modeOf("TWR") === "assist" && TT.sim.userWorks("TWR") && !TT.sim.userWorks("GND")`), "assist: Tower (staffed) is mine again with suggestions, Ground stays with the AI");
+  await q.eval(`document.getElementById("watchBtn").click()`);
+  ok(await q.eval(`document.getElementById("watchBtn").classList.contains("on")`), "watch mode toggles");
+  await q.shot(join(OUT, "auto-atc.png"));
+  ok(q.errors.length === 0, "auto ATC: no JS errors " + q.errors.join(" | "));
+  q.close();
 } finally {
   br.close();
 }

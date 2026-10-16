@@ -3,7 +3,7 @@
 import { KT, FT, dist, hdgOf, angDiff, vecFromHdg } from "./airport.js";
 import { AC_DIM, AIRLINES, TYPES, GA_TYPES, HELI_TYPES, REG_PREFIX, LETTER_WORD, DESTS, AIRLINE_NAT, AIRLINE_TYPES, CARGO_TYPES, HOUR_WAVE, REG_NAT, rnd, rint, distKm, weighted, controllerNat } from "./data.js";
 import { standKey, parse, normalize, setTaxiNames } from "./commands.js";
-import { regionOf, makeStyle, callsign, spokenType, pilotCall, readback, ph, greeting, signOff, localHour, cap, NEUTRAL_STYLE, sayNumbers } from "./phrase.js";
+import { regionOf, makeStyle, callsign, spokenType, atcType, pilotCall, readback, ph, greeting, signOff, localHour, cap, NEUTRAL_STYLE, sayNumbers } from "./phrase.js";
 import { makeCrew } from "./voices.js";
 import { SquawkAllocator, validCode } from "./squawk.js";
 import { positionFor, fmtFreq } from "./positions.js";
@@ -12,7 +12,8 @@ import { installVfr } from "./vfr.js";
 import { installEvents, CHECKLISTS } from "./events.js";
 import { wakeDepSeconds, ctotStatus } from "./flow.js";
 import { installTraffic, spanOf } from "./traffic.js";
-import { installTcas } from "./tcas.js";
+import { installTcas, stca as stcaCheck } from "./tcas.js";
+import { installAutoAtc, trafficInfo, sequenceInfo, workload as workloadOf } from "./autoatc.js";
 export { CHECKLISTS };
 
 const TAXI_SPD = 18 * KT, TURN_SPD = 7 * KT, PUSH_SPD = 1.3;
@@ -122,7 +123,10 @@ export class Sim {
 
   // ---------- positions / frequencies ----------
   get split() { return !!this.positions; }
-  userWorks(pos) { return !this.split || this.staffing.has("ALL") || this.staffing.has(pos); }
+  userWorks(pos) {
+    if (this.split && this.atcMode && this.atcMode[pos] === "auto" && !this.remoteStaff[pos]) return false;
+    return !this.split || this.staffing.has("ALL") || this.staffing.has(pos);
+  }
   hasPos(k) { return this.split && !!this.positions[k]; }
   /** Does the pilot hear a transmission on position `pos`? */
   hears(a, pos) { return !this.split || !pos || pos === "ALL" || a.freq === pos; }
@@ -138,7 +142,15 @@ export class Sim {
   }
   atis() { return LETTER_WORD[String.fromCharCode(65 + this.atisIdx % 26)].replace(/^\w/, c => c.toUpperCase()); }
   atisLetter() { return String.fromCharCode(65 + this.atisIdx % 26); }
-  rollAtis() { this.atisIdx++; this.atisAt = this.t; this.onEvent({ type: "atis", letter: this.atisLetter() }); }
+  rollAtis() {
+    this.atisIdx++; this.atisAt = this.t; this.onEvent({ type: "atis", letter: this.atisLetter() });
+    if (!this.split) return;
+    for (const pos of ["TWR", "APP"]) {
+      if (!this.positions[pos] || this.userWorks(pos) || !this.ac.some(a => a.freq === pos && !a.veh)) continue;
+      const text = `all stations, information ${this.atis()} now current${this.qnh ? ", QNH " + this.qnh : ""}`;
+      this.onRadio({ from: "atc", ai: true, pos, text, say: text, ctrl: this.controllerFor(pos) });
+    }
+  }
 
   setRunway(name) {
     const e = this.apt.findRunwayEnd(name);
@@ -365,7 +377,15 @@ export class Sim {
     // keep ~3 nm (5.5 km) behind previous arrival
     const last = this.ac.filter(a => a.kind === "arr" && !a.onGround && a.state !== "goaround")
       .map(a => this.distToThr(a)).reduce((m, d) => Math.max(m, d), -1e9);
-    if (last > spawnD - 5500) return null;
+    // Approach leaves gaps for the departures when some are waiting (mixed mode): ~6 NM instead of ~3
+    const waiting = this.ac.filter(o => o.kind === "dep" && ["holding", "taxi", "lined_up"].includes(o.state) && o.depEnd && o.depEnd.rwy === e.rwy).length;
+    if (last > spawnD - (waiting >= 2 ? 15000 : waiting ? 11000 : 5500)) return null;
+    // and in time: a slow aircraft put on a short final must not land in front of a faster one already inbound (a STAR
+    // flight's distance is the way it still has to fly, not its projection on the runway axis)
+    const etaNew = spawnD / ((ga ? 90 : 140) * KT);
+    const etas = this.ac.filter(a => a.kind === "arr" && !a.onGround && ["final", "star"].includes(a.state) && !a.vfr && a.end === e)
+      .map(a => (a.state === "star" ? dist(a.pos, e.thr) * 1.15 : Math.max(0, this.distToThr(a))) / Math.max(40, a.spd || a.appSpd || 60));
+    if (etas.some(t => Math.abs(t - etaNew) < (waiting ? 150 : 90))) return null;
     const f = this.makeFlight(stand ? stand.types : null, ga, { cargo: !!stand && !ga && isCargoStand(stand), stand });
     // F4: with an approach position and real data, the arrival starts at its STAR's entry fix and flies the STAR
     const sp = !ga && this.hasPos("APP") && this.starPath ? this.starPath(e, f) : null;
@@ -410,6 +430,23 @@ export class Sim {
       a.calledIn = true;
       this.call(a, "approachInitial", { alt: `${a.alt >= 10000 ? "flight level " + Math.round(a.alt / 1000) * 10 : Math.round(a.alt / 100) * 100 + " feet"}` }, "APP");
     }
+    // E7: radar vectors fly a heading until the approach clearance; a hold circles the fix until the EAT
+    if (a.vectorHdg != null) {
+      a.hdg = this.turnToward(a.hdg, a.vectorHdg, dt, 3);
+      const hv0 = vecFromHdg(a.hdg);
+      a.pos = [a.pos[0] + hv0[0] * a.spd * dt, a.pos[1] + hv0[1] * a.spd * dt];
+      if (!this.tcasControls(a, dt) && a.cfl && a.alt > a.cfl) a.alt = Math.max(a.cfl, a.alt - 1800 / 60 * dt);
+      return;
+    }
+    if (a.holdP && (a.eat == null || this.t < a.eat) && dist(a.pos, a.holdP) < 3 * NM) {
+      a.hdg = (a.hdg + 3 * dt) % 360;                     // standard rate, right-hand pattern around the fix
+      const hv1 = vecFromHdg(a.hdg);
+      a.pos = [a.pos[0] + hv1[0] * a.spd * dt, a.pos[1] + hv1[1] * a.spd * dt];
+      a.holding = true;
+      this.tcasControls(a, dt);
+      return;
+    }
+    a.holding = false;
     const list = a.navWps && a.navWps.length ? a.navWps : a.starWps;
     const k = a.navWps && a.navWps.length ? "navI" : "starI";
     a[k] = a[k] || 0;
@@ -439,7 +476,8 @@ export class Sim {
     const brg = Math.random() * 360, R = 40 * NM;
     const pos = [Math.sin(brg * Math.PI / 180) * R, Math.cos(brg * Math.PI / 180) * R];
     const hdg = (brg + 180 + rint(-35, 35) + 360) % 360;
-    const fl = rint(30, 38) * 1000;
+    const east = hdg < 180;
+    const fl = (Math.floor(rint(30, 38) / 2) * 2 + (east ? 1 : 0)) * 1000;
     Object.assign(f, {
       kind: "ovf", state: "cruise", pos, hdg, spd: 450 * KT, alt: fl, onGround: false, squawk: this.squawks.next(this.t),
       xpdr: "C", ifr: true, callAt: this.t + rint(5, 20), freq: "CTR", cfl: fl,
@@ -647,7 +685,7 @@ export class Sim {
   }
 
   /** ATC (AI controller) transmission on a position; parsed and applied like the user's. */
-  atc(pos, text) {
+  atc(pos, text, opts = {}) {
     const pp = parse(text, this.ac.filter(a => this.hears(a, pos)), null);
     const action = pp.ins.length && pp.ins.every(i => i.t === "light" || i.t === "followMe");
     if (action) {                      // a light-gun signal is not a transmission
@@ -655,7 +693,8 @@ export class Sim {
       this.onEvent({ type: "aiAction", pos, text, ac: pp.ac });
       return;
     }
-    this.onRadio({ from: "atc", ai: true, pos, text, say: sayNumbers(text, NEUTRAL_STYLE) });
+    const shown = opts.display || text;
+    this.onRadio({ from: "atc", ai: true, pos, text: shown, say: sayNumbers(shown, NEUTRAL_STYLE), ctrl: opts.ctrl || null });
     if (pp.ac && !pp.ac.human) {
       const r = this.respond(pp.ac, pp.ins, { text: pp.normalized, pos, ai: true });
       if (r) this.pilot(pp.ac, r, "readback");
@@ -820,7 +859,7 @@ export class Sim {
         /* handled by the ops / events ticks */
       }
     } else if (a.kind === "ovf") {
-      this.tcasControls(a, dt);
+      if (!this.tcasControls(a, dt) && a.cfl && Math.abs(a.cfl - a.alt) > 1) a.alt += Math.sign(a.cfl - a.alt) * Math.min(Math.abs(a.cfl - a.alt), 1500 / 60 * dt);
       a.pos = [a.pos[0] + Math.sin(a.hdg * Math.PI / 180) * a.spd * dt, a.pos[1] + Math.cos(a.hdg * Math.PI / 180) * a.spd * dt];
       if (this.t >= a.callAt && !a.calledIn) { a.calledIn = true; this.call(a, "overflight", { cfl: `flight level ${a.alt / 100}` }, "CTR"); }
       if (Math.hypot(...a.pos) > 45 * NM) a.gone = true;
@@ -870,7 +909,7 @@ export class Sim {
 
   /** The aircraft is on its stand. */
   parkAt(a) {
-    a.state = "parked"; a.parkedAt = this.t; a.xpdr = "S"; a.spd = 0;
+    a.state = "parked"; a.parkedAt = this.t; a.xpdr = "S"; a.spd = 0; a.onGround = true; a.alt = 0; a.tcas = null;
     if (a.stand) { a.pos = [...a.stand.pos]; a.hdg = a.stand.hdg; }
     a.path = null; a.taxiTo = null; a.holdPos = false;
     if (a.leader) { a.leader = null; }
@@ -984,7 +1023,8 @@ export class Sim {
    * Fly a rectangular circuit around runway end `end` and rejoin final at `joinNm`.
    * side: "left" | "right" (direction of the turns), altFt: circuit altitude.
    */
-  startCircuit(a, end, { side = "left", joinNm = a.ga ? 2.5 : 4, altFt = a.ga ? 1000 : 1500, widthM = a.ga ? 1300 : 3300 } = {}) {
+  startCircuit(a, end, opts = {}) { a.extTold = false; a.orbitTold = false; return this.startCircuitNow(a, end, opts); }
+  startCircuitNow(a, end, { side = "left", joinNm = a.ga ? 2.5 : 4, altFt = a.ga ? 1000 : 1500, widthM = a.ga ? 2000 : 3300 } = {}) {
     const v = end.v, n = side === "right" ? [v[1], -v[0]] : [-v[1], v[0]];
     const len = this.apt.runways[end.rwy].len, thr = end.thr, joinM = joinNm * NM;
     const P = (along, out) => [thr[0] + v[0] * along + n[0] * out, thr[1] + v[1] * along + n[1] * out];
@@ -992,7 +1032,7 @@ export class Sim {
       { p: P(len + 700, widthM * 0.25), leg: "crosswind" },
       { p: P(len + 200, widthM), leg: "downwind" },
       { p: P(-1.0 * NM, widthM), leg: "late downwind" },
-      { p: P(-joinM, widthM * 0.45), leg: "base" },
+      { p: P(-joinM, widthM), leg: "base" },                   // a rectangle: the downwind never slants towards final
       { p: P(-joinM, 0), leg: "final" },
     ];
     a.wpi = 0; a.circuitLeg = "upwind"; a.circuitAlt = altFt; a.circuitSpd = (a.ga ? 90 : 170) * KT;
@@ -1001,9 +1041,58 @@ export class Sim {
     return a.wps;
   }
 
+  /** A jet on (or about to be on) final behind which a circuit aircraft must not turn base. */
+  jetBehind(a) {
+    const along = Math.max(0, -((a.pos[0] - a.end.thr[0]) * a.end.v[0] + (a.pos[1] - a.end.thr[1]) * a.end.v[1]));
+    return this.ac.filter(o => o !== a && o.kind === "arr" && !o.ga && !o.onGround && ["final", "star", "inbound"].includes(o.state) && o.end && o.end.name === a.end.name &&
+      this.distToThr(o) > along - 0.8 * NM && this.distToThr(o) < along + 5 * NM).sort((x, y) => this.distToThr(x) - this.distToThr(y))[0] || null;
+  }
+
   circuitMove(a, dt) {
     const wp = a.wps && a.wps[a.wpi];
     if (!wp) { this.joinFinal(a); return; }
+    // "extend downwind, I'll call your base": straight on along the downwind until the traffic has passed
+    // turning base in front of a jet on final is never done: wait for it (the pilot sees it, the Tower says so)
+    if (!a.baseAfter && wp.leg === "base" && a.end && !a.nordo) {
+      const j = this.jetBehind(a);
+      if (j) {
+        a.baseAfter = j; a.baseAfterT = this.t;
+        if (this.split && this.positions.TWR && !this.userWorks("TWR")) (this.pendingAtc ||= []).push({ pos: a.freq, ac: a, at: this.t + 1,
+          text: `${a.cs}, extend downwind, I'll call your base, traffic ${atcType(j.type)} on ${Math.max(1, Math.round(this.distToThr(j) / NM))} mile final`, rb: "extending downwind" });
+      }
+    }
+    const jet = a.baseAfter;
+    if (jet && wp.leg === "base") {
+      const along = -((a.pos[0] - a.end.thr[0]) * a.end.v[0] + (a.pos[1] - a.end.thr[1]) * a.end.v[1]);
+      let passed = !this.ac.includes(jet) || jet.onGround || !["final", "star", "inbound"].includes(jet.state) || this.distToThr(jet) < Math.max(0, along) - 2 * NM;
+      if (passed && !a.nordo) {                                        // the next one behind it: wait for that too
+        const next = this.jetBehind(a);
+        if (next && next !== jet) { a.baseAfter = next; passed = false; }
+      }
+      // waited long: give up only when the jet is still far out
+      if (!passed && (this.t - (a.baseAfterT || this.t) < 300 || this.distToThr(jet) < along + 4 * NM)) {
+        if (along > 3 * NM || a.orbitDir) {
+          // never further out towards the jet: orbit on the outside of the downwind until it has passed
+          if (!a.orbitDir) {
+            const out = [a.pos[0] - (a.end.thr[0] - a.end.v[0] * along), a.pos[1] - (a.end.thr[1] - a.end.v[1] * along)];
+            a.orbitDir = (((hdgOf(out[0], out[1]) - a.hdg + 540) % 360) - 180) >= 0 ? 1 : -1;
+          }
+          a.hdg = (a.hdg + a.orbitDir * 3 * dt + 360) % 360;
+        } else {
+          a.hdg = this.turnToward(a.hdg, (a.end.hdg + 180) % 360, dt, a.ga ? 4.5 : 3);
+        }
+        const v0 = vecFromHdg(a.hdg);
+        a.pos = [a.pos[0] + v0[0] * a.spd * dt, a.pos[1] + v0[1] * a.spd * dt];
+        if (!this.tcasControls(a, dt)) a.alt += Math.max(-800 / 60 * dt, Math.min(700 / 60 * dt, a.circuitAlt - a.alt));
+        return;
+      }
+      a.baseAfter = null; a.orbitDir = null;
+      // base turn where the aircraft now is; final abeam it
+      const fin = a.wps[a.wpi + 1];
+      wp.p = [...a.pos];
+      if (fin) fin.p = [a.end.thr[0] - a.end.v[0] * Math.max(along, 1.2 * NM), a.end.thr[1] - a.end.v[1] * Math.max(along, 1.2 * NM)];
+      if (!a.nordo && this.split && this.positions.TWR && !this.userWorks("TWR")) (this.pendingAtc ||= []).push({ pos: a.freq, ac: a, at: this.t + 1, text: `${a.cs}, turn base now, number 2, traffic passing`, rb: null });
+    }
     const dx = wp.p[0] - a.pos[0], dy = wp.p[1] - a.pos[1], d = Math.hypot(dx, dy);
     a.hdg = this.turnToward(a.hdg, hdgOf(dx, dy), dt, a.ga ? 4.5 : 3);
     a.spd += Math.max(-2 * dt, Math.min(1.5 * dt, a.circuitSpd - a.spd));
@@ -1325,13 +1414,34 @@ export class Sim {
       for (const r of z) {
         if (zPrev.has(r)) continue;
         // A3/A10: a crossing / line-up clearance is not used while someone takes off, lands or is on the runway
-        if (a.crossOk.has(r)) { if (!a.leader && this.crossDanger(a, r)) return { j, rwy: r, danger: true }; continue; }
+        if (a.crossOk.has(r)) {
+          // checked once at the bar; a crossing that has begun is finished, not stopped half-way
+          if (!a.leader && !(a.crossGo && a.crossGo.has(r)) && this.crossDanger(a, r)) return { j, rwy: r, danger: true };
+          if (dist(a.pos, p[j]) < 25) (a.crossGo ||= new Set()).add(r);       // committed only at the runway edge
+          continue;
+        }
         // a departure may pass through its own runway's zone (e.g. behind the threshold) if it leaves it again
-        if (a.kind === "dep" && a.depEnd && r === a.depEnd.rwy && this.leavesZone(p, j, r)) continue;
+        if (a.kind === "dep" && a.depEnd && r === a.depEnd.rwy && this.leavesZone(p, j, r) && !this.zoneTouchesRunway(p, j, r)) continue;
         return { j, rwy: r };
       }
     }
     return { j: p.length - 1, rwy: null };
+  }
+  /** Seconds this aircraft needs to cross runway `r` from where it is: the path through the runway's zone at taxi speed
+   *  (a light aircraft is slow), plus the time to get going. */
+  crossTime(a, r) {
+    const p = a.path;
+    if (!p || a.pi >= p.length) return 60;
+    let d = 0, inZone = false, prev = a.pos;
+    for (let k = Math.max(0, a.pi - 1); k + 1 < p.length; k++) {
+      const z = this.edgeZones(p, k);
+      d += dist(prev, p[k + 1]); prev = p[k + 1];
+      if (z.has(r)) inZone = true;
+      else if (inZone) break;
+      if (d > 1500) break;
+    }
+    const v = Math.min(a.maxSpd || TAXI_SPD, a.ga || a.veh ? 5 : 8);
+    return d / v + 12;
   }
   /** Lined up with a takeoff clearance: anyone on the runway ahead or landing within ~1.5 NM / 45 s holds the roll. */
   departureBlocked(a) {
@@ -1349,8 +1459,12 @@ export class Sim {
     const pts = this.vfrPoints();
     if (!pts.length) return null;
     const dir = { north: 0, east: 90, south: 180, west: 270 }[(String(a.other && a.other[1] || "").match(/north|east|south|west/) || [])[0]];
-    if (dir == null) return pts[Math.floor(Math.random() * pts.length)];
-    return pts.reduce((b, p) => Math.abs(angDiff(dir, hdgOf(...p.p))) < Math.abs(angDiff(dir, hdgOf(...b.p))) ? p : b);
+    // never out through the final approach of the runway in use (VFR traffic there flies into the arrivals)
+    const fin = (this.arrEnd.hdg + 180) % 360;
+    const ok = pts.filter(p => Math.abs(angDiff(hdgOf(...p.p), fin)) > 60);
+    const list = ok.length ? ok : pts;
+    if (dir == null) return list[Math.floor(Math.random() * list.length)];
+    return list.reduce((b, p) => Math.abs(angDiff(dir, hdgOf(...p.p))) < Math.abs(angDiff(dir, hdgOf(...b.p))) ? p : b);
   }
   /** "report Bravo": the pilot calls when it gets there. */
   vfrReportTick(a) {
@@ -1362,7 +1476,8 @@ export class Sim {
   }
   crossDanger(a, r) {
     if (a.state === "vacating" || a.state === "rollout") return false;
-    const d = this.runwayDanger(r, a, { finalNm: 1.5, finalSec: 45 });
+    const own = a.kind === "dep" && a.depEnd && r === a.depEnd.rwy;
+    const d = this.runwayDanger(r, a, own ? { finalNm: 1.5, finalSec: 45 } : { finalNm: 1.2, finalSec: this.crossTime(a, r) + 20 });
     if (!d.busy) return false;
     // lining up on our own runway behind traffic that is already rolling away (landing roll, takeoff) is fine
     if (a.kind === "dep" && a.depEnd && r === a.depEnd.rwy && d.by && ["roll", "airborne", "rollout", "vacating"].includes(d.by.state) && d.by.onGround !== false) {
@@ -1371,6 +1486,16 @@ export class Sim {
     }
     if (a.kind === "dep" && a.depEnd && r === a.depEnd.rwy && d.by && d.by.state === "airborne") return false;
     return true;
+  }
+  /** Does the path, from segment j through runway r's zone, run over the runway itself (a crossing, not a pass behind)? */
+  zoneTouchesRunway(p, j, r) {
+    const R = this.apt.runways[r];
+    for (let k = j; k < p.length - 1; k++) {
+      if (!this.edgeZones(p, k).has(r)) break;
+      const a = p[k], b = p[k + 1];
+      for (const f of [0.25, 0.5, 0.75, 1]) if (this.apt.onRunway([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f], R, 0)) return true;
+    }
+    return false;
   }
   leavesZone(p, j, r) {
     for (let k = j + 1; k < p.length - 1; k++) if (!this.edgeZones(p, k).has(r)) return true;
@@ -1411,6 +1536,8 @@ export class Sim {
     target = Math.min(target, dStop > 0 ? Math.max(0.4, Math.sqrt(2 * 0.9 * dStop)) : 0);
     a.spd += Math.max(-1.5 * dt, Math.min(0.6 * dt, target - a.spd));
     if (target === 0 && a.spd < 0.05) a.spd = 0;
+    // a point the aircraft is already standing on is passed whatever its speed
+    while (a.pi < p.length && dist(a.pos, p[a.pi]) < 0.01 && (reverse || a.pi - 1 < stop.j)) { a.pi++; this.onPassNode(a); }
     let s = a.spd * dt;
     while (s > 0 && a.pi < p.length) {
       if (!reverse && a.pi - 1 >= stop.j) break;
@@ -1447,7 +1574,7 @@ export class Sim {
     if (j <= 0 || j >= p.length - 1) return;
     const zIn = this.edgeZones(p, j - 1), zOut = this.edgeZones(p, j);
     for (const r of [...a.crossOk]) {
-      if (zIn.has(r) && !zOut.has(r) && !(a.kind === "dep" && a.state === "lineup")) a.crossOk.delete(r);
+      if (zIn.has(r) && !zOut.has(r) && !(a.kind === "dep" && a.state === "lineup")) { a.crossOk.delete(r); if (a.crossGo) a.crossGo.delete(r); }
     }
   }
 
@@ -1517,7 +1644,8 @@ export class Sim {
       a[k] = a[k] || 0;
       while (a[k] < route.length && dist(a.pos, route[a[k]].p) < 1500) a[k]++;
       if (a[k] < route.length) { const w = route[a[k]].p; a.hdg = this.turnToward(a.hdg, hdgOf(w[0] - a.pos[0], w[1] - a.pos[1]), dt, 3); }
-    } else if (!route || !route.length || a.alt <= 400) a.hdg = e.hdg;
+    } else if (a.hdgHold != null && a.alt > 400) a.hdg = this.turnToward(a.hdg, a.hdgHold, dt, 3);
+    else if (!route || !route.length || a.alt <= 400) a.hdg = e.hdg;
     const hv = vecFromHdg(a.hdg);
     a.pos = [a.pos[0] + hv[0] * a.spd * dt, a.pos[1] + hv[1] * a.spd * dt];
     if (!this.split) {
@@ -1551,6 +1679,7 @@ export class Sim {
       if (a.tcas && a.tcas.ra && d < 5 * NM && this.t - a.tcas.ra.t > 6 && !a.nordo) { this.goAround(a, "TCAS RA on final", "going around, TCAS RA"); return; }
       a.spd = this.split && !a.ga && d > 15000 ? Math.max(a.appSpd, 200 * KT - (46000 - d) * 0.0005) : a.appSpd;
       if (this.split && !a.ga && d <= 15000) a.spd = a.appSpd + Math.max(0, (d - 6000) / 9000) * 40 * KT;
+      if (a.spdCap && d > (a.spdCapUntil || 0)) a.spd = Math.max(a.appSpd, Math.min(a.spd, a.spdCap));
       const occupied = this.runwayOccupants(e.rwy, a).length > 0;
       // "land after …": the clearance becomes effective once the preceding traffic is clear
       if (a.landAfter && !a.landClr && this.condMet({ cond: a.landAfter, pos: a.pos })) { a.landClr = true; a.landAfter = null; }
@@ -1603,7 +1732,7 @@ export class Sim {
 
   goAround(a, why, said = null) {
     a.state = "goaround"; this.stats.goArounds++;
-    if (a.nordo) a.rejoin = true;                 // a radio-failure aircraft stays in the circuit and tries again
+    if (a.nordo || (a.ga && !a.heli)) a.rejoin = true;   // a radio-failure aircraft / a light aircraft stays in the circuit and tries again
     if (said) this.pilot(a, `${this.cs(a).d}, ${said}`, "goingAround");
     else this.call(a, "goingAround", { greet: "" }, "TWR");
     this.alert(`${a.cs} went around: ${why}.`, "ga" + a.cs, why !== "instructed");
@@ -1615,9 +1744,16 @@ export class Sim {
     a.pos = [a.pos[0] + e.v[0] * a.spd * dt, a.pos[1] + e.v[1] * a.spd * dt];
     if (a.spd > 32 * KT) return;
     const along = (a.pos[0] - e.pos[0]) * e.v[0] + (a.pos[1] - e.pos[1]) * e.v[1];
-    for (const x of this.apt.exitsAhead(e, along + 15)) {
-      const route = this.apt.exitRoute(x.node, e.rwy, e.hdg);
-      if (!route) continue;
+    // the first exit on the side of the stand (no runway crossing on the way in), unless that one is far
+    const side = (p) => Math.sign((p[0] - e.pos[0]) * e.v[1] - (p[1] - e.pos[1]) * e.v[0]);
+    const want = a.stand ? side(a.stand.pos) : 0;
+    // ...and never one whose way off the runway is blocked by someone standing on it (a departure queue)
+    const standing = this.ac.filter(o => o !== a && o.onGround && !o.veh && o.spd < 0.5 && !this.apt.onRunway(o.pos, this.apt.runways[e.rwy], 5));
+    const blocked = (route) => route.some(n => standing.some(o => dist(o.pos, this.apt.nodes[n]) < 45));
+    const all = this.apt.exitsAhead(e, along + 15).map(x => ({ x, route: this.apt.exitRoute(x.node, e.rwy, e.hdg) })).filter(c => c.route);
+    const exits = all.filter(c => !blocked(c.route)).length ? all.filter(c => !blocked(c.route)) : all;
+    const good = want ? exits.find(c => side(this.apt.nodes[c.route[c.route.length - 1]]) === want && c.x.along - along < 900) : null;
+    for (const { x, route } of good ? [good] : exits) {
       a.path = [[...a.pos, null], ...route.map(n => [...this.apt.nodes[n], n])];
       a.pi = 1;
       const ed = this.apt.edgeBetween(route[0], route[1]);
@@ -1744,8 +1880,20 @@ export class Sim {
       if (!this.positions[pos] || this.userWorks(pos)) continue;
       if (this.t < (a.aiNext || 0)) continue;
       if (a.lastCall != null && this.t - a.lastCall < 2.5) continue; // let the pilot finish
+      const cs = `${a.ga ? callsign(a, NEUTRAL_STYLE).d : a.tel + " " + a.num}`;
+      // a wrong readback is corrected first ("negative, squawk 4521")
+      const e = a.rbError;
+      if (e && !e.fixed && this.t - e.t > 2) { a.aiNext = this.t + 6; this.atcSay(pos, `${cs}, negative, ${e.fixPhrase}`, a); continue; }
       const text = this.aiDecide(a, pos);
-      if (text) { a.aiNext = this.t + 6; this.atc(pos, text); }
+      if (text) {
+        a.aiNext = this.t + 6;
+        // busy: one at a time -- the others waiting get "standby" once
+        if (this.busyPos && this.busyPos[pos] === this.t && a.reqAt != null && !a.toldStandby && Math.random() < 0.7) { a.toldStandby = true; this.atcSay(pos, `${cs}, standby`, a); continue; }
+        this.busyPos ||= {};
+        if (workloadOf(this, pos) === "busy") this.busyPos[pos] = this.t;
+        a.toldStandby = false;
+        this.atcSay(pos, text, a);
+      }
     }
   }
 
@@ -1770,7 +1918,7 @@ export class Sim {
     const apt = this.apt;
     if (pos === "DEL" && a.kind === "dep") {
       if (s === "clr_req" || (s === "parked" && a.lastCall != null)) {
-        const code = this.squawks.next(this.t);
+        const code = this._dry ? this.squawks.peek(this.t) : this.squawks.next(this.t);
         const gnd = this.positions.GND ? `, when ready ${this.contactPhrase("GND")}` : "";
         const sg = this.suggestDeparture(a);
         return `${cs}, cleared to ${a.other[1]} via ${sg.sid ? sg.sid + " departure" : "flight planned route"}, climb ${sg.climb} feet, squawk ${code}${gnd}`;
@@ -1790,21 +1938,23 @@ export class Sim {
       if (a.wants === "enter" && a.task && (pos === "TWR" || pos === "GND")) {
         const r = apt.runways[a.task.rwy];
         if (this.runwayFree(r.id, a) && r.ends.every(x => this.nearestArrival(x) > 6 * NM) && !this.ac.some(o => o.kind === "dep" && ["lining", "lined_up", "roll", "lineup"].includes(o.state) && o.depEnd.rwy === r.id)) {
-          a.wants = null; a.crossOk.add(r.id); a.holdPos = false; if (a.pi >= (a.path || []).length) this.inspectionNext(a);
+          a.wants = null; a.crossOk.add(r.id); a.holdPos = false; if (a.pi >= (a.path || []).length && !this._dry) this.inspectionNext(a);
           return `${cs}, enter runway ${r.ends[0].name}, report vacated`;
         }
         return null;
       }
       if (a.wants === "proceed" && pos === "TWR") { a.wants = null; return `${cs}, proceed, ${a.rescueLevel === "full" ? "cross runway " + (this.depEnd.name) + " approved" : "hold at the fire station"}`; }
-      if (a.wants === "report" && (pos === "TWR" || pos === "GND")) { a.wants = null; if (a.task) this.closedRunways.delete(a.task.rwy); return `${cs}, roger, runway ${apt.runways[a.task ? a.task.rwy : this.depEnd.rwy].label} open`; }
+      if (a.wants === "report" && (pos === "TWR" || pos === "GND")) { a.wants = null; if (a.task && !this._dry) this.closedRunways.delete(a.task.rwy); return `${cs}, roger, runway ${apt.runways[a.task ? a.task.rwy : this.depEnd.rwy].label} open`; }
       if (a.wants === "tow" && a.task && a.task.kind === "tow" && (pos === "GND" || pos === "TWR")) { a.towOk = true; a.wants = null; a.holdPos = false; if (a.pi >= (a.path || []).length) this.towNext(a); return `${cs}, tow approved, report complete`; }
       if (a.atStop && a.blockedRwy != null && (pos === "GND" || pos === "TWR")) {
         const r = apt.runways[a.blockedRwy];
-        if (!this.runwayDanger(r.id, a, { finalNm: 3, finalSec: 90 }).busy) return `${cs}, cross runway ${r.ends[0].name}`;
+        if (!this.runwayDanger(r.id, a, { finalNm: 1.5, finalSec: this.crossTime(a, r.id) + 30 }).busy) return `${cs}, cross runway ${r.ends[0].name}`;
       }
       return null;
     }
     if (pos === "GND") {
+      // E2: push sequencing -- not while another push is under way or a pushed aircraft still waits close by
+      if (a.kind === "dep" && s === "push_req" && this.ac.some(o => o !== a && !o.veh && o.onGround && ["pushing", "pushed", "taxi_req"].includes(o.state) && dist(o.pos, a.pos) < 160)) return null;
       if (a.kind === "dep" && s === "push_req") return this.deiceNeeded && !a.deiced ? `${cs}, de-icing approved on stand, report when complete` : `${cs}, push and start approved`;
       if (a.kind === "dep" && a.heli && s === "taxi_req") {
         // a helicopter lifts from the apron: Ground sends it to Tower, Tower clears it from present position
@@ -1812,15 +1962,16 @@ export class Sim {
         return `${cs}, cleared for takeoff from present position${this.windTxt()}`;
       }
       if (a.kind === "dep" && s === "taxi_req") {
-        const via = this.viaNames(a);
+        const via = this.safeVia(a);
+        if (!via) return null;                        // someone is taxiing towards it on the only way out: wait
         return `${cs}, taxi to holding point runway ${this.depEnd.name}${via.length ? " via " + via.join(" ") : ""}`;
       }
       if (a.veh && a.wants === "tow" && a.task && a.task.kind === "tow") return `${cs}, tow approved, report complete`;
-      if (a.kind === "dep" && s === "broken") { if (!this.vehicleOf("tug")?.task) this.towRequest(a); return null; }
+      if (a.kind === "dep" && s === "broken") { if (!this.vehicleOf("tug")?.task && !this._dry) this.towRequest(a); return null; }
       if (a.kind === "dep" && a.rwyChanged && (s === "taxi" || s === "holding")) { a.rwyChanged = false; const via = this.viaNames(a); return `${cs}, runway change, taxi to holding point runway ${this.depEnd.name}${via.length ? " via " + via.join(" ") : ""}`; }
       if ((a.state === "taxi" || a.state === "lineup") && a.atStop && a.blockedRwy != null && !(a.kind === "dep" && a.blockedRwy === a.depEnd.rwy)) {
         const r = apt.runways[a.blockedRwy];
-        const busy = this.runwayDanger(r.id, a, { finalNm: 3, finalSec: 90 }).busy;
+        const busy = this.runwayDanger(r.id, a, { finalNm: 1.5, finalSec: this.crossTime(a, r.id) + 30 }).busy;
         if (!busy) return `${cs}, cross runway ${r.ends[0].name}`;
         return null;
       }
@@ -1830,28 +1981,66 @@ export class Sim {
         return `${cs}, ${this.contactPhrase("TWR")}`;
       }
       if (a.kind === "arr" && (s === "vacated" || s === "holding_short")) {
-        if (!a.stand) a.stand = rnd(this.freeStands()) || null;
+        // the nearest free stand that fits (deterministic: an assist suggestion is what auto would say)
+        if (!a.stand) { const t = TYPE_INFO[a.type]; const fs = this.freeStands().filter(x => !t || standFits(x, t)); a.stand = fs.sort((x, y) => dist(x.pos, a.pos) - dist(y.pos, a.pos))[0] || this.freeStands()[0] || null; }
         if (!a.stand) return null;
-        const via = this.viaNamesTo(a, a.stand.pos);
+        const via = this.safeVia(a, a.stand.pos);
+        if (!via) return null;
         return `${cs}, taxi to stand ${a.stand.name}${via.length ? " via " + via.join(" ") : ""}`;
       }
     }
     if (pos === "TWR") {
       const e = a.depEnd || this.depEnd;
       // emergencies and VFR joins
-      if ((a.mayday || a.pan || a.priority) && a.kind === "arr" && s === "final" && !a.priorityAck) { a.priorityAck = true; if (a.mayday) this.rescueRespond(a, "full"); else if (a.pan) this.rescueRespond(a, "local"); return `${cs}, roger ${a.mayday ? "mayday" : a.pan ? "pan pan" : ""}, runway ${a.end.name}, number one, ${a.mayday || a.pan ? "fire service alerted, " : ""}report final`; }
+      if ((a.mayday || a.pan || a.priority) && a.kind === "arr" && s === "final" && !a.priorityAck) {
+        a.priorityAck = true;
+        if (!this._dry) {
+          if (a.mayday) this.rescueRespond(a, "full"); else if (a.pan) this.rescueRespond(a, "local");
+          // E7: stop the other traffic for a MAYDAY
+          if (a.mayday) this.onRadio({ from: "atc", ai: true, pos, text: `all stations, stop transmitting, mayday`, say: "all stations, stop transmitting, mayday", ctrl: this.controllerFor(pos) });
+        }
+        return `${cs}, roger ${a.mayday ? "mayday" : a.pan ? "pan pan" : ""}, runway ${a.end.name}, number one, ${a.mayday || a.pan ? "fire service alerted, " : ""}${a.mayday && a.squawk !== "7700" ? "squawk 7700 if not already, " : ""}report final`;
+      }
+      // E2: a slow circuit aircraft is not turned in ahead of a jet on final: extend downwind, number 2
+      if (a.kind === "arr" && s === "circuit" && !a.circuitHold && a.wps && !a.nordo && ["downwind", "late downwind", "base", "crosswind", "upwind"].includes(a.circuitLeg || "downwind")) {
+        // when would the circuit aircraft land: the rest of its circuit at its speed; the jet: its final at its speed
+        let rest = 0, prev = a.pos;
+        for (let k = a.wpi; k < a.wps.length; k++) { rest += dist(prev, a.wps[k].p); prev = a.wps[k].p; }
+        rest += dist(prev, a.end.thr);
+        const etaGa = rest / Math.max(30, a.spd || 40);
+        const jet = this.ac.filter(o => o !== a && o.kind === "arr" && !o.ga && ["final", "star"].includes(o.state) && o.end === a.end)
+          .map(o => ({ o, eta: Math.max(0, this.distToThr(o)) / Math.max(40, o.spd || 70) })).filter(x => x.eta < 600).sort((x, y) => x.eta - y.eta)[0];
+        if (jet && jet.eta < etaGa + 120 && jet.eta > 20) {
+          const nm = Math.max(1, Math.round(this.distToThr(jet.o) / NM));
+          if (["downwind", "late downwind"].includes(a.circuitLeg || "downwind") && !a.extTold) {
+            a.extTold = true; a.baseAfter = jet.o; a.baseAfterT = this.t;
+            return `${cs}, extend downwind, I'll call your base, number 2, traffic ${atcType(jet.o.type)} on ${nm} mile final`;
+          }
+        }
+      }
       if (a.kind === "arr" && a.calledIn && !a.joined && (s === "inbound" || (s === "circuit" && a.circuitHold))) {
         return this.svfrNeeded() && !a.svfr ? `${cs}, cleared special VFR, join left downwind runway ${this.arrEnd.name}, report downwind` : `${cs}, join left downwind runway ${this.arrEnd.name}, report downwind`;
       }
-      if (a.kind === "dep" && s === "rto" && a.rtoCalled && !a.rtoAck) { a.rtoAck = true; this.rescueRespond(a, "local"); return `${cs}, roger, vacate the runway when able, fire service on the way`; }
+      if (a.kind === "dep" && s === "rto" && a.rtoCalled && !a.rtoAck) { a.rtoAck = true; if (!this._dry) this.rescueRespond(a, "local"); return `${cs}, roger, vacate the runway when able, fire service on the way`; }
       if (a.kind === "dep" && (s === "holding" || s === "lined_up")) {
         if (a.rwyChanged) return null;                 // Ground re-clears it to the new runway
         const arr = this.nearestArrival(e);
         const gap = this.lastTakeoff ? this.t - this.lastTakeoff.t : 999;
         const need = this.lastTakeoff && this.lastTakeoff.rwy === e.rwy ? this.depSpacingS(this.lastTakeoff, a) : 0;
         if (this.closedRunways.has(e.rwy) || this.hotExpired(a)) return null;
-        if (this.runwayFree(e.rwy, a) && arr > (this.lvp ? 6 : 4) * NM && gap >= need && !this.finalTraffic(e.rwy, a).some(f => f.nm < (this.lvp ? 6 : 4))) return `${cs}, runway ${e.name}, cleared for takeoff${this.windTxt()}`;
-        if (s === "holding" && this.runwayFree(e.rwy, a) && arr > 5 * NM && !this.lvp) return `${cs}, runway ${e.name}, line up and wait`;
+        // one departure on the runway at a time (any entry), and never in front of an arrival already cleared to land
+        const otherDep = this.ac.some(o => o !== a && o.kind === "dep" && o.onGround && o.depEnd && o.depEnd.rwy === e.rwy && (o.toClr || ["lineup", "lining", "lined_up", "cond_lineup"].includes(o.state) || (o.state === "roll")));
+        const clearedArr = this.ac.some(o => o.kind === "arr" && o.landClr && ["final", "circuit"].includes(o.state) && o.end && o.end.rwy === e.rwy && this.distToThr(o) < 7 * NM);
+        if (otherDep && s === "holding" || clearedArr) return null;
+        if (this.ac.some(o => o !== a && o.onGround && o.crossOk && o.crossOk.has(e.rwy) && !(o.kind === "dep" && o.depEnd && o.depEnd.rwy === e.rwy))) return null;   // a crossing is under way
+        // a slower aircraft just ahead that has not turned away yet: two minutes (it would be caught on the climb)
+        const prevAc = this.lastTakeoff && this.lastTakeoff.rwy === e.rwy ? this.ac.find(o => o.cs === this.lastTakeoff.cs && !o.onGround) : null;
+        if (prevAc && gap < 120 && (prevAc.ga || prevAc.appSpd < a.appSpd - 15 * KT) && Math.abs(angDiff(prevAc.hdg, e.hdg)) < 40) return null;
+        const minNm = this.lvp ? 6 : s === "lined_up" ? 3 : 4.5;      // from the holding point it lines up first (~40 s)
+        if (this.runwayFree(e.rwy, a) && arr > minNm * NM && gap >= need && !this.finalTraffic(e.rwy, a).some(f => f.nm < minNm)) return `${cs}, runway ${e.name}, cleared for takeoff${this.windTxt()}`;
+        // line up only with nobody (IFR or a circuit) landing soon
+        const circuitIn = this.ac.some(o => o !== a && o.state === "circuit" && o.end && o.end.rwy === e.rwy && ["base", "final", "late downwind"].includes(o.circuitLeg));
+        if (s === "holding" && this.runwayFree(e.rwy, a) && arr > 6 * NM && !circuitIn && !this.finalTraffic(e.rwy, a).some(f => f.nm < 6) && need - gap < 30 && !this.lvp) return `${cs}, runway ${e.name}, line up and wait`;
         return null;
       }
       if (a.kind === "dep" && s === "airborne" && a.alt > 700) {
@@ -1859,16 +2048,24 @@ export class Sim {
         if (nx) return `${cs}, ${this.contactPhrase(nx)}`;
         return a.ga ? `${cs}, frequency change approved` : null;
       }
-      if (a.kind === "dep" && s === "taxi" && a.atStop && a.blockedRwy != null && a.blockedRwy !== a.depEnd.rwy) {
+      if (a.kind === "dep" && (s === "taxi" || s === "lineup") && a.atStop && a.blockedRwy != null && a.blockedRwy !== a.depEnd.rwy) {
         const r = apt.runways[a.blockedRwy];
-        if (!this.runwayDanger(r.id, a, { finalNm: 3, finalSec: 90 }).busy) return `${cs}, cross runway ${r.ends[0].name}`;
+        if (!this.runwayDanger(r.id, a, { finalNm: 1.5, finalSec: this.crossTime(a, r.id) + 30 }).busy) return `${cs}, cross runway ${r.ends[0].name}`;
       }
       if (a.kind === "arr" && s === "final") {
         const d = this.distToThr(a);
-        if (!a.landClr && d < 6 * NM && !this.runwayDanger(a.end.rwy, a, { finalNm: 0, finalSec: 0 }).busy && !this.closedRunways.has(a.end.rwy) &&
-          !this.ac.some(o => o.kind === "dep" && ["lining", "lined_up", "roll"].includes(o.state) && o.depEnd.rwy === a.end.rwy))
+        // only the next one to land, with nobody on the runway, lining up or turning final ahead of it
+        // mixed mode: with a departure ready the landing clearance waits until ~3.5 NM, leaving it the gap in front
+        const depReady = this.ac.some(o => o.kind === "dep" && ["holding", "lined_up"].includes(o.state) && o.depEnd && o.depEnd.rwy === a.end.rwy);
+        if (!a.landClr && d < (depReady ? 2.8 : 6) * NM && !this.runwayDanger(a.end.rwy, a, { finalNm: 0, finalSec: 0 }).busy && !this.closedRunways.has(a.end.rwy) &&
+          !this.ac.some(o => o.kind === "dep" && o.onGround && o.depEnd && (["lineup", "lining", "lined_up", "cond_lineup", "roll"].includes(o.state) || o.toClr) && o.depEnd.rwy === a.end.rwy) &&
+          !this.leaderOnFinal(a) && !this.ac.some(o => o !== a && o.state === "circuit" && o.end === a.end && ["base", "final", "late downwind"].includes(o.circuitLeg) && this.distToThr(o) < d))
           return a.touchGo ? `${cs}, runway ${a.end.name}, cleared touch and go${this.windTxt()}` : `${cs}, runway ${a.end.name}, cleared to land${this.windTxt()}`;
         if (!a.landClr && d < 1.2 * NM && !a.nordo) return `${cs}, go around`;
+        if (!a.landClr && !a.toldSeq && a.calledIn && d < 8 * NM && d > 3 * NM) {
+          const lead = this.leaderOnFinal(a);
+          if (lead) { a.toldSeq = true; return `${cs}, ${sequenceInfo(2, lead.ac, lead.d / NM, atcType)}, continue approach`; }
+        }
       }
       if (a.kind === "arr" && (s === "vacated" || s === "vacating") && this.positions.GND && !a.toldGnd && s === "vacated") {
         a.toldGnd = true;
@@ -1886,10 +2083,31 @@ export class Sim {
           return `${cs}, identified, ${star}descend 3000 feet, cleared ${app} approach runway ${a.end.name}`;
         }
         if (a.appCleared && s === "final" && this.distToThr(a) < 10 * NM && this.positions.TWR) return `${cs}, ${this.contactPhrase("TWR")}`;
+        if (a.appCleared && s === "final" && !a.spdTold && !a.ga) {
+          const lead = this.leaderOnFinal(a);
+          if (lead && this.distToThr(a) - lead.d < (this.wakeNm(lead.ac, a) + 1) * NM) { a.spdTold = true; return `${cs}, reduce speed ${Math.max(140, Math.round((lead.ac.spd || a.appSpd) / KT / 10) * 10)} knots until 4 mile final`; }
+        }
+        if (a.appCleared && !a.tiGiven) {
+          const o = this.ac.find(x => x !== a && !x.onGround && !x.veh && Math.hypot(x.pos[0] - a.pos[0], x.pos[1] - a.pos[1]) < 6 * NM && Math.abs((x.alt || 0) - (a.alt || 0)) < 1500 && !(x.kind === "arr" && x.state === "final" && x.end === a.end));
+          if (o) { a.tiGiven = true; if (((a.id * 7919) % 100) / 100 < ((this.ctrls && this.ctrls.APP && this.ctrls.APP.trafficInfo) || 0.6)) return `${cs}, ${trafficInfo(a, o, atcType)}`; }
+        }
       }
       if (a.kind === "dep" && !a.onGround) {
         if (!a.appIdent) { a.appIdent = true; return `${cs}, identified, climb flight level 120`; }
         if (a.alt > 4500 && this.positions.CTR) return `${cs}, ${this.contactPhrase("CTR")}`;
+      }
+    }
+    if ((pos === "CTR" || pos === "APP") && !a.onGround && a.kind === "ovf" && this.ac.length < 400) {
+      const me = this.tcasState(a);
+      for (const o of this.ac) {
+        if (o === a || o.onGround || o.veh || !o.pos || (a.sepTold && a.sepTold[o.id])) continue;
+        if (Math.hypot(o.pos[0] - a.pos[0], o.pos[1] - a.pos[1]) > 60 * NM) continue;
+        const hit = stcaCheck(me, this.tcasState(o), { nm: 5, ft: 1000, look: 240 });
+        if (!hit || (o.kind === "ovf" && o.id > a.id && !(o.sepTold && o.sepTold[a.id]))) continue;   // one of the two moves: the older keeps its level
+        (a.sepTold ||= {})[o.id] = true;
+        const up = a.alt < o.alt ? -1 : 1, lvl = Math.round(a.alt / 1000) * 1000 + up * 2000;
+        if (lvl < 10000 || lvl > 41000) continue;
+        return `${cs}, ${up > 0 ? "climb" : "descend"} flight level ${lvl / 100}, traffic`;
       }
     }
     if (pos === "CTR" && !a.onGround) {
@@ -1914,6 +2132,27 @@ export class Sim {
     const start = this.startNode(a, true);
     const route = this.apt.routeToPos(start.node, pos, [], start.avoid) || this.apt.routeToPos(start.node, pos, []);
     return this.namesOf(route);
+  }
+  /** E2 (AI Ground): a route that meets nobody head-on -- around them when the network allows, else null (wait). */
+  safeVia(a, toStand) {
+    const start = this.startNode(a, true);
+    // never along the runway in use when there is another way (taxi-in included)
+    const plan = (blocked) => toStand
+      ? this.apt.routeToPos(start.node, toStand, [], start.avoid, { blocked, avoidRwy: this.depEnd.rwy }) || this.apt.routeToPos(start.node, toStand, [], start.avoid, { blocked })
+      : this.apt.routeToRunway(start.node, this.depEnd, [], start.avoid, { blocked });
+    // around aircraft standing on the taxiways (a departure queue at the holding point, a breakdown) when possible
+    const standing = new Set();
+    for (const o of this.ac) {
+      if (o === a || !o.onGround || o.veh || !["holding", "holding_short", "broken", "vacated"].includes(o.state)) continue;
+      const ne = this.apt.nearestEdge ? this.apt.nearestEdge(o.pos, 40, false) : null;
+      if (ne && ne.e.i != null) standing.add(ne.e.i);
+    }
+    let route = plan(new Set([...this.blockedEdges, ...standing])) || plan(this.blockedEdges.size ? this.blockedEdges : null) ||
+      (toStand ? this.apt.routeToPos(start.node, toStand, []) : this.apt.routeToRunway(start.node, this.depEnd, []));
+    const opp = this.headOnEdges(route, a);
+    if (opp.size) route = plan(new Set([...this.blockedEdges, ...opp, ...standing])) || plan(new Set([...this.blockedEdges, ...opp]));
+    if (route && !this._dry) a.aiRoute = { to: toStand ? "stand" : "rwy", route };
+    return route ? this.namesOf(route) : null;
   }
   namesOf(route) {
     if (!route) return [];
@@ -2066,7 +2305,9 @@ export class Sim {
         if (a.kind === "arr") return { unable: "Confirm we taxi to the stand?" };
         if (!a.ga && ["parked", "push_req", "cleared", "clr_req", "pushing"].includes(a.state)) return { unable: "Unable, we are still on stand" };
         const start = this.startNode(a);
-        const route = apt.routeToRunway(start.node, end, i.via, start.avoid) || apt.routeToRunway(start.node, end, i.via);
+        // the AI Ground's conflict-checked route is the one flown (safeVia); otherwise the shortest with the cleared via
+        const route = (opts.ai && a.aiRoute && a.aiRoute.to === "rwy" ? a.aiRoute.route : null) || apt.routeToRunway(start.node, end, i.via, start.avoid) || apt.routeToRunway(start.node, end, i.via);
+        a.aiRoute = null;
         if (!route) return { unable: `Unable to find that route, say again taxi instructions` };
         this.serviced(a, "taxi");
         a.depEnd = end;
@@ -2086,7 +2327,8 @@ export class Sim {
         }
         if (!st) return { unable: "Request stand number" };
         const start = this.startNode(a);
-        const route = apt.routeToPos(start.node, st.pos, i.via, start.avoid) || apt.routeToPos(start.node, st.pos, i.via);
+        const route = (opts.ai && a.aiRoute && a.aiRoute.to === "stand" ? a.aiRoute.route : null) || apt.routeToPos(start.node, st.pos, i.via, start.avoid) || apt.routeToPos(start.node, st.pos, i.via);
+        a.aiRoute = null;
         if (!route) return { unable: `Unable to find that route, say again taxi instructions` };
         this.serviced(a, "taxiIn");
         this.setPath(a, route);
@@ -2329,7 +2571,11 @@ export class Sim {
         a.cfl = i.ft;
         return `${i.verb} ${i.ft >= 6000 && i.fl ? "flight level " + i.ft / 100 : i.ft + " feet"}`;
       }
-      case "approach": return `cleared ILS approach runway ${a.end ? a.end.name : this.arrEnd.name}`;
+      case "approach": {
+        // off a vector or a hold: on to the final intercept
+        if (a.vectorHdg != null || a.holdP) { a.vectorHdg = null; a.holdP = null; a.eat = null; a.navWps = null; if (a.starWps) a.starI = a.starWps.length - 1; }
+        return `cleared ILS approach runway ${a.end ? a.end.name : this.arrEnd.name}`;
+      }
       case "identified": return null;
       // nav instructions (F4): a fix the crew cannot find in their box is queried, not flown
       case "direct": {
@@ -2339,6 +2585,26 @@ export class Sim {
         if (p) { const k = (a.wps || []).findIndex(w => w.id === i.fix); a.navWps = k >= 0 ? a.wps.slice(k) : [{ p, id: i.fix, leg: i.fix }]; a.wps = a.navWps; a.wpi = 0; }
         a.directTo = i.fix;
         return `direct ${i.fix}`;
+      }
+      case "speed": {
+        if (a.onGround) return { unable: "Say again" };
+        a.spdCap = i.kt * KT; a.spdCapUntil = i.untilNm ? i.untilNm * NM : 0;
+        if (a.state !== "final") a.spd = Math.min(a.spd, a.spdCap);
+        return `${i.verb} speed ${i.kt} knots${i.untilNm ? ` until ${i.untilNm} mile final` : ""}`;
+      }
+      case "heading": {
+        if (a.onGround) return { unable: "Say again" };
+        a.vectorHdg = i.hdg % 360;
+        if (a.kind === "dep" && a.state === "airborne") { a.sidWps = []; a.navWps = null; a.hdgHold = a.vectorHdg; }
+        return `turn ${i.dir ? i.dir + " " : ""}heading ${String(i.hdg).padStart(3, "0")}`;
+      }
+      case "eat": {
+        const hh = +i.hhmm.slice(0, 2), mm = +i.hhmm.slice(2);
+        const now = new Date(this.clockUtc + this.t * 1000);
+        let at = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hh, mm);
+        if (at < now.getTime() - 3600e3) at += 86400e3;
+        a.eat = this.t + Math.max(0, (at - now.getTime()) / 1000);
+        return `expect approach at ${i.hhmm}`;
       }
       case "vfrVia": {
         // B2: "leave the zone via Kilo at 1500 feet" / "join via Kilo"
@@ -2352,6 +2618,8 @@ export class Sim {
       case "holdAt": {
         if (i.known === false) return { unable: `Unable, confirm the holding fix` };
         a.holdFix = i.fix;
+        a.holdP = this.navPoint ? this.navPoint(i.fix) : null;
+        if (a.holdP && a.state === "star") { a.navWps = [{ p: a.holdP, id: i.fix, leg: i.fix }]; a.navI = 0; }
         return `hold at ${i.fix}${i.turn ? (i.turn === "L" ? ", left turns" : ", right turns") : ", as published"}`;
       }
       case "star": {
@@ -2490,3 +2758,4 @@ installVfr(Sim);
 installEvents(Sim);
 installTraffic(Sim);
 installTcas(Sim);
+installAutoAtc(Sim);

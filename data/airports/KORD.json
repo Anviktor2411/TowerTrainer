@@ -1,0 +1,8 @@
+{
+  "icao": "KORD",
+  "note": "Chicago O'Hare (FAA 7110.65 phraseology).",
+  "units": { "DEL": "O'Hare Clearance", "GND": "O'Hare Ground", "TWR": "O'Hare Tower", "APP": "Chicago Approach", "CTR": "Chicago Center" },
+  "transitionAlt": 18000,
+  "nat": "US",
+  "habits": { "windOnClearance": true, "taxiTo": "runway", "goodDay": "good day" }
+}

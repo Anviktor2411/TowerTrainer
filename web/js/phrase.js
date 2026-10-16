@@ -136,10 +136,12 @@ export function callsign(a, st = NEUTRAL_STYLE, { abbreviated = a.abbrev } = {})
 /** The abbreviated form the controller may use (for matching / coach). */
 export function abbreviatedCallsign(a) { return a.ga ? callsign(a, NEUTRAL_STYLE, { abbreviated: true }).d : null; }
 
-export function spokenType(type) {
+export function spokenType(type, fixed = false) {
   const v = TYPE_SPOKEN[type];
-  return v ? rnd(v) : type;
+  return v ? (fixed ? v[0] : rnd(v)) : type;
 }
+/** How a controller names a type: always the same words for the same type. */
+export const atcType = (type) => spokenType(type, true);
 
 // ---------- greetings & flavour ----------
 /** Local solar hour at the airport (UTC + lon/15). */

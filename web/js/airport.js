@@ -366,7 +366,7 @@ export class Airport {
   routeToPos(start, pos, via, firstAvoid, opts = {}) {
     const st = this.stands.find(s => s.pos === pos || (s.pos[0] === pos[0] && s.pos[1] === pos[1]));
     const goal = st && st.node != null ? st.node : undefined;
-    const s = this.search(start, via, { firstAvoid, goal, blocked: opts.blocked });
+    const s = this.search(start, via, { firstAvoid, goal, blocked: opts.blocked, avoidRwy: opts.avoidRwy });
     if (goal !== undefined && s.cost(goal) !== undefined) return s.path(goal);
     let best = -1, bd = Infinity;
     this.nodes.forEach((p, n) => {

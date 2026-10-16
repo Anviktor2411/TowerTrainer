@@ -74,8 +74,10 @@ export function installTraffic(Sim) {
     if (a._pred) return a._pred;
     const out = [a.pos];
     const n = HORIZON / STEP;
-    const wantsToMove = !a.human && !a.holdPos && a.path && a.pi < a.path.length && ["taxi", "lineup", "vacating", "pushing", "toAircraft", "leading", "task", "home", "aside"].includes(a.state) && !(a.atStop && a.spd < 0.1);
-    const v = a.human ? (a.spd > 0.5 ? a.spd : 0) : Math.max(a.spd, wantsToMove ? 4 : 0);
+    const wantsToMove = !a.human && !a.holdPos && a.path && a.pi < a.path.length && ["taxi", "lineup", "vacating", "pushing", "toAircraft", "leading", "task", "home", "aside"].includes(a.state) && !(a.atStop && a.spd < 0.1) &&
+      !(a.state === "pushing" && !a.pushStarted);            // a push not started yet stays on its stand
+    // one that is itself waiting for someone stays where it is in the prediction
+    const v = a.human ? (a.spd > 0.5 ? a.spd : 0) : Math.max(a.spd, wantsToMove && !a.waitOn ? 4 : 0);
     if (a.human || !a.path || a.pi >= (a.path || []).length) {
       const h = vecFromHdg(a.hdg || 0);
       for (let s = 1; s <= n; s++) out.push([a.pos[0] + h[0] * v * s * STEP, a.pos[1] + h[1] * v * s * STEP]);
@@ -116,6 +118,8 @@ export function installTraffic(Sim) {
   /** Who gives way at a crossing conflict: true when `a` must wait for `o`. */
   P.givesWay = function (a, o, ti, tj) {
     if (o.human) return true;                       // nobody can tell a real pilot to stop: AI always gives way
+    // it is stopped because we are in its way: giving way to it would wait for ever -- we move on first
+    if (o.waitOn === a && (o.blockWhy === "behind" || o.blockWhy === "head-on") && !moving(o)) return false;
     if (a.veh && !o.veh) return true;               // vehicles give way to aircraft
     if (!a.veh && o.veh) return false;
     // both waiting for each other for a while: the fixed tie-break lets the lower id go first
@@ -152,7 +156,17 @@ export function installTraffic(Sim) {
       const sep = Math.max(SEP_MIN, (sa + so) / 2 + 15);
       // 1) someone on my path ahead: follow at a distance, never meet head-on
       const on = alongPath(ahead, o.pos, Math.max(12, (sa + so) / 4));
-      if (on != null && on > 0) {
+      // a stand-off (each standing in the other's way): the one nearest its destination goes first -- an aircraft
+      // entering its stand clears the lane for the other
+      let standoff = a.passing === o && dist(a.pos, o.pos) < 90;      // already squeezing past it
+      if (!standoff && on != null && o.waitOn === a && a.waitOn === o && !moving(o)) {
+        const waited = this.t - Math.max(a.waitSince || 0, o.waitSince || 0);
+        const remA = a.path ? a.path.length - a.pi : 99, remO = o.path ? o.path.length - o.pi : 99;
+        const first = remA < remO || (remA === remO && a.id < o.id);
+        standoff = first && ((waited > 20 && dist(a.pos, o.pos) > 25) || waited > 90);
+        if (standoff) a.passing = o;
+      }
+      if (on != null && on > 0 && !standoff) {
         const opposite = Math.abs(angDiff(a.hdg, o.hdg)) > 120 && moving(o);
         if (opposite) {
           if (on < sep + 150) { lim = 0; by = o; why = "head-on"; }
@@ -162,7 +176,7 @@ export function installTraffic(Sim) {
       }
       // 2) crossing conflict in the next 20 s
       const theirs = this.predict(o);
-      const R = (sa + so) / 2 + 10;
+      const R = (sa + so) / 2 + 20;
       const bm = mine.box, bt = theirs.box;
       if (bm[0] - R > bt[2] || bt[0] - R > bm[2] || bm[1] - R > bt[3] || bt[1] - R > bm[3]) continue;
       let hit = null;
@@ -186,12 +200,12 @@ export function installTraffic(Sim) {
 
   /** Book-keeping for waiting: deadlock detection, and A9 (a stopped human in the way for 60 s). */
   P.noteBlocked = function (a, lim, by, why) {
-    if (lim < 0.5 && by) {
+    if (lim < 1.0 && by) {
       if (a.waitOn !== by) { a.waitOn = by; a.waitSince = this.t; }
       a.blockWhy = why;
       const waited = this.t - a.waitSince;
-      if (waited > BLOCK_ASK && !moving(by) && !a.altAsked && !a.veh) this.requestAltRoute(a, by);
-    } else if (lim >= 0.5 || !by) {
+      if (waited > BLOCK_ASK && !moving(by) && (!a.altAsked || this.t > (a.altRetryAt || Infinity)) && !a.veh) this.requestAltRoute(a, by);
+    } else if (lim >= 1.0 || !by) {
       if (a.waitOn && a.blockedBy && this.t - a.waitSince > 5) a.blockedBy = null;
       a.waitOn = null; a.waitSince = null; a.blockWhy = "";
       if (a.altAsked && moving(a)) a.altAsked = false;
@@ -201,11 +215,14 @@ export function installTraffic(Sim) {
   /** Blocked for a minute: ask for another route, re-plan around the blocker when the network allows it, else hold
    *  and show "blocked by <cs>" (never drive through, never wait silently). */
   P.requestAltRoute = function (a, by) {
-    a.altAsked = true; a.blockedBy = by.cs;
+    const again = a.altAsked;
+    a.altAsked = true; a.blockedBy = by.cs; a.altRetryAt = this.t + 60;
     const near = this.apt.nearestEdge ? this.apt.nearestEdge(by.pos, 60, false) : null;
     const twy = (near && near.e.name) || "";
-    this.call(a, "stillWaitingGeneric", { what: `request alternative routing, traffic blocking${twy ? " at " + twy : ""}`, greet: "" }, "GND");
-    this.onEvent({ type: "blocked", ac: a, by, twy });
+    if (!again) {
+      this.call(a, "stillWaitingGeneric", { what: `request alternative routing, traffic blocking${twy ? " at " + twy : ""}`, greet: "" }, "GND");
+      this.onEvent({ type: "blocked", ac: a, by, twy });
+    }
     // edges around the blocker are avoided for this route
     const blocked = new Set(this.blockedEdges);
     for (const e of this.apt.edges || []) {
@@ -214,10 +231,20 @@ export function installTraffic(Sim) {
       if (segDist(by.pos, p1, p2) < spanOf(by) / 2 + spanOf(a) / 2 + 10) blocked.add(e.i);
     }
     const start = this.startNode(a, true);
-    let route = null;
-    if (a.taxiTo === "stand" && a.stand) route = this.apt.routeToPos(start.node, a.stand.pos, [], start.avoid, { blocked });
-    else if (a.kind === "dep" && a.depEnd) route = this.apt.routeToRunway(start.node, a.depEnd, [], start.avoid, { blocked });
-    if (!route) { this.note(`${a.cs} is blocked by ${by.cs}${twy ? " at " + twy : ""}: no other route — holding`); return false; }
+    const plan = (b) => a.taxiTo === "stand" && a.stand ? this.apt.routeToPos(start.node, a.stand.pos, [], start.avoid, { blocked: b, avoidRwy: this.depEnd.rwy })
+      : a.kind === "dep" && a.depEnd ? this.apt.routeToRunway(start.node, a.depEnd, [], start.avoid, { blocked: b }) : null;
+    let route = plan(blocked);
+    if (route) { const opp = this.headOnEdges(route, a); if (opp.size) route = plan(new Set([...blocked, ...opp])); }
+    // an arrival that cannot get to its stand: another free stand that fits, reachable around the blocker
+    if (!route && a.kind === "arr" && a.onGround && this.freeStands) {
+      const cands = this.freeStands(["gate", "misc", "tie_down", "hangar"], !!a.ga, !!a.cargo).filter(s => s !== a.stand)
+        .sort((p, q) => dist(p.pos, a.pos) - dist(q.pos, a.pos)).slice(0, 8);
+      for (const s of cands) {
+        const r = this.apt.routeToPos(start.node, s.pos, [], start.avoid, { blocked, avoidRwy: this.depEnd.rwy });
+        if (r && !this.headOnEdges(r, a).size) { if (a.stand && a.stand.reserved === a) a.stand.reserved = null; a.stand = s; a.taxiTo = "stand"; route = r; break; }
+      }
+    }
+    if (!route) { if (!again) this.note(`${a.cs} is blocked by ${by.cs}${twy ? " at " + twy : ""}: no other route — holding`); return false; }
     const names = this.namesOf(route);
     const pos = a.freq;
     if (this.split && this.positions && this.positions[pos] && !this.userWorks(pos)) {
@@ -235,6 +262,27 @@ export function installTraffic(Sim) {
     return true;
   };
 
+  /** Edges of `route` (node list) that someone else is taxiing along in the other direction: issuing that route
+   *  would meet them head-on in a segment. */
+  P.headOnEdges = function (route, a) {
+    const out = new Set();
+    if (!route || route.length < 2) return out;
+    const mine = new Map();
+    for (let i = 0; i + 1 < route.length; i++) mine.set(`${route[i]}>${route[i + 1]}`, (this.apt.edgeBetween(route[i], route[i + 1]) || {}).i);
+    for (const o of this.ac) {
+      if (o === a || !o.onGround || !o.path || o.veh && o.onRoad) continue;
+      if (o.waitOn === a && !moving(o)) continue;          // it waits for us: our moving is what frees it
+      if (!["taxi", "vacating", "lineup", "pushing", "toAircraft", "leading", "task", "home"].includes(o.state) && !(o.human && moving(o))) continue;
+      for (let k = Math.max(0, (o.pi || 1) - 1); k + 1 < o.path.length; k++) {
+        const n1 = o.path[k][2], n2 = o.path[k + 1][2];
+        if (n1 == null || n2 == null) continue;
+        const id = mine.get(`${n2}>${n1}`);
+        if (id != null) out.add(id);
+      }
+    }
+    return out;
+  };
+
   /** Will anyone be behind the stand / on the push path in the next 20 s? */
   P.pushClear = function (a) {
     const pts = a.path ? a.path.slice(a.pi) : [];
@@ -243,11 +291,14 @@ export function installTraffic(Sim) {
       if (o === a || !o.onGround || !o.pos || o.onRoad) continue;
       if (o.state === "parked" || (o.veh && (o.serving === a || o.state === "idle" || o.standby))) continue;
       if (o.veh && o.target === a) continue;
+      if (!moving(o)) {
+        const r = (spanOf(a) + spanOf(o)) / 2;
+        if (segDist(o.pos, a.pos, pts[pts.length - 1]) < r || pts.some(p => dist(p, o.pos) < r)) return { ok: false, by: o };
+        continue;
+      }
       const pr = this.predict(o);
       for (const q of pr) {
-        if (pts.some(p => dist(p, q) < 60) || dist(q, a.pos) < 100 && segDist(q, a.pos, pts[pts.length - 1]) < 60) {
-          if (moving(o) || pts.some(p => dist(p, o.pos) < 60)) return { ok: false, by: o };
-        }
+        if (pts.some(p => dist(p, q) < 60) || dist(q, a.pos) < 100 && segDist(q, a.pos, pts[pts.length - 1]) < 60) return { ok: false, by: o };
       }
     }
     return { ok: true };
@@ -266,6 +317,7 @@ export function installTraffic(Sim) {
     const r = this.apt.runways[rwy];
     for (const o of this.ac) {
       if (o === except || o.onGround || !o.pos) continue;
+      if (o.state === "goaround" || (o.vsFpm || 0) > 300) continue;      // climbing away: not landing
       for (const e of r.ends) {
         let d = null;
         if (!o.human && o.kind === "arr" && o.state === "final" && o.end && o.end.rwy === rwy && o.end === e) d = this.distToThr(o);
@@ -275,7 +327,8 @@ export function installTraffic(Sim) {
           const cross = Math.abs((o.pos[0] - e.thr[0]) * e.v[1] - (o.pos[1] - e.thr[1]) * e.v[0]);
           if (along > 0 && along < 6 * NM && cross < Math.max(400, along * 0.12) && Math.abs(angDiff(o.hdg, e.hdg)) < 30 && (o.alt || 0) < 2500 && (o.human || o.kind === "arr")) d = along;
         }
-        if (d != null && d > -200) out.push({ ac: o, end: e, nm: d / NM, sec: d / Math.max(30, o.spd || 60) });
+        // over the threshold and not yet down still counts: until it touches down it is landing traffic
+        if (d != null && d > -2500) out.push({ ac: o, end: e, nm: Math.max(0, d) / NM, sec: Math.max(0, d) / Math.max(30, o.spd || 60) });
       }
     }
     return out.sort((x, y) => x.nm - y.nm);
@@ -283,7 +336,7 @@ export function installTraffic(Sim) {
 
   /** Is runway `rwy` unsafe to enter / use for `a` now? {busy, why, by} — on it, on short final, taking off. */
   P.runwayDanger = function (rwy, a, { finalNm = 3, finalSec = 120 } = {}) {
-    const users = this.runwayUsers(rwy, a).filter(o => !(o.leader === a || a.leader === o));
+    const users = this.runwayUsers(rwy, a).filter(o => !(o.leader === a || a.leader === o) && !(o.waitOn === a && !moving(o)));
     if (users.length) {
       const o = users[0];
       return { busy: true, why: o.state === "roll" ? "traffic taking off" : o.veh ? "vehicle on the runway" : "traffic on the runway", by: o };

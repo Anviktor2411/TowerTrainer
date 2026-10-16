@@ -16,6 +16,8 @@
   <button id="atisListen" type="button" class="main-only small" title="Listen to the ATIS loop">▶ ATIS</button>
   <span class="grow"></span>
   <button id="staffBtn" type="button" class="main-only" title="Choose the positions you work">Staffing</button>
+  <select id="atcMode" class="main-only" title="Automatic ATC for every position (right-click a position tab to set it for one; Alt+X takes over / hands back the active position)"><option value="manual">ATC: Manual</option><option value="assist">ATC: Assist</option><option value="auto">ATC: Auto</option></select>
+  <button id="watchBtn" type="button" class="main-only small" title="Watch mode: the view follows the aircraft that is doing something">👁 Watch</button>
   <select id="speed" class="main-only" title="Simulation speed"><option value="0">Pause</option><option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option></select>
   <label class="main-only" title="Phraseology notes after each transmission"><input type="checkbox" id="coachToggle"> Coach</label>
   <button id="guideBtn" type="button" class="main-only">Guide</button>
@@ -73,6 +75,7 @@
     <div class="panel ofpp hidden" id="ofpPanel"><h3>SimBrief OFP <span class="inline"><button type="button" id="ofpFetch" class="small" title="Fetch your latest OFP from SimBrief (the official API)">Fetch latest OFP</button> <button type="button" id="ofpPlan" class="small" title="Plan a new flight on SimBrief">Plan on SimBrief ↗</button> <button type="button" id="ofpImport" class="small" title="Load an OFP JSON file you downloaded from SimBrief">Import JSON</button> <button type="button" id="ofpAdd" class="small" title="Spawn my SimBrief flight as a departure or an arrival with exactly the OFP data">Add my flight</button><input type="file" id="ofpFile" accept=".json" class="hidden"> <button type="button" id="ofpHide" class="small">Hide</button></span></h3><div id="ofpBody"></div></div>
     <div class="panel strips" id="stripBoard"></div>
     <div class="panel chat hidden" id="chatPanel"><h3>Controllers' chat <button type="button" id="coordBtn" class="small" title="Coordination request to another position">☎ Coordinate</button></h3><div id="chatLog"></div><form id="chatForm"><input id="chatIn" placeholder="message to the other controllers" autocomplete="off"></form></div>
+    <div class="panel autop hidden" id="autoPanel"><h3>Auto ATC <span class="muted small" id="autoHint"></span></h3><div id="assistList"></div><div id="autoLog" class="autolog"></div></div>
     <div class="panel log"><h3 id="logTitle">Frequency</h3><div id="log"></div></div>
     <form id="cmdForm" class="cmd">
       <button type="button" id="mic" title="Hold to talk (or Ctrl+Space)">🎙</button>
@@ -181,6 +184,7 @@
       <label title="Every AI aircraft has TCAS II: TA, RA, coordination, 'TCAS RA' / 'clear of conflict' calls"><input type="checkbox" id="setTcas"> TCAS for AI aircraft</label>
       <label><input type="checkbox" id="setTcasShow"> Show TCAS events on the radar and in the log</label>
       <button type="button" id="tcasInject" title="Two AI aircraft set up for an RA in your airspace: practise the ATC side">Inject TCAS event</button>
+      <label title="Rare slips the AI controller corrects itself, and local-language calls to local pilots where that really happens"><input type="checkbox" id="setAtcRealism"> AI controllers: extra realism (slips, local language)</label>
     </fieldset>
     <fieldset><legend>EuroScope</legend>
       <div id="setEs" class="small"></div>

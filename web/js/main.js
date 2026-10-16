@@ -27,6 +27,7 @@ import { daylight } from "./daylight.js";
 import { departureSequence, arrivalSpacing } from "./flow.js";
 import { CHECKLISTS } from "./events.js";
 import { synthMetar } from "./ops.js";
+import { defaultProfile, mergeProfile, applyProfile } from "./autoatc.js";
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -45,6 +46,7 @@ const DEFAULTS = {
   accents: "natural", rate: 1, effect: 0.85, preset: "good", voices: true, blocked: true, rbErr: 4, sayAgain: 2, oldAtis: 10, events: false,
   dep: 10, arr: 8, coach: false, lang: "en", graph: false, monitor: [], occupancy: 70, vehicles: -1, waves: true, osm: true, realMix: true, nightAuto: true,
   wx: "live", lvp: false, recat: false, vfr: 2, abnormals: false, abnormalRate: 2, seq: true, tcas: true, tcasShow: true,
+  atcMode: { DEL: "manual", GND: "manual", TWR: "manual", APP: "manual", CTR: "manual" }, atcRealism: false, watch: false,
   nick: "", layouts: {}, layout: "", chartsUrl: "",
   staff: { mode: "combined", keys: ["TWR"] },
   xr: { enabled: false, host: "127.0.0.1", port: 49100, password: "", cs: "", freq: "", ai: true, humans: true, text: true, voice: false,
@@ -77,6 +79,7 @@ function bootMain() {
   }
   /** B2: the parser knows the real VFR point names ("report Bravo"); generic placeholders are not names to check against. */
   function syncVfrNames() { const v = sim ? sim.vfrPoints() : []; setVfrNames(v.map(p => p.name), !v.length || v.every(p => p.generic)); }
+  let profile = null;                // E6: the airport profile
   let sim = null, apt = null, positions = null, metar = null, speed = 1, selectedId = null, procs = null, navInfo = null;
   let activePos = "ALL";
   const logs = {};                 // pos -> [{cls, html}]
@@ -167,6 +170,11 @@ function bootMain() {
     store.set("tt.icao", icao);
     $("aptIcao").value = icao;
     positions = buildPositions(apt);
+    // E6: the airport's profile (data/airports/<ICAO>.json over generated defaults): unit names, frequencies, habits
+    let file = {};
+    try { file = await (await fetch(`/api/profile/${icao}`)).json(); } catch { /* remote / offline */ }
+    profile = mergeProfile(defaultProfile(icao, apt, positions), file);
+    applyProfile(profile, positions);
     $("aptName").textContent = `${apt.name}${apt.edges.length ? "" : " — no taxi routes in Gateway data"}`;
     radio.airport = apt.icao;
     radar.setAirport(apt);
@@ -389,6 +397,9 @@ function bootMain() {
     });
     sim.depPerHour = +settings.dep; sim.arrPerHour = +settings.arr;
     sim.tcasOn = settings.tcas !== false; radar.showTcas = settings.tcasShow !== false;
+    sim.profile = profile; sim.realism = !!settings.atcRealism; sim.ctrlSeed = Math.floor(Math.random() * 1e6);
+    sim.atcMode = { ...DEFAULTS.atcMode, ...(settings.atcMode || {}) };
+    $("atcMode").value = POS_ORDER.every(k => sim.atcMode[k] === sim.atcMode.TWR) ? sim.atcMode.TWR : "manual";
     makePilotAtc();
     recorder.start({ icao: apt.icao, staff: settings.staff });
     if (settings.xr.tower && !(mp.relay && mp.role === "host")) setTimeout(() => { if (sim && !(mp.relay && mp.role === "host")) mp.host(false, "TOWER"); }, 500);
@@ -415,7 +426,95 @@ function bootMain() {
     if (!settings.xr.enabled) sysLog("XRadio is off: real pilots are not on the radar, and the AI traffic cannot see them.");
   }
 
+  // ---------- E1-E4: automatic ATC ----------
+  const autoLog = [];
+  const aiCoach = { tx: 0, warn: 0 };
+  function setAtcMode(pos, mode) {
+    if (!sim) return;
+    if (mode !== "manual" && !sim.split) {
+      // the AI controllers need the positions: split staffing (your positions stay yours unless they are on auto)
+      settings.staff.mode = "split"; if (!settings.staff.keys.length) settings.staff.keys = ["TWR"];
+      for (const k of POS_ORDER) settings.atcMode[k] = pos === "ALL" || pos === k ? mode : settings.atcMode[k];
+      save(); updateStaffBtn(); createSim();
+      sysLog("Automatic ATC needs split positions: switched to split staffing.");
+      return;
+    }
+    for (const k of POS_ORDER) if (pos === "ALL" || pos === k) settings.atcMode[k] = mode;
+    save();
+    sim.setMode(pos, mode);
+    if (pilotAtc) pilotAtc.lastTick = -1;
+    $("atcMode").value = POS_ORDER.every(k => settings.atcMode[k] === mode) ? mode : $("atcMode").value;
+    renderTabs(); renderAuto();
+    sysLog(pos === "ALL" ? `ATC: ${mode} for every position.` : `${pos}: ${mode === "auto" ? "handed to the AI controller" : mode === "assist" ? "you work it, the AI suggests" : "yours"}.`);
+  }
+  $("atcMode").addEventListener("change", () => setAtcMode("ALL", $("atcMode").value));
+  $("posTabs").addEventListener("contextmenu", (e) => {
+    const t = e.target.closest(".tab[data-pos]");
+    if (!t || !sim || !sim.split || t.dataset.pos === "ALL") return;
+    e.preventDefault();
+    const k = t.dataset.pos, order = ["manual", "assist", "auto"];
+    setAtcMode(k, order[(order.indexOf(sim.modeOf(k)) + 1) % 3]);
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.altKey && !e.shiftKey && e.key.toLowerCase() === "x" && sim && sim.split) {          // (Alt+T is the CTR tab)
+      e.preventDefault();
+      const k = activePos === "ALL" ? "TWR" : activePos;
+      setAtcMode(k, sim.modeOf(k) === "auto" ? "manual" : "auto");        // take over / hand back
+    }
+    if (e.ctrlKey && e.key === "Enter" && sim) {                           // assist: send the top suggestion
+      const s = assistSuggestions()[0];
+      if (s) { e.preventDefault(); transmit(s.text, s.pos, "assist"); }
+    }
+  });
+  function assistSuggestions() {
+    if (!sim || !sim.split) return [];
+    const out = [];
+    for (const k of POS_ORDER) {
+      if (sim.modeOf(k) !== "assist" || !sim.userWorks(k)) continue;
+      for (const a of sim.ac) {
+        if (a.freq !== k || a.veh && !a.wants) continue;
+        const s = sim.assistFor(a, k);
+        if (s) out.push({ ...s, pos: k, ac: a });
+      }
+    }
+    return out.sort((x, y) => (y.ac.reqAt != null) - (x.ac.reqAt != null));
+  }
+  let lastAutoRender = 0;
+  function renderAuto(force = false) {
+    const el = $("autoPanel");
+    const on = sim && sim.split && POS_ORDER.some(k => sim.modeOf(k) !== "manual");
+    el.classList.toggle("hidden", !on);
+    if (!on || (!force && performance.now() - lastAutoRender < 1000)) return;
+    lastAutoRender = performance.now();
+    const sug = assistSuggestions();
+    $("autoHint").textContent = sug.length ? "click or Ctrl+Enter to send" : "";
+    $("assistList").innerHTML = sug.slice(0, 6).map((s, i) => `<div class="sug" data-i="${i}" title="${esc(s.why)}"><b>${esc(s.pos)}</b> ${esc(s.text)}${s.why ? ` <span class="muted small">— ${esc(s.why)}</span>` : ""}</div>`).join("");
+    $("assistList").onclick = (e) => { const d = e.target.closest(".sug"); if (d) { const s = sug[+d.dataset.i]; if (s) transmit(s.text, s.pos, "assist"); } };
+    $("autoLog").innerHTML = autoLog.slice(-30).reverse().map(x => `<div><span class="t">${esc(x.clock)}</span> <b>${esc(x.pos)}</b>${x.ctrl ? ` <span class="muted small">(${esc(x.ctrl)})</span>` : ""} ${esc(x.text)}${x.why ? ` <span class="muted small">— ${esc(x.why)}</span>` : ""}</div>`).join("");
+  }
+  // watch mode: the 3D tower (or the map) follows whoever is doing something
+  $("watchBtn").addEventListener("click", () => { settings.watch = !settings.watch; save(); $("watchBtn").classList.toggle("on", settings.watch); if (!settings.watch) radar.t3d.locked = null; });
+  $("watchBtn").classList.toggle("on", !!settings.watch);
+  setInterval(() => {
+    if (!settings.watch || !sim) return;
+    const busy = sim.ac.filter(a => !a.veh && (["roll", "rollout", "lining", "vacating"].includes(a.state) || (a.state === "final" && sim.distToThr(a) < 4 * 1852) || (a.lastCall && sim.t - a.lastCall < 8)));
+    const pick = busy.sort((x, y) => (["roll", "rollout"].includes(y.state) - ["roll", "rollout"].includes(x.state)))[0];
+    if (!pick) return;
+    radar.t3d.locked = pick.id;
+    if (radar.view !== "3D" && radar.view !== "APP" && radar.view !== "CTR") { radar.cx = pick.pos[0]; radar.cy = pick.pos[1]; radar.staticKey = null; }
+  }, 4000);
+
   function onSimEvent(e) {
+    if (e.type === "autoAtc") {
+      autoLog.push({ clock: sim ? fmtClock(sim) : "", pos: e.pos, text: e.text, why: e.why, ctrl: e.ctrl });
+      if (autoLog.length > 200) autoLog.shift();
+      // E3: the AI controller is scored like you are
+      const notes = coach({ text: e.canonical || e.text, parsed: parse(e.canonical || e.text, sim.ac, e.ac), sim, pos: e.pos, lang: "en" }) || [];
+      aiCoach.tx++; aiCoach.warn += notes.filter(n => n.level === "warn").length;
+      renderAuto();
+    }
+    if (e.type === "landline") addLog(e.from, "landline", `☎ ${esc(e.from)}→${esc(e.to)}: ${esc(e.text)}`);
+    if (e.type === "shiftChange") sysLog(`${e.pos}: new controller on shift (${e.ctrl.name}).`);
     if (e.type === "atis") { renderAtis(); sysLog(`ATIS information ${e.letter} is now current.`); if (atisOn) startAtis(); }
     if (e.type === "prepare") radio.prerenderText(e.ac, e.m);
     if (e.type === "aiAction") addLog(e.pos, "ai", `<b>${esc(posCs(e.pos))} (AI)</b> 💡 ${esc(e.text)}`);
@@ -492,6 +591,7 @@ function bootMain() {
     if (!sim) return;
     const dec = parseMetar(currentMetar());
     sim.weatherFromMetar(dec);
+    sim.qnh = dec.qnh || (metar && metar.altim ? Math.round(metar.altim) : null);
     if (!sim.wxScenario && !(dec.wind && dec.wind.dir != null) && metar && typeof metar.wdir === "number") sim.setWind({ dir: metar.wdir, spd: metar.wspd || 0, gust: metar.wgst || 0 });
     if (settings.lvp) { sim.lvpManual = true; sim.setLvp(true, "manual"); }
     if (settings.wx && settings.wx !== "live" && !sim.wxScenario) sim.setWxScenario(settings.wx);
@@ -594,9 +694,10 @@ function bootMain() {
     $("posTabs").innerHTML = keys.map(k => {
       const ai = sim.split && !sim.userWorks(k);
       const remote = sim.split && sim.remoteStaff[k];
+      const md = sim.split && k !== "ALL" ? sim.modeOf(k) : "manual";
       const label = k === "ALL" ? "DEL/GND/TWR" : k;
       const mon = ai || remote ? `<button class="mon${radio.monitor.has(k) ? " on" : ""}" data-mon="${k}" title="${radio.monitor.has(k) ? "Monitoring this frequency (quiet) — click to stop" : "Monitor this frequency (quiet)"}">${radio.monitor.has(k) ? "🔈" : "🔇"}</button>` : "";
-      return `<div class="tab${k === activePos ? " on" : ""}${ai ? " ai" : ""}${remote ? " remote" : ""}" data-pos="${k}" title="${ai ? "AI controller" : remote ? "worked by " + esc(remote) : "you"}">${label}${remote ? `<span class="who">${esc(remote)}</span>` : ""}` +
+      return `<div class="tab${k === activePos ? " on" : ""}${ai ? " ai" : ""}${remote ? " remote" : ""}" data-pos="${k}" title="${ai ? "AI controller" : remote ? "worked by " + esc(remote) : "you"} — right-click: manual / assist / auto">${label}${md !== "manual" ? `<span class="who">${md === "auto" ? "AUTO" : "ASSIST"}</span>` : ""}${remote ? `<span class="who">${esc(remote)}</span>` : ""}` +
         `${unread[k] ? `<span class="badge">${unread[k]}</span>` : ""}${mon}<button class="pop" data-pop="${k}" title="Pop out">⧉</button></div>`;
     }).join("");
     $("viewTabs").innerHTML = Object.keys(VIEWS).map(v => `<button data-view="${v}" class="${radar.view === v ? "on" : ""}">${VIEWS[v]}</button>`).join("");
@@ -1260,7 +1361,7 @@ function bootMain() {
     ["depRate", "dep"], ["arrRate", "arr"], ["setCoach", "coach", "checked"], ["setLang", "lang"], ["setChartsUrl", "chartsUrl"], ["graph", "graph", "checked"],
     ["setOccupancy", "occupancy"], ["setVehicles", "vehicles"], ["setWaves", "waves", "checked"], ["setOsm", "osm", "checked"], ["setRealMix", "realMix", "checked"], ["setNight", "nightAuto", "checked"],
     ["setWx", "wx"], ["setLvp", "lvp", "checked"], ["setRecat", "recat", "checked"], ["setVfr", "vfr"], ["setAbnormals", "abnormals", "checked"], ["setAbnormalRate", "abnormalRate"], ["setSeq", "seq", "checked"],
-    ["setTcas", "tcas", "checked"], ["setTcasShow", "tcasShow", "checked"],
+    ["setTcas", "tcas", "checked"], ["setTcasShow", "tcasShow", "checked"], ["setAtcRealism", "atcRealism", "checked"],
   ];
   function fillSettings() {
     for (const [id, k, prop] of bindings) $(id)[prop || "value"] = settings[k];
@@ -1298,7 +1399,7 @@ function bootMain() {
       if (changedId === "setRealMix") applyTraffic();
       if (changedId === "setOccupancy" && sim.occupancy > sim.ac.filter(a => a.state === "parked").length / Math.max(1, apt.stands.length)) sim.populate(sim.occupancy - sim.ac.filter(a => a.state === "parked").length / Math.max(1, apt.stands.length));
       sim.recat = !!settings.recat; sim.vfrPerHour = +settings.vfr || 0;
-      sim.tcasOn = settings.tcas !== false; radar.showTcas = settings.tcasShow !== false;
+      sim.tcasOn = settings.tcas !== false; radar.showTcas = settings.tcasShow !== false; sim.realism = !!settings.atcRealism;
       sim.abnormals = { on: !!settings.abnormals, perHour: +settings.abnormalRate || 2 };
       if (changedId === "setAbnormals" || changedId === "setAbnormalRate") sim.scheduleAbnormal();
       if (changedId === "setLvp") { sim.lvpManual = !!settings.lvp; if (settings.lvp) sim.setLvp(true, "manual"); else applyWeather(); }
@@ -1375,6 +1476,7 @@ function bootMain() {
         <tr><th>${L ? "Korduse vead (parandatud)" : "Readback errors (caught)"}</th><td>${st.rbErrors} (${st.rbCaught})</td><th>${L ? "Märkamata vead" : "Missed readback errors"}</th><td>${st.missedRb}</td></tr>
         <tr><th>${L ? "Konfliktid" : "Conflicts"}</th><td>${st.conflicts}</td><th>${L ? "Hoiatused" : "Alerts"}</th><td>${st.alerts}</td></tr>
         <tr><th>STCA</th><td>${st.stca || 0}</td><th>TCAS RA</th><td>${st.tcasRa || 0}</td></tr>
+        ${aiCoach.tx ? `<tr><th>${L ? "AI lennujuhid: saateid" : "AI controllers: transmissions"}</th><td>${aiCoach.tx}</td><th>${L ? "AI skoor" : "AI score"}</th><td>${Math.max(0, Math.round(100 * (1 - aiCoach.warn / (aiCoach.tx + aiCoach.warn))))}</td></tr>` : ""}
       </table>
       ${atcErrorsHtml(st, L)}
       <h3>${L ? "Fraseoloogia positsioonide kaupa" : "Phraseology per position"}</h3>
@@ -1718,6 +1820,7 @@ function bootMain() {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
     if (sim && speed > 0) for (let i = 0; i < speed; i++) sim.step(dt);
     if (sim && pilotAtc) pilotAtc.tick();
+    renderAuto();
     if (sim) {
       recorder.tick(sim, logs);
       if (replay.on) drawReplay(dt);

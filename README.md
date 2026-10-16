@@ -150,6 +150,22 @@ the deviations, the timings and a score, downloadable. `web/js/pilotatc.js` hold
 `tests/ops.test.mjs` flies a departure and arrivals through it, and `tests/aiatc.test.mjs` flies a
 scripted XRadio pilot from a stand at EETN to a stand at EVRA through XRadio's own server.
 
+## Automatic ATC
+
+The header switch **ATC: Manual / Assist / Auto** sets every position at once; right-click a position
+tab to set one. *Auto*: an AI controller works it. *Assist*: you work it and the panel suggests what the
+AI would say (click it or press Ctrl+Enter). **Alt+X** takes over the active position, or hands it back.
+**👁 Watch** lets the view follow whoever is doing something. Every AI transmission goes into the
+Auto ATC panel with the reason for it, and the debrief scores the AI controllers like you.
+
+The controllers follow the airport's own ways from `data/airports/<ICAO>.json` (unit names, transition
+altitude, preferred runways, taxi routes and holding points, low-visibility limits, habits such as "land
+after"); US, UK or ICAO phraseology follows from the airport. Airports without a file get defaults. Each position is a person on a 45-90 minute shift with their own voice and habits, and a
+new one says so on the frequency ("all stations, Tallinn Tower, new controller, information C current").
+A busy controller is short, a quiet one greets and says goodbye. Every phrase is checked by the
+validator of its region before it is spoken. The logic is in `web/js/autoatc.js`, and the rules
+(sequencing, line-up, crossings, circuits behind jets, level changes for overflights) are in `sim.js`.
+
 ## Control from the tower in X-Plane
 
 With the XRadio plugin (v0.6.0) you can sit in the tower cab inside X-Plane and work the trainer's traffic
@@ -215,5 +231,6 @@ python tests/sector_test.py                   # generated EuroScope .sct/.ese/.a
 python tests/setup_test.py                    # the setup wizard on a temporary folder, dry runs, its HTTP API
 python tests/towerlink_test.py                # the X-Plane tower link: hello, airport line (taxi network, pavement), claims, transmissions, ops
 python tests/simbrief_test.py                 # the SimBrief OFP parser on a made-up fixture, fetch errors, cache, plan links
+node tests/autoatc.test.mjs [MINUTES]         # profiles, phraseology styles, validator; MINUTES of full auto at EETN and KORD with no conflict, RA or stuck aircraft
 node tests/aiatc.test.mjs                     # S5: a scripted XRadio pilot flown EETN → EVRA by the AI controllers, end to end (XRADIO_DIR or ../xradio-main)
 ```

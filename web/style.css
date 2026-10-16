@@ -24,6 +24,10 @@ input[type=number] { width: 52px; }
 .atis b { color: var(--atc); font-size: 14px; }
 .atis .raw { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
 @media (max-width: 1500px) { .atis .raw { display: none; } }
+.autop .sug { padding: 3px 6px; cursor: pointer; border-left: 3px solid #2f6b45; margin: 2px 0; font-size: 12px; }
+.autop .sug:hover { background: #1d3a2a; }
+.autolog { max-height: 160px; overflow: auto; font-size: 11px; margin-top: 4px; }
+.landline { color: #6c7f91; font-style: italic; opacity: 0.8; }
 .pill { font: 11px ui-monospace, Consolas, monospace; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); }
 .pill.on { color: var(--atc); border-color: #2f6b45; }
 .pill.err { color: var(--alert); border-color: #6b2f2f; }

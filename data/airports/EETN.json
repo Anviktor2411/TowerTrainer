@@ -1,0 +1,13 @@
+{
+  "icao": "EETN",
+  "note": "Tallinn Lennart Meri. Edit freely: unit names, frequencies, habits. Missing keys use TowerTrainer's defaults.",
+  "units": { "DEL": "Tallinn Delivery", "GND": "Tallinn Ground", "TWR": "Tallinn Tower", "APP": "Tallinn Radar", "CTR": "Tallinn Control" },
+  "transitionAlt": 5000,
+  "preferredRunways": ["26", "08"],
+  "runwayChange": { "maxTailwind": 5, "maxCrosswind": 25 },
+  "taxiRoutes": { "26": "A B", "08": "A" },
+  "holdingPoints": { "26": "B", "08": "A" },
+  "lvp": { "rvr": 550, "ceiling": 200, "note": "CAT II/III holding points, stop bars" },
+  "nat": "EE",
+  "habits": { "windOnClearance": true, "landAfter": false, "goodDay": "goodbye" }
+}

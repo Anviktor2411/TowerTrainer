@@ -406,6 +406,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, navdata.load_procedures(
                     m.group(1), apt["lat"], apt["lon"], CACHE, xplane=q.get("xplane", s["xplane"]), mode=q.get("mode", s["mode"]),
                     custom=q.get("custom", s["custom"]), sector=q.get("sector", s["sector"]), use_cache=q.get("refresh") != "1"))
+            m = re.fullmatch(r"/api/profile/([A-Za-z0-9]{3,7})", path)
+            if m:                                       # E6: data/airports/<ICAO>.json (the page fills in the defaults)
+                f = ROOT / "data" / "airports" / f"{m.group(1).upper()}.json"
+                try:
+                    return self.send(200, json.loads(f.read_text("utf-8")) if f.is_file() else {})
+                except ValueError as e:
+                    return self.send(200, {"_error": f"{f.name}: {e}"})
             if path == "/api/setup/status":             # the setup wizard (G6): detection only, local PC only
                 if not self.is_local():
                     return self.send(403, {"error": "the setup wizard is only available on this PC"})

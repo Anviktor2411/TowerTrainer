@@ -193,7 +193,7 @@ export function parseInstructions(s) {
   add(new RegExp(`\\bcleared (?:for )?(?:touch and go|touch-and-go|low approach|stop and go)(?: runway ${RWY})?`), (m) => ({ t: "touchGo", rwy: m[1] ? m[1].toUpperCase() : rwyNear(m.index) }));
   add(new RegExp(`\\bland after ${TRAFFIC_WORDS}(?=,? runway|,|$)`), (m) => ({ t: "landAfter", phase: m[1] || "landing", subject: m[2].trim() }));
   add(/\bgo around\b/, () => ({ t: "goaround" }));
-  add(/\bexpect (?:runway |an? |the |ils )?([a-z0-9 ]{2,40}?)(?=,|$| squawk| climb| contact)/, (m) => ({ t: "expect", what: m[1].trim() }));
+  add(/\bexpect (?!approach(?: time)?(?: at)? \d{4})(?:runway |an? |the |ils )?([a-z0-9 ]{2,40}?)(?=,|$| squawk| climb| contact)/, (m) => ({ t: "expect", what: m[1].trim() }));
   // B2: VFR reporting points by their real names ("report Bravo", "report overhead Kilo", "via Kilo at 1500 feet")
   if (VFR_NAMES.length) {
     const alt = VFR_NAMES.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).sort((a, b) => b.length - a.length).join("|");
@@ -239,6 +239,10 @@ export function parseInstructions(s) {
   add(/\b(?:send(?: the| a)? )?follow[ -]?me(?: (?:car|vehicle|van))?(?: (?:is )?(?:on (?:its|the) way|coming))?\b/, () => ({ t: "followMe" }));
   if (!isClearance) add(/\b(climb|descend)(?: and maintain| to)* (?:(?:flight level|fl) ?(\d{2,3})|(\d{3,5})(?: feet| ft)?)/, (m) =>
     ({ t: "alt", verb: m[1], ft: m[2] ? +m[2] * 100 : +m[3], fl: !!m[2] }));
+  // E7: "reduce speed 180 knots until 4 mile final", "turn left heading 250", "expect approach at 1234"
+  add(/\b(reduce|increase|maintain) speed (\d{2,3})(?: knots| kt)?(?: until (\d{1,2}) (?:mile|miles|nm) final)?/, (m) => ({ t: "speed", verb: m[1], kt: +m[2], untilNm: m[3] ? +m[3] : null }));
+  add(/\b(?:turn (left|right) )?(?:fly )?heading (\d{3})\b/, (m) => ({ t: "heading", dir: m[1] || null, hdg: +m[2] }));
+  add(/\bexpect(?:ed)? approach(?: time)?(?: at)? (\d{4})\b/, (m) => ({ t: "eat", hhmm: m[1] }));
   // nav data (F4): "direct LAKUT", "proceed direct Tallinn VOR", "hold at TLL", "cleared via LAKUT1T arrival"
   const NAV_END = "(?=,|$| then| and| climb| descend| maintain| expect| contact| as published| inbound| left| right| reduce| speed| when)";
   add(new RegExp(`\\b(?:proceed |fly |route )?direct(?: to)? ([a-z][a-z0-9]*(?: [a-z][a-z0-9]*){0,5}?)${NAV_END}`), (m) => {
@@ -273,8 +277,13 @@ export function standKey(name) {
   return normalize(String(name)).replace(/^(gate|stand|parking|ramp)\s+/, "").replace(/[^a-z0-9]/g, "");
 }
 
+/** A controller's own correction: "squawk 4251, correction, squawk 4521" -> "squawk 4521". */
+export function applyCorrections(s) {
+  return s.replace(/\b(squawk|climb|descend|runway|heading|contact [a-z]+)\s+([\w.]+),?\s+correction,?\s+\1\s+/g, "$1 ");
+}
+
 export function parse(text, aircraft, selected) {
-  const s = normalize(text);
+  const s = applyCorrections(normalize(text));
   let { ac, rest, abbrev } = matchCallsign(s, aircraft);
   const explicit = !!ac;
   if (!ac && selected) ac = selected;

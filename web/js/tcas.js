@@ -74,7 +74,7 @@ export function threat(g, sl, modeA = false) {
   const ta = horizTA && vertTA;
   let ra = false;
   if (!modeA && sl.raTau > 0) {
-    const horizRA = dm(sl.raDmod) || (g.rdot < -0.5 && Math.min(g.tau, modTau(sl.raDmod)) < sl.raTau && g.missNm < Math.max(sl.raDmod * 2, 0.6));
+    const horizRA = dm(sl.raDmod) || (g.rdot < -0.5 && Math.min(g.tau, modTau(sl.raDmod)) < sl.raTau && g.missNm < Math.max(sl.raDmod * 1.5, 0.4));
     const vertRA = Math.abs(g.dz) < sl.raZthr || g.vtau < sl.raTau;
     ra = horizRA && vertRA;
   }
@@ -174,7 +174,7 @@ export function installTcas(Sim) {
       a._altPrev = a.alt;
     }
     if (Math.floor(this.t) === Math.floor(this.t - dt)) return;
-    if (this.tcasOn !== false) for (const a of this.ac) if (!a.human && !a.veh && !a.onGround && !a.tcasOff) this.tcasLogic(a);
+    if (this.tcasOn !== false) for (const a of this.ac) if (!a.human && !a.veh && !a.onGround && !a.tcasOff && !(a.ga && !a.tcasEquipped)) this.tcasLogic(a);   // light GA aircraft carry no TCAS II
     this.stcaTick();
   };
 

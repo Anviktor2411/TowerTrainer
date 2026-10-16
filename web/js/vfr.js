@@ -9,7 +9,15 @@ const NM = 1852;
 /** Default VFR reporting points: 5 NM from the field on the cardinal bearings, named phonetically. */
 export function defaultVfrPoints(apt) {
   const pts = [["N", 0, "November"], ["E", 90, "Echo"], ["S", 180, "Sierra"], ["W", 270, "Whiskey"]];
-  return pts.map(([id, brg, name]) => ({ id, name, brg, nm: 5, p: [Math.sin(brg * Math.PI / 180) * 5 * NM, Math.cos(brg * Math.PI / 180) * 5 * NM], alt: 1500, generic: true }));
+  // never on an extended centreline: VFR traffic inbound to a point there would fly down the ILS at 1500 ft.
+  // Each point moves up to 40° off its cardinal bearing to be at least 30° from every runway's approach axis.
+  const axes = (apt && apt.runways ? apt.runways.flatMap(r => r.ends.map(e => (e.hdg + 180) % 360)) : []);
+  const clear = (b) => axes.reduce((m, x) => Math.min(m, Math.abs(angDiff(b, x))), 180);
+  return pts.map(([id, brg0, name]) => {
+    let brg = brg0;
+    for (let k = 0; k <= 40 && clear(brg) < 30; k += 5) for (const s of [1, -1]) if (clear((brg0 + s * k + 360) % 360) >= 30) { brg = (brg0 + s * k + 360) % 360; k = 99; break; }
+    return { id, name, brg, nm: 5, p: [Math.sin(brg * Math.PI / 180) * 5 * NM, Math.cos(brg * Math.PI / 180) * 5 * NM], alt: 1500, generic: true };
+  });
 }
 
 export function installVfr(Sim) {
@@ -81,11 +89,13 @@ export function installVfr(Sim) {
     if (i < 0) return false;
     const w = a.wps[i], prev = a.wps[i - 1] || w;
     const v = [w.p[0] - prev.p[0], w.p[1] - prev.p[1]], l = Math.hypot(...v) || 1;
-    a.wps[i] = { ...w, p: [w.p[0] + v[0] / l * 1.5 * NM, w.p[1] + v[1] / l * 1.5 * NM] };
+    const ext = (a.extendNm || 1.5) * NM;              // the AI Tower may ask for more to fit behind a jet
+    a.extendNm = null;
+    a.wps[i] = { ...w, p: [w.p[0] + v[0] / l * ext, w.p[1] + v[1] / l * ext] };
     const base = a.wps[i + 1];
-    if (base) base.p = [base.p[0] + v[0] / l * 1.5 * NM, base.p[1] + v[1] / l * 1.5 * NM];
+    if (base) base.p = [base.p[0] + v[0] / l * ext, base.p[1] + v[1] / l * ext];
     const fin = a.wps[i + 2];
-    if (fin) fin.p = [fin.p[0] + v[0] / l * 1.5 * NM, fin.p[1] + v[1] / l * 1.5 * NM];
+    if (fin) fin.p = [fin.p[0] + v[0] / l * ext, fin.p[1] + v[1] / l * ext];
     a.extended = true;
     return true;
   };

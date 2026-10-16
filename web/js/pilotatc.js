@@ -262,7 +262,7 @@ export class PilotAtc {
       if ((F.phase === "final" || F.phase === "approach") && !a.onGround && !F.landClr) {
         const d = this.sim.distToThr(a);
         const e = this.sim.arrEnd;
-        const free = this.sim.runwayFree(e.rwy, a) && !this.sim.ac.some(o => o.kind === "dep" && ["lining", "lined_up", "roll"].includes(o.state) && o.depEnd.rwy === e.rwy);
+        const free = !this.sim.runwayDanger(e.rwy, a, { finalNm: 0, finalSec: 0 }).busy && !this.sim.ac.some(o => o.kind === "dep" && ["lining", "lined_up", "roll"].includes(o.state) && o.depEnd.rwy === e.rwy);
         if (F.checkedIn && d < 6 * NM && free && !this.sim.closedRunways.has(e.rwy)) { F.landClr = true; this.say(F, F.pos, `${a.cs}, runway ${e.name}, cleared to land${this.sim.windTxt()}`, [{ k: "rwy", v: e.name }, { k: "word", v: "cleared to land" }]); }
         else if (d < 1.2 * NM && once("goaround", 30)) { this.note(F, "not cleared to land inside 1.2 NM: go around", "warn"); this.say(F, F.pos, `${a.cs}, go around, I say again, go around`); F.landClr = false; }
       }
@@ -374,7 +374,7 @@ export class PilotAtc {
       const arr = sim.nearestArrival(e);
       const gap = sim.lastTakeoff ? sim.t - sim.lastTakeoff.t : 999;
       const need = sim.lastTakeoff && sim.lastTakeoff.rwy === e.rwy ? sim.depSpacingS(sim.lastTakeoff, a) : 0;
-      const free = sim.runwayFree(e.rwy, a) && !sim.closedRunways.has(e.rwy);
+      const free = !sim.runwayDanger(e.rwy, a, { finalNm: 2, finalSec: 60 }).busy && !sim.closedRunways.has(e.rwy);
       if (free && arr > (sim.lvp ? 6 : 4) * NM && gap >= need) {
         F.takeoff = true; F.lineup = true; F.times.takeoffClr = sim.t;
         const t = `${cs}, runway ${e.name}, cleared for takeoff${sim.windTxt()}`;
@@ -425,7 +425,7 @@ export class PilotAtc {
       F.checkedIn = true;
       if (F.landClr) return this.say(F, F.pos, `${cs}, roger, runway ${e.name}, cleared to land`);
       const d = sim.distToThr(a);
-      const free = sim.runwayFree(e.rwy, a) && !sim.ac.some(o => o.kind === "dep" && ["lining", "lined_up", "roll"].includes(o.state) && o.depEnd.rwy === e.rwy);
+      const free = !sim.runwayDanger(e.rwy, a, { finalNm: 0, finalSec: 0 }).busy && !sim.ac.some(o => o.kind === "dep" && ["lining", "lined_up", "roll"].includes(o.state) && o.depEnd.rwy === e.rwy);
       if (d < 6 * NM && free && !sim.closedRunways.has(e.rwy)) { F.landClr = true; return this.say(F, F.pos, `${cs}, runway ${e.name}, cleared to land${sim.windTxt()}`, [{ k: "rwy", v: e.name }, { k: "word", v: "cleared to land" }]); }
       return this.say(F, F.pos, `${cs}, continue approach runway ${e.name}, ${free ? "expect late landing clearance" : "traffic on the runway"}${sim.windTxt()}`);
     }

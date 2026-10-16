@@ -1,0 +1,12 @@
+{
+  "icao": "EGLL",
+  "note": "London Heathrow (UK CAP 413 phraseology).",
+  "units": { "DEL": "Heathrow Delivery", "GND": "Heathrow Ground", "TWR": "Heathrow Tower", "APP": "Heathrow Director", "CTR": "London Control" },
+  "transitionAlt": 6000,
+  "preferredRunways": ["27R", "27L", "09L", "09R"],
+  "runwayChange": { "maxTailwind": 5, "maxCrosswind": 25 },
+  "lvp": { "rvr": 600, "ceiling": 200, "note": "LVPs in force: CAT III holds, increased spacing" },
+  "noise": "Westerly preference; Cranford agreement: no 09L departures",
+  "nat": "GB",
+  "habits": { "windOnClearance": true, "landAfter": true, "conditional": true, "goodDay": "goodbye" }
+}

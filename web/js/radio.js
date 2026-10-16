@@ -422,15 +422,19 @@ export class Radio {
       .catch(() => { ac.cast[speaker] = null; return null; });
     return ac.cast[speaker];
   }
-  castController(pos) {
+  /** The voice of the controller on `pos`. ctrl (autoatc.js): this shift's controller -- its own seed, gender and
+   *  accent, so every position and every shift sounds like another person. */
+  castController(pos, ctrl = null) {
     this.ctlCast ||= {};
-    if (!this.ctlCast[pos]) {
-      const nat = this.accents === "off" ? "GB" : controllerNat(this.airport);
-      this.ctlCast[pos] = fetch("/api/tts/cast", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ nat, seed: [...String(pos)].reduce((s, c) => s + c.charCodeAt(0), 11), role: "controller" }) })
-        .then(r => r.json()).then(j => { this.ctlCast[pos] = j.voice; return j.voice; }).catch(() => null);
+    const key = ctrl ? `${pos}#${ctrl.id}` : pos;
+    if (!this.ctlCast[key]) {
+      const nat = this.accents === "off" ? "GB" : (ctrl && ctrl.nat) || controllerNat(this.airport);
+      const seed = ctrl ? ctrl.voiceSeed : [...String(pos)].reduce((s, c) => s + c.charCodeAt(0), 11);
+      this.ctlCast[key] = fetch("/api/tts/cast", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nat, seed, gender: ctrl ? ctrl.gender : undefined, role: "controller" }) })
+        .then(r => r.json()).then(j => { this.ctlCast[key] = j.voice; return j.voice; }).catch(() => null);
     }
-    return this.ctlCast[pos];
+    return this.ctlCast[key];
   }
 
   /** Natural delivery at a low rate: "uh" before numbers, "...and" before the callsign, a self-correction. Spoken text only. */
@@ -462,7 +466,7 @@ export class Radio {
     if (busy) rate *= 1.06;
     let pitch = crew ? (crew.pitch - 1) * 18 : 0;
     let style;
-    if (m.from === "atc") { rate = 0.97 * this.rate; pitch = -3; style = "calm"; }   // controllers: calm, even
+    if (m.from === "atc") { rate = 0.97 * this.rate * (m.ctrl ? m.ctrl.rate : 1); pitch = -3; style = "calm"; }   // controllers: calm, even (each at its own pace)
     if (m.kind === "atis") { rate = 0.93 * this.rate; pitch = -2; style = "newscast"; }
     return { text, prosody: { rate: Math.round(rate * 100) / 100, pitch: Math.round(pitch), ...(style ? { style } : {}) } };
   }
@@ -472,7 +476,7 @@ export class Radio {
   /** Start rendering on the server right away (runs during the pilot's reaction delay). */
   prerender(m) {
     if (!this.useServer() || this.muted || m.from === "blocked") return;
-    const voiceP = m.from === "atc" ? this.castController(m.pos) : this.castServer(m.ac, m.speaker || 0, m.pos);
+    const voiceP = m.from === "atc" ? this.castController(m.pos, m.ctrl || null) : this.castServer(m.ac, m.speaker || 0, m.pos);
     m.render = Promise.resolve(m.voiceId ? { id: m.voiceId } : voiceP).then(async (voice) => {
       if (!voice) return null;
       m.voiceId = voice.id;

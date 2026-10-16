@@ -1,0 +1,9 @@
+{
+  "icao": "KJFK",
+  "note": "New York Kennedy (FAA 7110.65 phraseology).",
+  "units": { "DEL": "Kennedy Clearance", "GND": "Kennedy Ground", "TWR": "Kennedy Tower", "APP": "New York Approach", "CTR": "New York Center" },
+  "transitionAlt": 18000,
+  "preferredRunways": ["31L", "31R", "22R", "04L"],
+  "nat": "US",
+  "habits": { "windOnClearance": true, "landAfter": false, "taxiTo": "runway", "goodDay": "good day" }
+}
