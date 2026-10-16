@@ -24,6 +24,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+from xradio import check_win_imports as winimports
+
 ROOT = Path(__file__).resolve().parent
 LOG = ROOT / "setup.log"
 XRADIO_RELEASES = "https://api.github.com/repos/Anviktor2411/xradio/releases/latest"
@@ -252,10 +254,55 @@ def xplane_folder_info(path: str) -> dict:
     plugins = p / "Resources" / "plugins"
     xr = plugins / "XRadio"
     marker = xr / "TowerTrainer-installed.txt"
+    win = xr / "win_x64" / "XRadio.xpl"
     return {"valid": (p / "Resources").exists() and (p / "Custom Data").exists() or (p / "Resources" / "plugins").exists(),
             "navigraph": navigraph_status(p), "xradio": {"installed": xr.exists(), "path": str(xr), "version": marker.read_text("utf-8").strip() if marker.exists() else ("unknown" if xr.exists() else ""),
-                                                           "xpl": [x.name for x in xr.rglob("*.xpl")] if xr.exists() else []},
+                                                           "xpl": [x.name for x in xr.rglob("*.xpl")] if xr.exists() else [],
+                                                           "check": winimports.check(str(win)) if win.is_file() else None, "log": xradio_log(p) if xr.exists() else None},
             "settings": str(p / "Output" / "preferences" / "xradio.cfg")}
+
+
+XP_STARTED = re.compile(r"X-Plane Started on (\w+ \w+ +\d+ [\d:]+ \d{4})")
+XRADIO_XPL = re.compile(r"/resources/plugins/xradio/(win|mac|lin)_x64/xradio\.xpl", re.IGNORECASE)
+
+
+def xradio_log(xp_dir: str | Path) -> dict:
+    """What X-Plane's Log.txt says about XRadio. X-Plane rewrites the file at every start, so it is the last run:
+    loaded, failed (reason = X-Plane's own words, "Error Code = 126 : The specified module could not be found."),
+    absent (it ran and never tried XRadio), stale (it has not run since XRadio was installed) or none (no Log.txt)."""
+    xp = Path(xp_dir)
+    log_txt = xp / "Log.txt"
+    try:
+        text = log_txt.read_text("utf-8", "replace")
+    except OSError:
+        return {"state": "none"}
+    m = XP_STARTED.search(text[:4000])
+    try:
+        started = time.mktime(time.strptime(" ".join(m.group(1).split()), "%a %b %d %H:%M:%S %Y"))
+    except (AttributeError, ValueError):                    # no header like that: the file's own time
+        started = log_txt.stat().st_mtime
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(started))
+    xr = xp / "Resources" / "plugins" / "XRadio"
+    changed = 0.0                                           # the plugin's newest copy, by the wizard or by hand
+    for f in [*xr.glob("*_x64/XRadio.xpl"), xr / "TowerTrainer-installed.txt"]:
+        try:
+            st = f.stat()
+            changed = max(changed, st.st_mtime, st.st_ctime)
+        except OSError:
+            pass
+    if started < changed:
+        return {"state": "stale", "when": when}
+    # Only lines naming the plugin binary itself: not XRadio's resources, not an XRadio.backup-* folder.
+    lines = [ln.strip() for ln in text.splitlines() if XRADIO_XPL.search(ln.replace("\\", "/"))]
+    for ln in lines:
+        if ln.startswith("Loaded:"):
+            return {"state": "loaded", "when": when, "line": ln}
+    for ln in lines:
+        if "error" in ln.lower():
+            return {"state": "failed", "when": when, "line": ln, "reason": re.split(r"\.xpl\s*:\s*", ln, maxsplit=1, flags=re.IGNORECASE)[-1]}
+    if lines:
+        return {"state": "unknown", "when": when, "line": lines[0]}
+    return {"state": "absent", "when": when}
 
 
 def navigraph_status(xp_dir: str | Path) -> dict:
@@ -326,10 +373,23 @@ def install_xradio(xp_dir: str, source: str, tag: str = "", backup: bool = True,
         if not roots:
             return {"ok": False, "error": "no XRadio plugin folder (with .xpl files) inside the zip"}
         src = roots[0]
+        # The DLL check XRadio's own build and release script run (xradio/check_win_imports.py), before anything is
+        # moved: Windows refuses a plugin whose DLLs it cannot find -- "Error Code = 126" in Log.txt -- and a MinGW build
+        # that was not linked statically needs libstdc++-6.dll and friends, which only the PC that compiled it has.
+        xpl = src / "win_x64" / "XRadio.xpl"
+        chk = winimports.check(str(xpl)) if xpl.is_file() else None
+        if chk and not chk["ok"]:
+            log(f"XRadio install refused: XRadio.xpl {chk['problem']} ({source})")
+            return {"ok": False, "refused": True, "imports": chk["imports"], "mingw": chk["mingw"], "missing": chk["missing"],
+                    "error": f"Not installed: this XRadio.xpl {chk['problem']}. X-Plane would fail to load it "
+                             f"(\"Error Code = 126\" in Log.txt). Your current XRadio was left as it was."}
         bak = ""
         if target.exists():
             if backup:
-                bak = str(target) + time.strftime(".backup-%Y%m%d-%H%M%S")
+                stamp = str(target) + time.strftime(".backup-%Y%m%d-%H%M%S")
+                bak, n = stamp, 1
+                while os.path.exists(bak):          # another update this second: moving onto it would nest or fail
+                    bak, n = f"{stamp}-{n}", n + 1
                 shutil.move(str(target), bak)
             else:
                 shutil.rmtree(target)

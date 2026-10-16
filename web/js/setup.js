@@ -47,9 +47,24 @@ function renderXp() {
     (x.installs.length ? x.installs.map((i, n) => `<div class="kv" data-xp="${esc(i.path)}"><b>Install</b><span>${light(i.valid, esc(i.path))} <span class="muted small">(${i.source})</span></span>` +
       `<b>Navigraph / AIRAC</b><span>${i.navigraph.present ? light(i.navigraph.outdated === false, `Custom Data: AIRAC ${esc(i.navigraph.cycle || "?")} ${i.navigraph.valid_from ? esc(i.navigraph.valid_from + " – " + i.navigraph.valid_to) : ""}${i.navigraph.outdated ? " — older than the current cycle, update with Navigraph Hub" : ""}`) : light(false, "no Custom Data folder — install the Navigraph (or use X-Plane's default) navdata; procedures in the trainer then come from Settings → Navigation data")}</span>` +
       `<b>XRadio plugin</b><span>${light(i.xradio.installed, i.xradio.installed ? `installed (${esc(i.xradio.version || "version unknown")}: ${esc(i.xradio.xpl.join(", ") || "no .xpl?")})` : "not installed")} <button type="button" data-xrcheck="${n}">Check the latest release</button> <span id="xrLatest${n}" class="small muted"></span></span>` +
+      (i.xradio.installed ? `<b>XRadio in X-Plane</b><span>${xrLoads(i.xradio)}</span>` : "") +
       `<b></b><span class="row"><input type="text" id="xrSource${n}" placeholder="release zip URL or a local zip path" style="min-width:380px"> <label><input type="checkbox" id="xrBackup${n}" checked> keep a backup of the old plugin</label> <button type="button" data-xrinstall="${n}">Install / update XRadio</button></span>` +
       `<b>XRadio settings</b><span class="row">host <input type="text" id="xrHost${n}" placeholder="127.0.0.1" style="min-width:140px"> port <input type="text" id="xrPort${n}" placeholder="49100" style="min-width:70px"> password <input type="text" id="xrPass${n}" style="min-width:100px"> callsign <input type="text" id="xrCs${n}" placeholder="ESXYZ" style="min-width:90px"> SimBrief user / Pilot ID <input type="text" id="xrSb${n}" placeholder="optional" style="min-width:110px"> <button type="button" data-xrset="${n}">Write xradio.cfg</button> <span class="muted small">${esc(i.settings)}</span></span></div>`).join("")
       : `<p>${light(false, "X-Plane 12 was not found (installer list and Steam libraries checked). Type the folder above and rescan, or skip this step.")}</p>`) + `<div id="xpOut"></div>`;
+}
+// Will X-Plane load the installed XRadio? Its DLL imports (the check XRadio's own build runs) before X-Plane has tried,
+// and what X-Plane's Log.txt says once it has: a red line, in X-Plane's own words, when it could not.
+function xrLoads(xr) {
+  const c = xr.check, g = xr.log || {}, out = [];
+  const bad = (text) => `<span class="bad">${light(false, text)}</span>`;
+  if (c) out.push(c.ok ? light(true, "XRadio.xpl imports only DLLs that Windows and X-Plane PCs have") : bad(`XRadio.xpl ${esc(c.problem)} — X-Plane cannot load it`));
+  if (g.state === "loaded") out.push(light(true, `X-Plane loaded XRadio (${esc(g.when)})`));
+  else if (g.state === "failed") out.push(bad(`X-Plane could not load XRadio (${esc(g.when)}): ${esc(g.reason)}`));
+  else if (g.state === "absent") out.push(bad(`X-Plane did not load XRadio (${esc(g.when)}): Log.txt has no line about it — the plugin has to be XRadio/win_x64/XRadio.xpl`));
+  else if (g.state === "unknown") out.push(light(null, `Log.txt (${esc(g.when)}): ${esc(g.line)}`));
+  else if (g.state === "stale") out.push(light(null, `X-Plane has not run since XRadio was installed — start it, then Rescan (last run ${esc(g.when)})`));
+  else if (g.state === "none") out.push(light(null, "X-Plane has not run yet (no Log.txt)"));
+  return out.map(x => `<div>${x}</div>`).join("");
 }
 async function loadLog() {
   try { const j = await (await fetch("/api/setup/log")).json(); $("logOut").textContent = j.log.length ? j.log.join("\n") : "(empty)"; } catch { /* */ }
@@ -73,7 +88,9 @@ document.addEventListener("click", async (e) => {
   }
   if (t.id === "xpRescan") load();
   if (t.dataset.xrcheck != null) { const n = t.dataset.xrcheck; const j = await post("xradio_latest", {}); $("xrLatest" + n).textContent = j.ok ? `latest: ${j.tag} (${j.zip_name || "no zip asset"})` : `could not check: ${j.error}`; if (j.ok && j.zip) $("xrSource" + n).value = j.zip; $("xrSource" + n).dataset.tag = j.tag || ""; }
-  if (t.dataset.xrinstall != null) { const n = t.dataset.xrinstall, xp = t.closest("[data-xp]").dataset.xp; const src = $("xrSource" + n).value.trim(); if (!src) { alert("Check the latest release or give a zip path first."); return; } show($("xpOut"), await post("xradio_install", { xplane: xp, source: src, tag: $("xrSource" + n).dataset.tag || "", backup: $("xrBackup" + n).checked })); if (!dry()) load(); }
+  if (t.dataset.xrinstall != null) { const n = t.dataset.xrinstall, xp = t.closest("[data-xp]").dataset.xp; const src = $("xrSource" + n).value.trim(); if (!src) { alert("Check the latest release or give a zip path first."); return; } const res = await post("xradio_install", { xplane: xp, source: src, tag: $("xrSource" + n).dataset.tag || "", backup: $("xrBackup" + n).checked }); show($("xpOut"), res);
+    if (res.refused) $("xpOut").insertAdjacentHTML("afterbegin", `<p class="bad">${light(false, esc(res.error))}</p>`);   // nothing changed: no reload to wipe it
+    else if (!dry()) load(); }
   if (t.dataset.xrset != null) {
     const n = t.dataset.xrset, xp = t.closest("[data-xp]").dataset.xp, values = {};
     for (const [k, id] of [["host", "xrHost"], ["port", "xrPort"], ["password", "xrPass"], ["callsign", "xrCs"], ["simbriefuser", "xrSb"]]) { const v = $(id + n).value.trim(); if (v) values[k] = v; }

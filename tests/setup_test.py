@@ -1,15 +1,18 @@
 """Setup wizard (G6) on a temporary folder: package detection, sector package unpacking with path checks,
-generated EuroScope files, X-Plane / Navigraph / XRadio detection, plugin install with backup, xradio.cfg
-editing, dry runs that change nothing, and the wizard's HTTP API through server.py's own handler.
+generated EuroScope files, X-Plane / Navigraph / XRadio detection, plugin install with backup, the DLL check
+that refuses an XRadio build X-Plane cannot load, what X-Plane's Log.txt says about XRadio, xradio.cfg editing,
+dry runs that change nothing, and the wizard's HTTP API through server.py's own handler.
     python tests/setup_test.py
 """
 import http.server
 import io
 import json
 import os
+import struct
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -30,6 +33,31 @@ def check(cond, msg):
 
 def snapshot(d):
     return sorted(str(p.relative_to(d)) for p in Path(d).rglob("*"))
+
+
+def pe(dlls):
+    """A minimal 64-bit Windows DLL whose import table names these DLLs -- all the wizard reads of an XRadio.xpl."""
+    rva, off = 0x1000, 0x200                       # one section, at this address and this file offset
+    size = (len(dlls) + 1) * 20                    # the import descriptors and the all-zero one that ends them
+    thunks = rva + size                            # one empty address table, shared
+    names, at = b"", []
+    for d in dlls:
+        at.append(thunks + 8 + len(names))
+        names += d.encode() + b"\0"
+    body = b"".join(struct.pack("<IIIII", 0, 0, 0, a, thunks) for a in at) + bytes(20 + 8) + names
+    raw = (len(body) + 0x1FF) & ~0x1FF
+    opt = bytearray(112 + 16 * 8)                  # PE32+ optional header with 16 data directories
+    struct.pack_into("<H", opt, 0, 0x20B)
+    struct.pack_into("<I", opt, 108, 16)
+    struct.pack_into("<II", opt, 112 + 8, rva, size)    # directory 1: imports
+    head = bytearray(b"MZ".ljust(0x3C, b"\0") + struct.pack("<I", 0x40))
+    head += b"PE\0\0" + struct.pack("<HHIIIHH", 0x8664, 1, 0, 0, 0, len(opt), 0x2022) + opt
+    head += struct.pack("<8sIIIIIIHHI", b".idata", len(body), rva, raw, off, 0, 0, 0, 0, 0xC0000040)
+    return bytes(head.ljust(off, b"\0")) + body.ljust(raw, b"\0")
+
+
+# what XRadio.xpl imports when it is built right: Windows and X-Plane, nothing else
+GOOD_XPL = pe(["KERNEL32.dll", "USER32.dll", "OPENGL32.dll", "WS2_32.dll", "api-ms-win-crt-runtime-l1-1-0.dll", "XPLM_64.dll"])
 
 
 print("python and packages")
@@ -93,17 +121,17 @@ with tempfile.TemporaryDirectory() as tmp:
     # a fake release zip with an XRadio/ folder like the real ones
     rel = tmp / "XRadio-all.zip"
     with zipfile.ZipFile(rel, "w") as z:
-        z.writestr("XRadio/win_x64/XRadio.xpl", "new")
+        z.writestr("XRadio/win_x64/XRadio.xpl", GOOD_XPL)
         z.writestr("XRadio/README.md", "readme")
     r = wiz.install_xradio(str(xp), str(rel), "v0.6.0", dry_run=True)
     check(r["ok"] and r["dry_run"] and not (xp / "Resources" / "plugins" / "XRadio").exists(), "install dry run changes nothing")
     r = wiz.install_xradio(str(xp), str(rel), "v0.6.0")
     tgt = xp / "Resources" / "plugins" / "XRadio"
-    check(r["ok"] and (tgt / "win_x64" / "XRadio.xpl").read_text() == "new" and (tgt / "TowerTrainer-installed.txt").read_text().strip() == "v0.6.0", "plugin installed with a version marker")
+    check(r["ok"] and (tgt / "win_x64" / "XRadio.xpl").read_bytes() == GOOD_XPL and (tgt / "TowerTrainer-installed.txt").read_text().strip() == "v0.6.0", "plugin installed with a version marker")
     (tgt / "win_x64" / "XRadio.xpl").write_text("old")
     r = wiz.install_xradio(str(xp), str(rel), "v0.6.1")
     backups = [p for p in (xp / "Resources" / "plugins").iterdir() if p.name.startswith("XRadio.backup-")]
-    check(r["ok"] and r["backup"] and len(backups) == 1 and (backups[0] / "win_x64" / "XRadio.xpl").read_text() == "old" and (tgt / "win_x64" / "XRadio.xpl").read_text() == "new", "update keeps a backup of the old plugin")
+    check(r["ok"] and r["backup"] and len(backups) == 1 and (backups[0] / "win_x64" / "XRadio.xpl").read_text() == "old" and (tgt / "win_x64" / "XRadio.xpl").read_bytes() == GOOD_XPL, "update keeps a backup of the old plugin")
     info = wiz.xplane_folder_info(str(xp))
     check(info["xradio"]["installed"] and info["xradio"]["version"] == "v0.6.1" and "XRadio.xpl" in info["xradio"]["xpl"], "status shows the installed version")
     check(not wiz.install_xradio(str(tmp / "nowhere"), str(rel))["ok"], "a folder without Resources/plugins is refused")
@@ -111,6 +139,65 @@ with tempfile.TemporaryDirectory() as tmp:
     with zipfile.ZipFile(nox, "w") as z:
         z.writestr("readme.txt", "x")
     check(not wiz.install_xradio(str(xp), str(nox))["ok"], "a zip without the plugin is refused")
+
+    print("XRadio builds X-Plane cannot load are refused (the DLL check XRadio's own build runs)")
+
+    def release(name, files):
+        zp = tmp / name
+        with zipfile.ZipFile(zp, "w") as z:
+            for n, data in files.items():
+                z.writestr(n, data)
+        return str(zp)
+
+    def plugins_now():
+        return sorted(p.name for p in (xp / "Resources" / "plugins").iterdir())
+
+    before, listed = (tgt / "win_x64" / "XRadio.xpl").read_bytes(), plugins_now()
+    mingw_dlls = ["libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll", "libssp-0.dll"]
+    r = wiz.install_xradio(str(xp), release("XRadio-mingw.zip", {"XRadio/win_x64/XRadio.xpl": pe(["KERNEL32.dll"] + mingw_dlls + ["XPLM_64.dll"])}), "v0.6.2")
+    check(not r["ok"] and r.get("refused") and r["mingw"] == mingw_dlls and r["missing"] == [], "a build linked against the MinGW runtime is refused, naming its four DLLs")
+    check("MinGW runtime" in r["error"] and "libstdc++-6.dll" in r["error"] and "Error Code = 126" in r["error"] and "left as it was" in r["error"], "the refusal says why in words: MinGW runtime, Error Code = 126, current XRadio untouched")
+    check((tgt / "win_x64" / "XRadio.xpl").read_bytes() == before and plugins_now() == listed and wiz.xplane_folder_info(str(xp))["xradio"]["version"] == "v0.6.1", "the installed plugin is left as it was, and no backup is made")
+    r = wiz.install_xradio(str(xp), release("XRadio-mingw-dlls.zip", {"XRadio/win_x64/XRadio.xpl": pe(["KERNEL32.dll", "libstdc++-6.dll"]), "XRadio/win_x64/libstdc++-6.dll": "x"}))
+    check(not r["ok"] and r["mingw"] == ["libstdc++-6.dll"], "the MinGW runtime is refused even when it is shipped next to the plugin")
+    r = wiz.install_xradio(str(xp), release("XRadio-curl.zip", {"XRadio/win_x64/XRadio.xpl": pe(["KERNEL32.dll", "libcurl.dll", "XPLM_64.dll"])}))
+    check(not r["ok"] and r["missing"] == ["libcurl.dll"] and "libcurl.dll" in r["error"], "a DLL that neither Windows nor X-Plane provides is refused")
+    r = wiz.install_xradio(str(xp), release("XRadio-curl-shipped.zip", {"XRadio/win_x64/XRadio.xpl": pe(["KERNEL32.dll", "libcurl.dll", "XPLM_64.dll"]), "XRadio/win_x64/libcurl.dll": "x"}), "v0.6.3")
+    check(r["ok"], "... unless it is shipped next to the plugin, where X-Plane finds it")
+    msvc = pe(["KERNEL32.dll", "IMM32.dll", "MSVCP140.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll", "api-ms-win-crt-heap-l1-1-0.dll", "XPLM_64.dll"])
+    r = wiz.install_xradio(str(xp), release("XRadio-msvc.zip", {"XRadio/win_x64/XRadio.xpl": msvc}), "v0.6.4")
+    check(r["ok"] and (tgt / "win_x64" / "XRadio.xpl").read_bytes() == msvc, "an MSVC build like the GitHub release is installed: the Visual C++ runtime is allowed")
+    nbak = sum(1 for p in (xp / "Resources" / "plugins").iterdir() if p.name.startswith("XRadio.backup-"))
+    r1, r2 = wiz.install_xradio(str(xp), str(rel), "v0.6.5"), wiz.install_xradio(str(xp), str(rel), "v0.6.6")
+    baks = [p for p in (xp / "Resources" / "plugins").iterdir() if p.name.startswith("XRadio.backup-")]
+    check(r1["ok"] and r2["ok"] and r1["backup"] != r2["backup"] and len(baks) == nbak + 2 and not any((b / "XRadio").exists() for b in baks), "two updates within a second keep two separate backups, none nested in another")
+    r = wiz.install_xradio(str(xp), release("XRadio-debug.zip", {"XRadio/win_x64/XRadio.xpl": pe(["KERNEL32.dll", "MSVCP140D.dll", "VCRUNTIME140D.dll", "ucrtbased.dll"])}))
+    check(not r["ok"] and r["missing"] == ["MSVCP140D.dll", "VCRUNTIME140D.dll", "ucrtbased.dll"], "a Debug MSVC build is refused: its runtime is on no pilot's PC")
+    check(not wiz.install_xradio(str(xp), release("XRadio-junk.zip", {"XRadio/win_x64/XRadio.xpl": "not a DLL"}))["ok"], "an XRadio.xpl that is not a Windows binary is refused")
+    check(wiz.xplane_folder_info(str(xp))["xradio"]["check"]["ok"], "the X-Plane status runs the same check on the installed plugin")
+
+    print("what X-Plane's Log.txt says about XRadio")
+    check(wiz.xradio_log(xp)["state"] == "none", "no Log.txt: X-Plane has not run yet")
+
+    def xplane_ran(at, *lines):
+        stamp = time.strftime("%a %b %d %H:%M:%S %Y", time.localtime(at))
+        (xp / "Log.txt").write_text(f"Log.txt for X-Plane 12.4.4-b4 (build 124414 Intel 64-bit, Vulkan)\nCompiled on Oct  6 2026 15:01:15\n"
+                                    f"X-Plane Started on {stamp}\n\n" + "\n".join(lines) + "\n", "utf-8")
+
+    plugin = r"D:\SteamLibrary/steamapps/common/X-Plane 12/Resources/plugins/XRadio/win_x64/XRadio.xpl"
+    xplane_ran(time.time() - 3600, f"{plugin} : Error Code = 126 : The specified module could not be found.")
+    check(wiz.xradio_log(xp)["state"] == "stale", "a run from before XRadio was installed is not held against the new install")
+    xplane_ran(time.time() + 60, f"{plugin} : Error Code = 126 : The specified module could not be found.")
+    g = wiz.xradio_log(xp)
+    check(g["state"] == "failed" and g["reason"] == "Error Code = 126 : The specified module could not be found.", "Error Code = 126 after the install: failed, in X-Plane's own words")
+    xplane_ran(time.time() + 60, f"Loaded: {plugin} (xradio.anviktor).")
+    check(wiz.xradio_log(xp)["state"] == "loaded", "a Loaded: line for XRadio.xpl: loaded")
+    xplane_ran(time.time() + 60, r"Loaded: D:\X-Plane 12/Resources/plugins/xPilot/win_x64/xPilot.xpl (org.vatsim.xpilot).",
+               r"0:00:01.000 XRadio/XPMP2 ERROR  D:\X-Plane 12\Resources\plugins\XRadio\Resources\related.txt not found",
+               r"D:\X-Plane 12/Resources/plugins/XRadio.backup-20261015-191129/win_x64/XRadio.xpl : Error Code = 126 : x")
+    check(wiz.xradio_log(xp)["state"] == "absent", "errors about XRadio's resources or a backup folder are not the plugin failing; with no line about it: absent")
+    info = wiz.xplane_folder_info(str(xp))
+    check(info["xradio"]["log"]["state"] == "absent", "the X-Plane status carries the Log.txt verdict")
     cfg = xp / "Output" / "preferences" / "xradio.cfg"
     r = wiz.xradio_settings(str(xp), {"host": "192.168.1.5", "port": "49100", "bogus": "x"}, dry_run=True)
     check(r["ok"] and r["dry_run"] and not cfg.exists() and "bogus" not in r["set"], "settings dry run: nothing written, unknown keys dropped")
@@ -146,6 +233,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
     s = get(f"/api/setup/status?xplane={urllib.request.quote(str(xp))}&docs={urllib.request.quote(str(docs))}")
     check(s["python"]["ok"] and isinstance(s["packages"], list) and s["euroscope"]["docs"] == str(docs) and any(i["path"] == str(xp) for i in s["xplane"]["installs"]), "GET /api/setup/status: python, packages, EuroScope folder, X-Plane install")
+    xi = next(i["xradio"] for i in s["xplane"]["installs"] if i["path"] == str(xp))
+    check(xi["check"]["ok"] and xi["log"]["state"] == "absent", "GET /api/setup/status: XRadio's DLL check and its Log.txt verdict")
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/setup", timeout=10) as r:
         html = r.read().decode("utf-8")
     check("TOWER TRAINER" in html and "js/setup.js" in html, "GET /setup serves the wizard page")

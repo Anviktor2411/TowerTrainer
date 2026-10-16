@@ -59,7 +59,7 @@ real pilots on the radar, text, voice both ways (WebCodecs Opus in the browser; 
 on the server and encoded with PyAV or opuslib when one is installed, text otherwise), weather from or to the
 flight, ATIS on its own frequency and optional transcripts of the pilots (Vosk/Whisper, never acting on their
 own). `xradio/protocol.py` is vendored from XRadio v0.6.0 (MIT, protocol 6); a v0.5.7 server still works with
-the older feature set. The status pill shows `XR: v6 · 3 pilots · 12 AI`; the XRadio settings have a short
+the older feature set. `xradio/check_win_imports.py` (the setup wizard's DLL check) comes from XRadio too. The status pill shows `XR: v6 · 3 pilots · 12 AI`; the XRadio settings have a short
 "how to fly with TowerTrainer ATC" text for the pilots.
 
 ## Learning: scenarios, career path, replay, statistics
@@ -93,7 +93,11 @@ radar files either from a sector package you supply (unpacked into `Documents\Eu
 from the trainer's own airport data (`TowerTrainer_<ICAO>.sct/.ese/.asr` + a profile that connects to
 127.0.0.1 with "Connect to VATSIM" off, and a desktop shortcut); X-Plane 12 detection (installer list and Steam),
 the Navigraph AIRAC in `Custom Data`, installing or updating the XRadio plugin from its GitHub release zip with a
-backup of the old folder, and filling `xradio.cfg`; finally tests of voices, microphone, speech recognition,
+backup of the old folder, and filling `xradio.cfg`. Before installing, the wizard reads `XRadio.xpl`'s DLL imports
+with XRadio's own check (`xradio/check_win_imports.py`) and refuses a build X-Plane could not load — one linked
+against the MinGW runtime (`libstdc++-6.dll` …) says so in red and leaves the installed plugin alone. Once
+X-Plane has run, the XRadio row shows what its `Log.txt` says: loaded, or a red line with X-Plane's own error
+(`Error Code = 126 : The specified module could not be found.`). Finally tests of voices, microphone, speech recognition,
 EuroScope and XRadio with a green/red light and a fix line each. Nothing is written outside the folders the page
 shows, nothing is overwritten without ticking "allow overwriting", every action has a dry run, and `setup.log`
 keeps the record. `python server.py` on another PC does not expose the wizard.
