@@ -42,6 +42,7 @@ jobs:
       - run: node tests/ops.test.mjs
       - run: node tests/flow.test.mjs EETN
       - run: node tests/nav.test.mjs
+      - run: node tests/traffic.test.mjs
       - name: browser suite (headless Chrome)
         run: |
           python server.py --fsd-port 0 > server.log 2>&1 &

@@ -406,6 +406,8 @@ function bootMain() {
     setView(DEFAULT_VIEW[activePos]);
     renderTabs(); renderLog(); renderPosHead(); renderInfo();
     applyProcs();
+    // A5: say why the AI traffic cannot see real pilots
+    if (!settings.xr.enabled) sysLog("XRadio is off: real pilots are not on the radar, and the AI traffic cannot see them.");
   }
 
   function onSimEvent(e) {
@@ -440,6 +442,11 @@ function bootMain() {
     if (e.type === "towDone") sysLog(`${e.veh.cs}: tow of ${e.ac.cs} complete.`);
     if (e.type === "deice") sysLog(`${e.ac.cs} de-icing${e.ac.deice && e.ac.deice.atPad ? " at the pad" : " on stand"}; holdover time starts when it reports complete.`);
     if (e.type === "rwyClosed") { sysLog(`Runway ${apt.runways[e.rwy].label} closed.`); renderOps(); }
+    // PART A: shared traffic awareness
+    if (e.type === "log") sysLog(e.text);
+    if (e.type === "blocked") addLog(e.ac.freq, "sys", `⛔ ${esc(e.ac.cs)} blocked by ${esc(e.by.cs)}${e.by.human ? " (real pilot)" : ""}${e.twy ? " at " + esc(e.twy) : ""} for a minute — it asks for another route`);
+    if (e.type === "humanStale") sysLog(`${e.ac.cs}: no XRadio position for ${e.s} s — AI traffic only knows where it was (out of range or disconnected).`);
+    if (e.type === "atcError") { addLog(e.ac && e.ac.freq || activePos, "warn", `⚠ ${esc(e.text)} — ${esc(e.by)}`); if (settings.coach) showCoach([{ level: "warn", msg: `${e.text}. ${e.should}` }], activePos); }
     if (e.type === "touchGo") sysLog(`${e.ac.cs} touch and go (${e.ac.circuits} of ${e.ac.wantCircuits || 2}).`);
     if (e.type === "snow") sysLog(`${e.veh.cs} requests runway ${apt.runways[e.rwy].label} for snow clearing.`);
   }
@@ -1321,6 +1328,15 @@ function bootMain() {
   radar.showGraph = settings.graph;
 
   // ---------- debrief ----------
+  /** A10: ATC errors and runway incursions with who caused them and what should have been said (the coach's note). */
+  function atcErrorsHtml(st, L) {
+    const list = st.atcErrors || [];
+    const KIND = { landOccupied: L ? "Maandumisluba hõivatud rajale" : "Landing clearance, runway occupied", takeoffFinal: L ? "Õhkutõusuluba, liiklus lõpplähenemisel" : "Takeoff clearance, traffic on final",
+      lineupFinal: L ? "Rajale sõit, liiklus lähedal" : "Line-up with traffic close", crossBusy: L ? "Raja ületamine, liiklus rajal/lähenemisel" : "Runway crossing with traffic", incursion: L ? "Rajale tungimine" : "Runway incursion",
+      tcasNonCompliance: L ? "TCAS RA eiramine" : "TCAS RA not followed" };
+    return `<h3>${L ? "Lennujuhtimise vead ja rajale tungimised" : "ATC errors and runway incursions"} (${list.length})</h3>` + (list.length ? `<table class="score"><tr><th>${L ? "Aeg" : "Time"}</th><th>${L ? "Mis" : "What"}</th><th>${L ? "Kes" : "Who"}</th><th>${L ? "Oleks pidanud ütlema" : "What should have been said"}</th></tr>` +
+      list.map(e => `<tr><td>${Math.floor(e.t / 60)}:${String(Math.floor(e.t % 60)).padStart(2, "0")}</td><td>${esc(KIND[e.kind] || e.kind)}<br><span class="muted small">${esc(e.text)}</span></td><td>${esc(e.by)}</td><td class="small">${esc(e.should)}</td></tr>`).join("") + `</table>` : `<div class="muted">—</div>`);
+  }
   function openDebrief(result = null) {
     if (!sim) return;
     const score = overallScore(coachStats), hist = sessionHistory(), Lx = settings.lang === "et";
@@ -1340,6 +1356,7 @@ function bootMain() {
         <tr><th>${L ? "Korduse vead (parandatud)" : "Readback errors (caught)"}</th><td>${st.rbErrors} (${st.rbCaught})</td><th>${L ? "Märkamata vead" : "Missed readback errors"}</th><td>${st.missedRb}</td></tr>
         <tr><th>${L ? "Konfliktid" : "Conflicts"}</th><td>${st.conflicts}</td><th>${L ? "Hoiatused" : "Alerts"}</th><td>${st.alerts}</td></tr>
       </table>
+      ${atcErrorsHtml(st, L)}
       <h3>${L ? "Fraseoloogia positsioonide kaupa" : "Phraseology per position"}</h3>
       <table class="score"><tr><th>${L ? "Positsioon" : "Position"}</th><th>${L ? "Saateid" : "Transmissions"}</th><th>${L ? "Märkusi" : "Issues"}</th><th>${L ? "Skoor" : "Score"}</th></tr>${rows || `<tr><td colspan=4 class="muted">—</td></tr>`}</table>`;
     $("debriefBody").innerHTML = resHtml + $("debriefBody").innerHTML + extras;

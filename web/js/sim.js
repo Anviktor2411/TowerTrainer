@@ -11,6 +11,7 @@ import { installOps } from "./ops.js";
 import { installVfr } from "./vfr.js";
 import { installEvents, CHECKLISTS } from "./events.js";
 import { wakeDepSeconds, ctotStatus } from "./flow.js";
+import { installTraffic, spanOf } from "./traffic.js";
 export { CHECKLISTS };
 
 const TAXI_SPD = 18 * KT, TURN_SPD = 7 * KT, PUSH_SPD = 1.3;
@@ -503,8 +504,11 @@ export class Sim {
       this.ac.push(a);
       this.onEvent({ type: "spawn", ac: a });
     }
+    const wasGround = a.onGround;
     Object.assign(a, { cs: h.cs, type: h.type || "ZZZZ", pos: h.pos, alt: h.alt, hdg: h.hdg, spd: h.spd,
       onGround: !!h.onGround, squawk: h.squawk, xpdr: h.xpdr || "C", seenAt: this.t, ai: !!h.ai, tx: !!h.tx });
+    a.fixPos = h.pos; a.fixT = this.t; a.stale = false;           // A5: extrapolated between updates (traffic.js)
+    this.humanRunwayEvents(a, wasGround);
     if (h.fp) this.humanFlightPlan(a, h.fp);
     return a;
   }
@@ -534,6 +538,23 @@ export class Sim {
     if (/\bSIMBRIEF\b/.test(rem)) a.simbrief = true;
   }
   humanByCs(cs) { return this.ac.find(x => x.human && x.cs === cs) || null; }
+
+  /** A real pilot taking off starts the wake timers like anyone; entering a runway in use is a runway incursion. */
+  humanRunwayEvents(a, wasGround) {
+    const r = a.pos ? this.apt.nearestRunway(a.pos) : -1;
+    if (wasGround && !a.onGround && r >= 0 && this.apt.distToRunway(a.pos, this.apt.runways[r]) < 300) {
+      const e = this.apt.runways[r].ends.reduce((b, x) => Math.abs(angDiff(a.hdg, x.hdg)) < Math.abs(angDiff(a.hdg, b.hdg)) ? x : b);
+      this.lastTakeoff = { t: this.t, wtc: a.wtc || "M", cs: a.cs, type: a.type, rwy: e.rwy, human: true };
+    }
+    if (!a.onGround || r < 0) { a.onRwy = null; return; }
+    const on = this.apt.onRunway(a.pos, this.apt.runways[r], 5) ? r : null;
+    if (on != null && a.onRwy !== on) {
+      const d = this.runwayDanger(on, a, { finalNm: 2, finalSec: 60 });
+      if (d.busy && a.spd < 40 * KT) this.atcError("incursion", { by: `pilot ${a.cs}`, ac: a, text: `${a.cs} (real pilot) entered runway ${this.apt.runways[on].label} with ${d.by ? d.by.cs : "traffic"} ${d.why}`,
+        should: `"${a.cs}, hold position" — and stop the traffic on the runway / send the arrival around` });
+    }
+    a.onRwy = on;
+  }
 
   distToThr(a) {
     const e = a.end || this.arrEnd;
@@ -639,7 +660,16 @@ export class Sim {
       this.nextOvf = this.t + 3600 / Math.max(1, this.ovfPerHour) * (0.6 + Math.random() * 0.8);
     }
     if (this.t - this.atisAt > 1800) this.rollAtis();
+    this.trafficTick();
     for (const a of this.ac) if (!a.human) this.update(a, dt);
+    if (this.pendingAtc && this.pendingAtc.length) {
+      // an AI controller's answer prepared by the traffic logic (a new route around a blocking aircraft)
+      for (const m of this.pendingAtc.filter(m => this.t >= m.at)) {
+        this.onRadio({ from: "atc", ai: true, pos: m.pos, text: m.text, say: sayNumbers(m.text, NEUTRAL_STYLE) });
+        if (!m.ac.gone) this.pilot(m.ac, readback([m.rb], this.cs(m.ac), m.ac.style || NEUTRAL_STYLE), "readback");
+      }
+      this.pendingAtc = this.pendingAtc.filter(m => this.t < m.at);
+    }
     for (const a of this.ac) if (a.human && this.t - a.seenAt > 15) a.gone = true;
     for (const a of this.ac) if (a.gone && a.assignedSq && !a.human) this.squawks.release(a.assignedSq, this.t);
     const gone = this.ac.filter(a => a.gone);
@@ -700,6 +730,15 @@ export class Sim {
         this.call(a, "stillWaitingGeneric", { what: `stand ${a.stand ? a.stand.name : ""}, still waiting for push and start`, greet: "" }, "GND");
         a.callAt = this.t + 150;
       } else if (s === "pushing") {
+        if (!a.pushStarted) {
+          const pc = this.pushClear(a);
+          if (!pc.ok) {
+            a.spd = 0;
+            if (!a.pushWaitCalled) { a.pushWaitCalled = true; this.call(a, "stillWaitingGeneric", { what: `traffic passing behind, we'll wait before we push`, greet: "" }, "GND"); }
+            return;
+          }
+          a.pushStarted = true;
+        }
         if (this.followPath(a, dt, true)) {
           a.state = "pushed"; a.callAt = this.t + rint(20, 60);
           if (a.autoTaxi) { a.autoTaxi = false; this.lightTaxi(a); }
@@ -741,8 +780,12 @@ export class Sim {
         a.pos = [a.pos[0] - e.v[1] * sh, a.pos[1] + e.v[0] * sh];
         if ((Math.abs(d) < 1 && Math.abs(cross) < 0.5) || (a.toClr && a.immediate && Math.abs(d) < 12 && Math.abs(cross) < 4)) {
           a.hdg = e.hdg; a.state = a.toClr ? "roll" : "lined_up";
+          if (a.state === "roll" && this.departureBlocked(a)) a.state = "lined_up";
           if (a.state === "roll") this.startRoll(a);
         }
+      } else if (s === "lined_up" && a.toClr && a.heldForTraffic) {
+        // A3: cleared for takeoff but held for traffic on the runway / short final: go once it is clear
+        if (!this.departureBlocked(a)) { a.heldForTraffic = false; this.startRoll(a); }
       } else if (s === "roll" || s === "airborne") {
         this.takeoffMove(a, dt);
       } else if (s === "rto" || s === "broken" || s === "towed" || s === "deicing") {
@@ -1158,6 +1201,8 @@ export class Sim {
     if (a.squawk && !["7000", "1200", "2000", "7600", "7700"].includes(a.squawk) &&
       this.ac.some(o => o !== a && o.squawk === a.squawk)) w.push("DUP");
     if (a.identUntil) w.push("ID");
+    if (a.blockedBy) w.push(`BLOCKED BY ${a.blockedBy}`);
+    if (a.human && a.stale) w.push("STALE");
     return w;
   }
 
@@ -1249,13 +1294,37 @@ export class Sim {
         }
       }
       for (const r of z) {
-        if (zPrev.has(r) || a.crossOk.has(r)) continue;
+        if (zPrev.has(r)) continue;
+        // A3/A10: a crossing / line-up clearance is not used while someone takes off, lands or is on the runway
+        if (a.crossOk.has(r)) { if (!a.leader && this.crossDanger(a, r)) return { j, rwy: r, danger: true }; continue; }
         // a departure may pass through its own runway's zone (e.g. behind the threshold) if it leaves it again
         if (a.kind === "dep" && a.depEnd && r === a.depEnd.rwy && this.leavesZone(p, j, r)) continue;
         return { j, rwy: r };
       }
     }
     return { j: p.length - 1, rwy: null };
+  }
+  /** Lined up with a takeoff clearance: anyone on the runway ahead or landing within ~1.5 NM / 45 s holds the roll. */
+  departureBlocked(a) {
+    const d = this.runwayDanger(a.depEnd.rwy, a, { finalNm: 1.5, finalSec: 45 });
+    if (!d.busy || (d.by && (d.by.state === "airborne" || (d.by.state === "roll" && d.by.spd > 40 * KT)))) return false;
+    if (!a.heldForTraffic) {
+      a.heldForTraffic = true;
+      this.pilot(a, `${this.cs(a).d}, holding in position, ${d.why}`, "query");
+    }
+    return true;
+  }
+  crossDanger(a, r) {
+    if (a.state === "vacating" || a.state === "rollout") return false;
+    const d = this.runwayDanger(r, a, { finalNm: 1.5, finalSec: 45 });
+    if (!d.busy) return false;
+    // lining up on our own runway behind traffic that is already rolling away (landing roll, takeoff) is fine
+    if (a.kind === "dep" && a.depEnd && r === a.depEnd.rwy && d.by && ["roll", "airborne", "rollout", "vacating"].includes(d.by.state) && d.by.onGround !== false) {
+      const v = a.depEnd.v, al = (q) => (q[0] - a.depEnd.thr[0]) * v[0] + (q[1] - a.depEnd.thr[1]) * v[1];
+      if (al(d.by.pos) > al(a.pos) + 100 || d.by.state === "airborne") return false;
+    }
+    if (a.kind === "dep" && a.depEnd && r === a.depEnd.rwy && d.by && d.by.state === "airborne") return false;
+    return true;
   }
   leavesZone(p, j, r) {
     for (let k = j + 1; k < p.length - 1; k++) if (!this.edgeZones(p, k).has(r)) return true;
@@ -1336,29 +1405,9 @@ export class Sim {
     }
   }
 
-  trafficLimit(a) {
-    let lim = Infinity;
-    const v = vecFromHdg(a.hdg);
-    for (const o of this.ac) {
-      if (o === a || !o.onGround) continue;
-      if (o.onRoad && !a.onRoad) continue;           // service roads run next to the taxiways; vehicles there do not block aircraft
-      if (o.state === "parked" && o.stand && dist(o.pos, o.stand.pos) < 5) continue;   // aircraft on their stands are passed by
-      if (a.veh && o === a.target) continue;        // the car drives up to its aircraft, and its follower is behind it
-      if (o.leader === a) continue;
-      if (a.leader === o && o.state !== "leading") continue;   // the car has stepped aside at the stand
-      if (o.veh && o.serving === a) continue;                                // ground equipment at our stand
-      if (o.veh && (o.state === "idle" || o.standby)) continue;             // parked beside the taxiway (fire station, ops)
-      const dx = o.pos[0] - a.pos[0], dy = o.pos[1] - a.pos[1];
-      const along = dx * v[0] + dy * v[1], cross = Math.abs(dx * v[1] - dy * v[0]);
-      if (along > 0 && along < 90 && cross < 25) {
-        lim = Math.min(lim, along < 55 ? 0 : TURN_SPD);
-      }
-    }
-    return lim;
-  }
-
   startRoll(a) {
-    a.state = "roll"; a.rollStart = this.t;
+    a.state = "roll"; a.rollStart = this.t; a.incursionSeen = false;
+    a.rollUsers = new Set(this.runwayUsers(a.depEnd.rwy, a).map(o => o.id));
     const prev = this.lastTakeoff;
     if (prev && prev.rwy === a.depEnd.rwy) {
       const need = wakeDepSeconds(prev, a, this.recat), gap = this.t - prev.t;
@@ -1372,6 +1421,16 @@ export class Sim {
     const e = a.depEnd, v = e.v;
     const vr = a.appSpd * 1.1;
     if (a.state === "roll") {
+      // A10: someone entered the runway ahead after the roll started -> reject below V1, continue above it
+      const along = (q) => (q[0] - e.thr[0]) * v[0] + (q[1] - e.thr[1]) * v[1];
+      const intruder = this.runwayUsers(e.rwy, a).find(o => !(a.rollUsers && a.rollUsers.has(o.id)) && along(o.pos) > along(a.pos) - 20);
+      if (intruder && !a.incursionSeen) {
+        a.incursionSeen = true;
+        const by = intruder.human ? `pilot ${intruder.cs}` : intruder.veh ? `vehicle ${intruder.cs}` : `AI ${intruder.cs}`;
+        this.atcError("incursion", { by, ac: intruder, text: `${intruder.cs} entered runway ${e.name} during ${a.cs}'s takeoff roll`, should: `"${intruder.cs}, hold position" / "stop immediately" before the holding point, and cancel the takeoff clearance in time` });
+        if (a.spd < vr * 0.92) { this.rejectTakeoff(a, `runway incursion by ${intruder.cs}`); return; }
+        this.alert(`${a.cs} above V1 — continuing the takeoff with ${intruder.cs} on the runway!`, "v1" + a.cs);
+      }
       a.spd = Math.min(a.spd + 2.2 * dt, 250 * KT);
       if (a.spd >= vr) { a.state = "airborne"; a.onGround = false; this.stats.departures++; }
     } else {
@@ -1441,6 +1500,29 @@ export class Sim {
       // gusty wind: an occasional unstable approach
       const gust = this.wind && this.wind.gust ? this.wind.gust - (this.wind.spd || 0) : 0;
       if (gust > 12 && d < 2.5 * NM && d > 0.8 * NM && Math.random() < dt * 0.0025 * (gust - 10) && !a.nordo) { this.goAround(a, `gusts ${Math.round(gust)} kt, unstable approach`); return; }
+      // A3: spacing behind whoever is ahead on this final (AI or real pilot), wake based; go around when it collapses
+      const lead = this.leaderOnFinal(a);
+      if (lead && !a.ga) {
+        const need = this.wakeNm(lead.ac, a) * NM, gap = d - lead.d;
+        if (gap < need + 0.5 * NM) a.spd = Math.max(a.appSpd * 0.92, Math.min(a.spd, lead.ac.spd || a.appSpd));
+        if (gap < Math.min(need * 0.6, 2 * NM) && d < 4 * NM && d > 0.4 * NM && !a.nordo) {
+          this.goAround(a, `too close behind ${lead.ac.cs}${lead.ac.human ? " (real pilot)" : ""}, ${(gap / NM).toFixed(1)} NM`, "going around, too close to the traffic ahead");
+          return;
+        }
+      }
+      // A10: the decision height (500 ft, 400 ft in poor visibility, 300 ft in LVP) with the runway still occupied
+      const dh = this.lvp ? 300 : this.vis != null && this.vis < 5000 ? 400 : 500;
+      if (a.landClr && !a.nordo && d > 0 && d < dh * FT / Math.tan(3 * Math.PI / 180)) {
+        const occ = this.runwayDanger(e.rwy, a, { finalNm: 0, finalSec: 0 });
+        if (occ.busy && !(occ.by && occ.by.state === "roll" && occ.by.spd > 60 * KT)) {
+          const o = occ.by;
+          this.atcError(o && o.human && !a.rwyQuery ? "incursion" : "landOccupied", { by: o && o.human && !a.rwyQuery ? `pilot ${o.cs}` : a.landClrBy || "you", ac: a,
+            text: `${a.cs} went around at ${dh} ft: ${o ? o.cs + (o.human ? " (real pilot)" : o.veh ? " (vehicle)" : "") + " " : ""}${occ.why}`,
+            should: `no landing clearance until the runway is vacated: "continue approach" / "land after", and send it around yourself in time ("${this.cs(a).d}, go around")` });
+          this.goAround(a, `${occ.why}${o ? " (" + o.cs + ")" : ""} at the decision height`, "going around, traffic on the runway");
+          return;
+        }
+      }
       const gaDist = a.contApp ? 300 : 600;
       if (d < gaDist && ((!a.landClr && !a.nordo) || occupied || this.closedRunways.has(e.rwy))) {
         this.goAround(a, this.closedRunways.has(e.rwy) ? "runway closed" : a.landClr || a.nordo ? "runway occupied" : a.freq !== "TWR" && this.split ? `no landing clearance (still on ${a.freq})` : "no landing clearance");
@@ -1462,10 +1544,11 @@ export class Sim {
     }
   }
 
-  goAround(a, why) {
+  goAround(a, why, said = null) {
     a.state = "goaround"; this.stats.goArounds++;
     if (a.nordo) a.rejoin = true;                 // a radio-failure aircraft stays in the circuit and tries again
-    this.call(a, "goingAround", { greet: "" }, "TWR");
+    if (said) this.pilot(a, `${this.cs(a).d}, ${said}`, "goingAround");
+    else this.call(a, "goingAround", { greet: "" }, "TWR");
     this.alert(`${a.cs} went around: ${why}.`, "ga" + a.cs, why !== "instructed");
   }
 
@@ -1660,7 +1743,7 @@ export class Sim {
       if (a.wants === "tow" && a.task && a.task.kind === "tow" && (pos === "GND" || pos === "TWR")) { a.towOk = true; a.wants = null; a.holdPos = false; if (a.pi >= (a.path || []).length) this.towNext(a); return `${cs}, tow approved, report complete`; }
       if (a.atStop && a.blockedRwy != null && (pos === "GND" || pos === "TWR")) {
         const r = apt.runways[a.blockedRwy];
-        if (this.runwayFree(r.id, a) && r.ends.every(x => this.nearestArrival(x) > 3 * NM)) return `${cs}, cross runway ${r.ends[0].name}`;
+        if (!this.runwayDanger(r.id, a, { finalNm: 3, finalSec: 90 }).busy) return `${cs}, cross runway ${r.ends[0].name}`;
       }
       return null;
     }
@@ -1680,7 +1763,7 @@ export class Sim {
       if (a.kind === "dep" && a.rwyChanged && (s === "taxi" || s === "holding")) { a.rwyChanged = false; const via = this.viaNames(a); return `${cs}, runway change, taxi to holding point runway ${this.depEnd.name}${via.length ? " via " + via.join(" ") : ""}`; }
       if ((a.state === "taxi" || a.state === "lineup") && a.atStop && a.blockedRwy != null && !(a.kind === "dep" && a.blockedRwy === a.depEnd.rwy)) {
         const r = apt.runways[a.blockedRwy];
-        const busy = !this.runwayFree(r.id, a) || r.ends.some(e => this.nearestArrival(e) < 3 * NM);
+        const busy = this.runwayDanger(r.id, a, { finalNm: 3, finalSec: 90 }).busy;
         if (!busy) return `${cs}, cross runway ${r.ends[0].name}`;
         return null;
       }
@@ -1710,7 +1793,7 @@ export class Sim {
         const gap = this.lastTakeoff ? this.t - this.lastTakeoff.t : 999;
         const need = this.lastTakeoff && this.lastTakeoff.rwy === e.rwy ? this.depSpacingS(this.lastTakeoff, a) : 0;
         if (this.closedRunways.has(e.rwy) || this.hotExpired(a)) return null;
-        if (this.runwayFree(e.rwy, a) && arr > (this.lvp ? 6 : 4) * NM && gap >= need) return `${cs}, runway ${e.name}, cleared for takeoff${this.windTxt()}`;
+        if (this.runwayFree(e.rwy, a) && arr > (this.lvp ? 6 : 4) * NM && gap >= need && !this.finalTraffic(e.rwy, a).some(f => f.nm < (this.lvp ? 6 : 4))) return `${cs}, runway ${e.name}, cleared for takeoff${this.windTxt()}`;
         if (s === "holding" && this.runwayFree(e.rwy, a) && arr > 5 * NM && !this.lvp) return `${cs}, runway ${e.name}, line up and wait`;
         return null;
       }
@@ -1721,11 +1804,11 @@ export class Sim {
       }
       if (a.kind === "dep" && s === "taxi" && a.atStop && a.blockedRwy != null && a.blockedRwy !== a.depEnd.rwy) {
         const r = apt.runways[a.blockedRwy];
-        if (this.runwayFree(r.id, a) && r.ends.every(x => this.nearestArrival(x) > 3 * NM)) return `${cs}, cross runway ${r.ends[0].name}`;
+        if (!this.runwayDanger(r.id, a, { finalNm: 3, finalSec: 90 }).busy) return `${cs}, cross runway ${r.ends[0].name}`;
       }
       if (a.kind === "arr" && s === "final") {
         const d = this.distToThr(a);
-        if (!a.landClr && d < 6 * NM && this.runwayFree(a.end.rwy, a) && !this.closedRunways.has(a.end.rwy) &&
+        if (!a.landClr && d < 6 * NM && !this.runwayDanger(a.end.rwy, a, { finalNm: 0, finalSec: 0 }).busy && !this.closedRunways.has(a.end.rwy) &&
           !this.ac.some(o => o.kind === "dep" && ["lining", "lined_up", "roll"].includes(o.state) && o.depEnd.rwy === a.end.rwy))
           return a.touchGo ? `${cs}, runway ${a.end.name}, cleared touch and go${this.windTxt()}` : `${cs}, runway ${a.end.name}, cleared to land${this.windTxt()}`;
         if (!a.landClr && d < 1.2 * NM && !a.nordo) return `${cs}, go around`;
@@ -1912,7 +1995,7 @@ export class Sim {
         if (!["parked", "push_req", "cleared"].includes(a.state)) return { unable: "Say again" };
         this.serviced(a, "push");
         this.planPush(a, i.face);
-        a.state = "pushing";
+        a.state = "pushing"; a.pushStarted = false; a.pushWaitCalled = false;
         return `push and start approved${i.face ? ", facing " + i.face : ""}`;
       }
       case "taxi": {
@@ -1959,6 +2042,13 @@ export class Sim {
         const e = apt.findRunwayEnd(i.rwy);
         if (!e) return { unable: "Say again runway" };
         if (!a.onGround) return { unable: "Say again" };
+        const dg = this.runwayDanger(e.rwy, a, { finalNm: 2, finalSec: 60 });
+        if (dg.busy && !i.affirm && !a.veh) {
+          this.atcError("crossBusy", { by: opts.ai ? `AI ${opts.pos || "GND"}` : "you", ac: a, text: `${a.cs} cleared to cross runway ${i.rwy} with ${dg.by ? dg.by.cs + " " : ""}${dg.why}`,
+            should: `"${this.cs(a).d}, hold short of runway ${i.rwy}" until the ${dg.why.replace(/^traffic /, "")} has passed, or "behind the landing …, cross runway ${i.rwy} behind"` });
+          a.crossOk.add(e.rwy); a.calledHold = false;      // the clearance stands; the crew waits at the bar until it is safe
+          return { unable: `Holding short runway ${i.rwy}, ${dg.why}, confirm cross?` };
+        }
         this.serviced(a, "cross");
         a.crossOk.add(e.rwy); a.calledHold = false;
         return `cross runway ${i.rwy}`;
@@ -2016,6 +2106,14 @@ export class Sim {
         if (i.rwy && apt.findRunwayEnd(i.rwy) !== a.depEnd) return { unable: `Confirm runway, we are at holding point ${a.depEnd.name}` };
         if (this.litBarAhead(a)) return { unable: "Unable, the stop bar is still lit" };
         if (this.closedRunways.has(a.depEnd.rwy)) return { unable: `Confirm, we understood runway ${a.depEnd.name} is closed?` };
+        if (!i.cond) {
+          const fin = this.finalTraffic(a.depEnd.rwy, a).find(f => f.nm < 1.5 || f.sec < 45);
+          if (fin) {
+            this.atcError("lineupFinal", { by: opts.ai ? `AI ${opts.pos || "TWR"}` : "you", ac: a, text: `${a.cs} told to line up with ${fin.ac.cs} on ${fin.nm.toFixed(1)} NM final`,
+              should: `"behind the landing ${spokenType(fin.ac.type)}, line up and wait behind" (a conditional clearance), or hold the departure` });
+            return { unable: `Holding short, traffic on short final, confirm line up?` };
+          }
+        }
         this.serviced(a, "ready");
         if (i.cond) {
           const o = this.findSubject(a, i.cond, i.cond.phase || "landing");
@@ -2037,6 +2135,13 @@ export class Sim {
         if (refuse && !a.acceptedWind) { const best = this.bestEndForWind(); a.acceptedWind = true; return { unable: `Unable runway ${a.depEnd.name}, ${refuse}${best && best !== a.depEnd ? ", request runway " + best.name : ""}` }; }
         const occupied = !this.runwayFree(a.depEnd.rwy, a);
         if (occupied && !a.confirmTO && !i.affirm) { a.confirmTO = true; return { special: "confirmTakeoff" }; }
+        // A10: anyone (AI or real pilot) on short final -> unable
+        const fin = this.finalTraffic(a.depEnd.rwy, a).find(f => f.nm < 2 || f.sec < 60);
+        if (fin && !i.cond) {
+          this.atcError("takeoffFinal", { by: opts.ai ? `AI ${opts.pos || "TWR"}` : "you", ac: a, text: `${a.cs} cleared for takeoff with ${fin.ac.cs}${fin.ac.human ? " (real pilot)" : ""} on ${fin.nm.toFixed(1)} NM final`,
+            should: `hold the departure ("${this.cs(a).d}, hold position") or "line up and wait" only when it can go before the arrival reaches 4 NM` });
+          return { unable: `Unable, traffic on ${fin.nm < 2 ? "short final" : fin.nm.toFixed(0) + " mile final"}` };
+        }
         a.confirmTO = false;
         this.serviced(a, "ready");
         a.toClr = true; a.immediate = !!i.immediate;
@@ -2046,7 +2151,7 @@ export class Sim {
           a.cond = { ...i.cond, ac: o }; a.condTakeoff = true; a.state = "cond_lineup";
           return `behind the ${i.cond.phase || "landing"} ${spokenType(o.type)}, cleared for takeoff runway ${a.depEnd.name} behind`;
         }
-        if (a.state === "lined_up") this.startRoll(a);
+        if (a.state === "lined_up") { if (!this.departureBlocked(a)) this.startRoll(a); }
         else if (["holding", "taxi", "cond_lineup"].includes(a.state)) this.lineUp(a, true);
         return `cleared for ${i.immediate ? "immediate " : ""}takeoff runway ${a.depEnd.name}`;
       }
@@ -2079,6 +2184,15 @@ export class Sim {
         if (this.closedRunways.has(a.end.rwy)) return { unable: `Confirm, we understood runway ${a.end.name} is closed?` };
         this.serviced(a, "land");
         a.landClr = true; a.fullStop = true; a.touchGo = false;
+        a.landClrBy = opts.ai ? `AI ${opts.pos || "TWR"}` : "you";
+        // A10: the crew sees the runway is not free and asks; if it still is at the decision height they go around
+        const occ = this.runwayDanger(a.end.rwy, a, { finalNm: 0, finalSec: 0 });
+        if (occ.busy && !i.affirm) {
+          a.rwyQuery = { t: this.t, by: occ.by ? occ.by.cs : "" };
+          this.atcError("landOccupied", { by: a.landClrBy, ac: a, text: `${a.cs} cleared to land runway ${a.end.name} with ${occ.by ? occ.by.cs + " " : ""}${occ.why}`,
+            should: `"${this.cs(a).d}, continue approach, expect late landing clearance" (or "land after the …" when the conditions for it are met) until the runway is vacated` });
+          return { unable: `Confirm cleared to land runway ${a.end.name}, ${occ.why}?` };
+        }
         return `cleared to land runway ${a.end.name}`;
       }
       case "goaround": {
@@ -2302,3 +2416,4 @@ const capFirstObj = (r) => ({ d: cap(r.d), s: cap(r.s) });
 installOps(Sim);
 installVfr(Sim);
 installEvents(Sim);
+installTraffic(Sim);
