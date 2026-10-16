@@ -677,7 +677,7 @@ function bootMain() {
       closed: [...sim.closedRunways], lvp: sim.lvp, seq: $("seqPanel").innerHTML, wx: $("wxPanel").innerHTML,
       claims: mp.claims, roster: mp.roster, coords: mp.coords, remoteStaff: sim.remoteStaff, hostNick: settings.nick || "host",
       del: $("clrList").innerHTML, seqOn: !$("seqPanel").classList.contains("hidden"), chat: mp.relay ? mp.chat.slice(-40) : [],
-      metar: currentMetar(), utc: Date.now(),
+      metar: currentMetar(), utc: Date.now(), delivery: deliveryList(), stopBars: (apt.stopBars || []).some(b => b.lit),
       logs: full ? logs : Object.fromEntries(Object.entries(logs).map(([k, v]) => [k, v.slice(-60)])) };
   }
   function broadcast(full) {
@@ -712,6 +712,21 @@ function bootMain() {
     const sg = sim.suggestDeparture(a);
     const code = (a.stripData && a.stripData.sq) || a.assignedSq || sim.squawks.peek(sim.t);
     return { ...sg, code };
+  }
+  /** The Delivery list as data for remote controllers (the X-Plane plugin's Delivery window): the requests renderDel
+   *  shows, live pilots' plans first, each with its suggestion and the exact text "Read clearance" would type. */
+  function deliveryList() {
+    if (!sim) return [];
+    const req = sim.ac.filter(a => a.kind === "dep" && !a.ga && ["clr_req", "parked", "cleared"].includes(a.state) && (a.lastCall != null || a.state === "cleared"));
+    const live = sim.ac.filter(a => a.human && a.fp && a.fpStatus !== "cancelled");
+    const row = (a, isLive) => {
+      const sg = suggestionFor(a), d = a.stripData || {};
+      const done = isLive ? a.fpStatus === "ack" || a.fpStatus === "cleared" : a.state === "cleared";
+      return { id: a.id, cs: a.cs, live: isLive, type: a.type || "", wtc: a.wtc || "", dest: isLive ? a.fp.dest || "" : a.other[0] || "", destName: isLive ? "" : a.other[1] || "",
+        stand: a.stand ? a.stand.name : "", sid: d.sid || a.sid || sg.sid || "", cfl: String(d.cfl ?? a.cfl ?? sg.climb ?? 5000), squawk: String(sg.code || ""),
+        waiting: done ? -1 : Math.round(sim.t - (a.reqAt ?? a.lastCall ?? sim.t)), cleared: done, clearance: done ? "" : clearanceText(a), note: sg.note || "" };
+    };
+    return [...live.map(a => row(a, true)), ...req.map(a => row(a, false))];
   }
   // S4: AI controllers for real pilots (XRadio) on the positions nobody staffs; their calls go out like any AI call
   function makePilotAtc() {

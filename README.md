@@ -156,10 +156,12 @@ With the XRadio plugin (v0.6.0) you can sit in the tower cab inside X-Plane and 
 from there. `server.py` opens a *tower link* on `127.0.0.1:8781` (`--tower-port 0` to switch it off,
 `--host 0.0.0.0` for another PC's X-Plane); tick Settings → XRadio → **X-Plane tower link** so the trainer's
 window hosts a session with the code `TOWER`, then Plugins → XRadio → *Tower mode* in X-Plane. The plugin
-is a remote controller of that session: it gets the same state as a pop-out window and sends back
-transmissions, strip acceptances and operations (LVP, runway, stop bars). The trainer stays the authority;
-the plugin only shows and asks. The setup wizard installs the plugin; details in XRadio's
-`docs/tower-mode.md`.
+is a remote controller of that session: it gets the same state as a pop-out window — with the Delivery
+list (the suggested SID, climb and squawk and the trainer's own clearance text for each request) and the
+stop-bar state — plus the airport's runways, stands, taxi network and pavement for its ground radar, and
+sends back transmissions, strip acceptances and moves between bays, and operations (LVP, runway, stop
+bars). The trainer stays the authority; the plugin only shows and asks. The setup wizard installs the
+plugin; details in XRadio's `docs/tower-mode.md`.
 
 ## Several controllers, several screens
 
@@ -211,7 +213,7 @@ python tests/ws_test.py                       # the multiplayer relay (WebSocket
 node tests/firefox.mjs                        # the same page in headless Firefox over WebDriver BiDi (TT_BROWSER=edge runs browser.test in Edge)
 python tests/sector_test.py                   # generated EuroScope .sct/.ese/.asr/.prf for EETN and EGSS parse back
 python tests/setup_test.py                    # the setup wizard on a temporary folder, dry runs, its HTTP API
-python tests/towerlink_test.py                # the X-Plane tower link: hello, airport line, claims, transmissions, ops
+python tests/towerlink_test.py                # the X-Plane tower link: hello, airport line (taxi network, pavement), claims, transmissions, ops
 python tests/simbrief_test.py                 # the SimBrief OFP parser on a made-up fixture, fetch errors, cache, plan links
 node tests/aiatc.test.mjs                     # S5: a scripted XRadio pilot flown EETN → EVRA by the AI controllers, end to end (XRADIO_DIR or ../xradio-main)
 ```

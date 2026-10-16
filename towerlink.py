@@ -4,9 +4,10 @@ The XRadio plugin connects here (default 127.0.0.1:8781), sends one line
     {"type":"hello","code":"TOWER","name":"X-Plane","pos":"TWR","version":"0.6.0"}
 and from then on it is an ordinary guest of that session (ws.py Relay): it receives what the host sends
 (state snapshots, claims, radio calls, alerts) as one JSON object per line and sends what a remote controller
-sends (claim, tx, strip, ops, chat). The only addition is an "airport" line -- the datum, runways, stands and
-stop bars from the cached airport data -- so the plugin can turn the trainer's local metres into latitude and
-longitude. Stdlib only; one thread per connection; nothing but JSON text travels.
+sends (claim, tx, strip, ops, chat). The only addition is an "airport" line -- the datum, runways, stands,
+stop bars, the taxi network and the pavement from the cached airport data -- so the plugin can turn the
+trainer's local metres into latitude and longitude and draw a ground radar. Stdlib only; one thread per
+connection; nothing but JSON text travels.
 """
 from __future__ import annotations
 
@@ -115,6 +116,81 @@ class LineSocket:
             pass
 
 
+# apt.dat taxiway width codes (ICAO aerodrome code letters), as metres of pavement to draw
+TAXI_WIDTH_M = {"A": 7.5, "B": 10.5, "C": 15.0, "D": 18.0, "E": 23.0, "F": 25.0}
+# surfaces that are not pavement on a ground radar: grass, dirt, gravel, lakebed, water, snow, transparent
+SOFT_SURFACES = {3, 4, 5, 12, 13, 14, 15}
+MAX_PAVEMENT_POINTS = 20000
+MAX_TAXI_EDGES = 6000
+
+
+def _simplify(pts, tol):
+    """Douglas-Peucker: the points of an open polyline that keep it within tol metres of the original."""
+    if len(pts) < 3:
+        return list(pts)
+    keep = [False] * len(pts)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        i, j = stack.pop()
+        (ax, ay), (bx, by) = pts[i][:2], pts[j][:2]
+        dx, dy = bx - ax, by - ay
+        length = (dx * dx + dy * dy) ** 0.5
+        best, bi = -1.0, -1
+        for k in range(i + 1, j):
+            px, py = pts[k][0] - ax, pts[k][1] - ay
+            d = abs(dy * px - dx * py) / length if length > 1e-9 else (px * px + py * py) ** 0.5
+            if d > best:
+                best, bi = d, k
+        if bi >= 0 and best > tol:
+            keep[bi] = True
+            stack += [(i, bi), (bi, j)]
+    return [p for p, k in zip(pts, keep) if k]
+
+
+def _ring(ring, tol=1.0):
+    """A closed ring of [x, y], simplified and rounded to 0.1 m (the plugin draws it filled)."""
+    if len(ring) < 3:
+        return []
+    pts = _simplify(list(ring) + [ring[0]], tol)[:-1]
+    return [[round(p[0], 1), round(p[1], 1)] for p in pts] if len(pts) >= 3 else []
+
+
+def taxi_network(apt):
+    """The taxiway centrelines as nodes and edges (name, width in metres); runway edges are left to the runways."""
+    nodes, edges, used = apt.get("nodes", []), [], {}
+    for e in apt.get("edges", []):
+        if e.get("runway") or len(edges) >= MAX_TAXI_EDGES:
+            continue
+        ab = []
+        for k in (e["a"], e["b"]):
+            if k not in used:
+                used[k] = len(used)
+            ab.append(used[k])
+        edges.append([ab[0], ab[1], e.get("name", ""), TAXI_WIDTH_M.get(e.get("width", ""), 15.0)])
+    pts = [None] * len(used)
+    for k, i in used.items():
+        pts[i] = [round(nodes[k][0], 1), round(nodes[k][1], 1)]
+    return {"nodes": pts, "edges": edges}
+
+
+def pavement(apt):
+    """Hard-surface polygons as [outer ring, hole, ...], simplified to 1 m, capped for a very large airport."""
+    out, total = [], 0
+    surfs = apt.get("pavementSurf", [])
+    for i, poly in enumerate(apt.get("pavement", [])):
+        if i < len(surfs) and surfs[i] in SOFT_SURFACES:
+            continue
+        rings = [r for r in (_ring(ring) for ring in poly) if r]
+        if not rings:
+            continue
+        total += sum(len(r) for r in rings)
+        if total > MAX_PAVEMENT_POINTS:
+            break
+        out.append(rings)
+    return out
+
+
 def airport_line(apt, osm=None):
     """The "airport" message from a cached airport (aptdat.py output) and its OSM data."""
     rws = []
@@ -127,7 +203,8 @@ def airport_line(apt, osm=None):
             bars.append({"id": i, "x": (line[0][0] + line[-1][0]) / 2, "y": (line[0][1] + line[-1][1]) / 2})
     return {"type": "airport", "protocol": PROTOCOL, "icao": apt["icao"], "name": apt.get("name", ""), "lat": apt["lat"], "lon": apt["lon"],
             "elev_ft": apt.get("elevation"), "tower": (osm or {}).get("tower"), "runways": rws, "holdLines": bars,
-            "stands": [{"name": s.get("name", ""), "x": s["pos"][0], "y": s["pos"][1], "hdg": s.get("hdg", 0)} for s in apt.get("stands", [])[:300]]}
+            "stands": [{"name": s.get("name", ""), "x": s["pos"][0], "y": s["pos"][1], "hdg": s.get("hdg", 0)} for s in apt.get("stands", [])[:300]],
+            "taxi": taxi_network(apt), "pavement": pavement(apt)}
 
 
 class TowerLink:

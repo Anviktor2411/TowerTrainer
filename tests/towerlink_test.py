@@ -7,6 +7,7 @@ transmission must reach the host like any remote controller's.
 import base64
 import http.server
 import json
+import math
 import os
 import socket
 import struct
@@ -104,9 +105,17 @@ class WsClient:
 
 
 def airport_info(icao):
+    # a curved apron edge (many points on a gentle arc), a grass area the radar must not draw, and a taxi network
+    # with a runway edge the radar leaves to the runway itself
+    arc = [[300 + 200 * math.cos(math.radians(a / 4)), -200 + 200 * math.sin(math.radians(a / 4))] for a in range(0, 360)]
     return towerlink.airport_line({"icao": icao, "name": "Test " + icao, "lat": 59.413333, "lon": 24.8325, "elevation": 131,
                                   "runways": [{"width": 45, "ends": [{"name": "08", "pos": [-1515.9, 0.08], "displaced": 248}, {"name": "26", "pos": [1965.6, -17.8], "displaced": 0}]}],
-                                  "holdLines": [[[300, 100], [300, 140]]], "stands": [{"name": "K1", "pos": [981.6, -325.0], "hdg": 180}]},
+                                  "holdLines": [[[300, 100], [300, 140]]], "stands": [{"name": "K1", "pos": [981.6, -325.0], "hdg": 180}],
+                                  "nodes": [[0, 0], [100, 0], [100, 120], [-1500, 0], [1900, -17]],
+                                  "edges": [{"a": 0, "b": 1, "name": "A", "width": "C", "runway": False}, {"a": 1, "b": 2, "name": "B", "width": "E", "runway": False},
+                                            {"a": 3, "b": 4, "name": "", "width": "", "runway": True}],
+                                  "pavement": [[arc + [[300, -200]], [[290, -190], [310, -190], [310, -170], [290, -170]]], [[[0, 0], [50, 0], [50, 50], [0, 50]]]],
+                                  "pavementSurf": [1, 3]},
                                  {"tower": [600.0, -250.0]})
 
 
@@ -163,6 +172,12 @@ host.send({"type": "state", "icao": "EETN", "t": "0:10", "ac": [{"id": 1, "cs": 
 m = hear("airport")
 check(m and m["icao"] == "EETN" and abs(m["lat"] - 59.413333) < 1e-6 and m["runways"][0]["name"] == "08/26" and m["tower"] == [600.0, -250.0] and len(m["holdLines"]) == 1 and m["stands"][0]["name"] == "K1",
       "the airport line comes before the first state: datum, runway 08/26, OSM tower, stop bars, stands")
+tx = (m or {}).get("taxi", {})
+check(tx.get("edges") == [[0, 1, "A", 15.0], [1, 2, "B", 23.0]] and tx.get("nodes") == [[0, 0], [100, 0], [100, 120]],
+      "the taxi network: named edges with their width in metres, the runway edge and its nodes left out")
+pav = (m or {}).get("pavement", [])
+check(len(pav) == 1 and len(pav[0]) == 2 and 3 <= len(pav[0][0]) < 60 and len(pav[0][1]) == 4,
+      f"pavement: the apron (outer ring simplified from 361 points to {len(pav[0][0]) if pav else 0}, its hole kept), the grass polygon dropped")
 m = hear("state")
 check(m and m["icao"] == "EETN" and m["ac"][0]["cs"] == "FIN321", "the state follows as a line")
 host.send({"type": "state", "icao": "EETN", "t": "0:11", "ac": [], "split": True, "logs": {}})
