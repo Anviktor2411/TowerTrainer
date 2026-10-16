@@ -50,3 +50,63 @@ export function procLines(procs, rwy) {
   }
   return out;
 }
+
+const routeTokens = (route) => String(route || "").toUpperCase().split(/\s+/).map(t => t.replace(/\/.*$/, "")).filter(Boolean);
+const legsFor = (p, rwy, sid) => {
+  const rw = Object.entries(p.rwy || {}).find(([k]) => runwayMatches(k, rwy));
+  return sid ? [...(rw ? rw[1] : []), ...p.common] : [...p.common, ...(rw ? rw[1] : [])];
+};
+
+/** F4: the SID whose last fix is the first fix of the filed route ("LAKUT UL602 …" -> LAKUT1A), for runway `rwy`. */
+export function sidByRoute(procs, rwy, route) {
+  const toks = routeTokens(route);
+  if (!toks.length || !procs) return null;
+  const sids = (procs.sids || []).filter(p => p.runways.some(r => runwayMatches(r, rwy)));
+  const named = sids.find(p => toks.includes(p.name));
+  if (named) return named;
+  for (const t of toks) {
+    const hit = sids.find(p => p.exit === t);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
+ * F4: arrival suggestion from the real procedures: the STAR whose entry fix is on the route (else the one whose
+ * entry is nearest the inbound bearing), and the approach to the runway (ILS first).
+ * Returns { star, entry, app, appTitle, generic }
+ */
+export function suggestStar(procs, rwy, route, apt, from) {
+  const stars = (procs && procs.stars || []);
+  const toks = routeTokens(route);
+  const usable = stars.filter(p => !p.runways.length || p.runways.some(r => runwayMatches(r, rwy)) || Object.keys(p.rwy || {}).length === 0);
+  let star = usable.find(p => toks.includes(p.name)) || usable.find(p => p.common[0] && toks.includes(p.common[0].fix)) || null;
+  if (!star && usable.length && from && from[2] != null && apt) {
+    const want = bearing(apt.lat, apt.lon, from[2], from[3]);
+    let bd = 400;
+    for (const p of usable) {
+      const e = p.common.find(l => l.lat != null);
+      if (!e) continue;
+      const d = angDiff(want, bearing(apt.lat, apt.lon, e.lat, e.lon));
+      if (d < bd) { bd = d; star = p; }
+    }
+  }
+  const apps = (procs && procs.apps || []).filter(p => p.runways.some(r => runwayMatches(r, rwy)));
+  const app = apps.find(p => /^I/.test(p.name)) || apps.find(p => /^[RH]/.test(p.name)) || apps[0] || null;
+  return { star: star ? star.name : null, entry: star && star.common[0] ? star.common[0].fix : null, app: app ? app.name : null,
+    appTitle: app ? approachTitle(app.name) : "ILS", generic: !star };
+}
+
+export function approachTitle(name) {
+  const m = /^([IRLVNDBGHJPQSTUX])(\d{2}[LRC]?)-?([A-Z])?$/.exec(String(name || ""));
+  if (!m) return String(name || "");
+  const k = { I: "ILS", R: "RNAV", L: "LOC", V: "VOR", N: "NDB", D: "VOR DME", B: "LOC back course", G: "IGS", H: "RNP", J: "GLS", P: "GPS", Q: "NDB DME", S: "VOR", T: "TACAN", X: "LDA", U: "SDF" }[m[1]];
+  return `${k}${m[3] ? " " + m[3] : ""}`;
+}
+
+/** Legs with positions of a named SID / STAR for runway `rwy`: [{id, lat, lon, alt, desc}] */
+export function procPoints(procs, kind, name, rwy) {
+  const p = procs && (procs[kind === "sid" ? "sids" : "stars"] || []).find(x => x.name === name);
+  if (!p) return [];
+  return legsFor(p, rwy, kind === "sid").filter(l => l.lat != null).map(l => ({ id: l.fix, lat: l.lat, lon: l.lon, alt: l.alt, desc: l.desc }));
+}

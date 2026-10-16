@@ -1,0 +1,9 @@
+* synthetic OpenAir test airspace
+AC D
+AN TALLINN CTR
+AL GND
+AH 2500ft
+DP 59:30:00 N 024:30:00 E
+DP 59:30:00 N 025:10:00 E
+DP 59:18:00 N 025:10:00 E
+DP 59:18:00 N 024:30:00 E

@@ -1,0 +1,44 @@
+I
+1200 Version - synthetic airports for the TowerTrainer tests, not real scenery data
+
+1 131 0 0 EETN Lennart Meri Tallinn
+1302 city Tallinn
+1302 country Estonia
+1302 iata_code TLL
+1302 icao_code EETN
+1302 datum_lat 59.413300
+1302 datum_lon 24.832500
+100 45.00 1 0 0.25 1 3 0 08 59.41000 24.79000 0 0 3 2 1 0 26 59.41700 24.87000 0 0 3 2 1 0
+1050 132225 ATIS
+1053 121800 TALLINN GROUND
+1054 118100 TALLINN TOWER
+1055 125050 TALLINN RADAR
+
+1 83 0 0 EGLL London Heathrow
+1302 city London
+1302 country United Kingdom
+1302 iata_code LHR
+1302 datum_lat 51.477500
+1302 datum_lon -0.461400
+100 50.00 1 0 0.25 1 3 0 09L 51.47750 -0.48500 0 0 3 2 1 0 27R 51.47770 -0.43300 0 0 3 2 1 0
+1054 118500 HEATHROW TOWER
+
+1 19 0 0 EGLC London City
+1302 city London
+1302 iata_code LCY
+1302 datum_lat 51.505300
+1302 datum_lon 0.055300
+
+1 672 0 0 KORD Chicago O'Hare Intl
+1302 city Chicago
+1302 iata_code ORD
+1302 datum_lat 41.978600
+1302 datum_lon -87.904700
+1054 120750 OHARE TOWER
+
+1 46 0 0 EVRA Riga Intl
+1302 city Riga
+1302 iata_code RIX
+1302 datum_lat 56.923600
+1302 datum_lon 23.971100
+99

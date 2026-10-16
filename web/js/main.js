@@ -4,7 +4,8 @@ import { Airport } from "./airport.js";
 import { Sim } from "./sim.js";
 import { Radio } from "./radio.js";
 import { Radar, VIEWS } from "./render.js";
-import { parse } from "./commands.js";
+import { parse, navVocab } from "./commands.js";
+import { installNavUi } from "./navui.js";
 import { buildPositions, fmtFreq } from "./positions.js";
 import { renderStrips, incomingFor } from "./strips.js";
 import { suggestions } from "./autocomplete.js";
@@ -18,7 +19,7 @@ import { coach, coachHints } from "./coach.js";
 import { Bridges, XR_PILOT_HELP, xrOverrides } from "./bridges.js";
 import { Guide } from "./guide.js";
 import { NAT_NAME } from "./data.js";
-import { suggestSid, procLines, runwayMatches } from "./procs.js";
+import { suggestSid, procLines, runwayMatches, sidByRoute, suggestStar, procPoints } from "./procs.js";
 import { nextExpected, callsignText } from "./advisor.js";
 import { statePhrase, issueMarkers } from "./labels.js";
 import { buildAtis, parseMetar, atisSummary } from "./atis.js";
@@ -65,6 +66,14 @@ function bootMain() {
   settings.simbrief = { ...DEFAULTS.simbrief, ...(settings.simbrief || {}) };
   const save = () => store.set("tt.settings", settings);
   const radio = new Radio();
+  // F3/B2: nav search (Ctrl+K), nav layers on the map, nav settings, VFR points
+  const navUi = installNavUi({ radar, apt: () => apt, sim: () => sim, loadAirport: (icao) => loadAirport(icao), sysLog: (t) => sysLog(t),
+    reloadProcedures: () => { if (apt) loadProcedures(apt.icao); }, onVfr: (pts) => applyVfr(pts) });
+  function applyVfr(pts) {
+    if (!sim) return;
+    sim.setVfrPoints(pts && pts.length ? pts : null);
+    radar.vfrPoints = sim.vfrPoints(); radar.staticKey = null;
+  }
   let sim = null, apt = null, positions = null, metar = null, speed = 1, selectedId = null, procs = null, navInfo = null;
   let activePos = "ALL";
   const logs = {};                 // pos -> [{cls, html}]
@@ -174,6 +183,7 @@ function bootMain() {
     renderAtis();
     channel && channel.postMessage({ type: "airport", icao });
     loadProcedures(icao);
+    navUi.airportLoaded(apt);
     loadTraffic(icao);
     loadOsm(icao);
     // the pilot's OFP: the cached one, or at most one automatic fetch per page load when none is cached
@@ -315,13 +325,26 @@ function bootMain() {
     if (!sim || !apt) return;
     const rwy = sim.depEnd.name;
     sim.suggest = (a) => {
-      const s = suggestSid(procs, rwy, { lat: apt.d.lat, lon: apt.d.lon, icao: apt.icao }, a.other, sim.region);
+      let s = suggestSid(procs, rwy, { lat: apt.d.lat, lon: apt.d.lon, icao: apt.icao }, a.other, sim.region);
+      // F4: the SID that ends at the first fix of the filed route wins over the bearing guess
+      const byRoute = a.route ? sidByRoute(procs, rwy, a.route) : null;
+      if (byRoute) s = { ...s, sid: byRoute.name, climb: byRoute.climb || s.climb, exit: byRoute.exit, generic: false, note: `SID by the route's first fix ${byRoute.exit}` };
       if (a.plan || a.planSid) {   // S2: the pilot's OFP wins when its SID is one of this runway's; its cruise level is the filed RFL (S4: also a plan filed from XRadio)
         const sids = (procs && procs.sids) || [];
         const ok = a.planSid && sids.some(p => p.name === a.planSid && p.runways.some(r => runwayMatches(r, rwy)));
         return { ...s, sid: ok ? a.planSid : s.sid, rfl: a.rfl || 0, note: ok ? "SID from the OFP" : a.planSid ? `OFP SID ${a.planSid} is for runway ${(a.plan && a.plan.origin && a.plan.origin.rwy) || "?"}; ${s.sid ? s.sid + " suggested" : "radar vectors"}` : s.note };
       }
       return s;
+    };
+    // F4: arrivals and the AI traffic use the real STAR / approach / SID when the data has them
+    const aptLL = { lat: apt.d.lat, lon: apt.d.lon, icao: apt.icao };
+    sim.suggestArrival = (a) => suggestStar(procs, (a.end || sim.arrEnd).name, a.route, aptLL, a.other);
+    sim.sidPath = (a) => a.sid ? procPoints(procs, "sid", a.sid, (a.depEnd || sim.depEnd).name).map(l => ({ ...l, p: apt.toXY(l.lat, l.lon) })) : [];
+    sim.starPath = (end, a) => {
+      const sg = suggestStar(procs, end.name, a && a.route, aptLL, a && a.other);
+      if (!sg.star) return null;
+      const pts = procPoints(procs, "star", sg.star, end.name).map(l => ({ ...l, p: apt.toXY(l.lat, l.lon) }));
+      return pts.length ? { name: sg.star, app: sg.appTitle, pts } : null;
     };
     // the published missed approach of the runway in use (D4): legs with lat/lon from the CIFP
     sim.missedFor = (end) => {
@@ -340,6 +363,7 @@ function bootMain() {
       pill.title = `${src.label}${navInfo && navInfo.current ? " · current cycle " + navInfo.current : ""} — SIDs ${procs.sids.length}, STARs ${procs.stars.length}, approaches ${procs.apps.length}`;
     } else { pill.textContent = "NAV: none"; pill.className = "pill"; pill.title = (src && src.label) || "No procedures found — generic suggestions (point X-Plane/Navigraph CIFP or a sector file in Settings)"; }
     $("delNav").textContent = src ? `· ${src.label}` : "";
+    navUi.decoratePill();
   }
 
   function createSim() {
@@ -367,7 +391,10 @@ function bootMain() {
     sim.setTrafficMix(settings.realMix ? trafficMix : null);
     if ($("rwySel").value) sim.setRunway($("rwySel").value);
     applyWeather();
+    if (navUi.vfr && navUi.vfr.points.length) sim.setVfrPoints(navUi.vfr.points.map(p => ({ ...p, p: apt.toXY(p.lat, p.lon) })));
     radar.vfrPoints = sim.vfrPoints();
+    // F4: fixes and navaids by ident, for "direct LAKUT" and the AI traffic's routes
+    sim.navPoint = (id) => { const n = navVocab(); const x = n && n.ids.get(String(id).toUpperCase()); return x && x.lat != null ? apt.toXY(x.lat, x.lon) : null; };
     updateSky();
     radio.onFrequency = (pos) => (sim ? sim.onFrequency(pos) : []);
     // after two stations block each other an AI controller asks who called; a staffed position leaves that to you
@@ -795,6 +822,22 @@ function bootMain() {
     selectedId = a ? a.id : null;
     if (a) { $("cmd").value = `${callsignText(a)} `; $("cmd").focus(); }
     renderBoard(); renderDel(); renderInfo();
+    checkRoute(a);
+  }
+  /** F4: a filed route (SimBrief, XRadio flight plan, EuroScope) checked against the airways and fixes, drawn on the map. */
+  async function checkRoute(a) {
+    radar.selRoute = null;
+    const route = a && (a.route || (a.fp && a.fp.route));
+    if (!route || !apt) return;
+    if (!a.routeCheck || a.routeCheck.route !== route) {
+      const dep = a.kind === "arr" ? (a.other && a.other[0]) : apt.icao, dest = a.kind === "arr" ? apt.icao : (a.other && a.other[0]);
+      const r = await navUi.validateRoute(route, dep, dest);
+      if (!r) return;
+      a.routeCheck = { ...r, route };
+      a.routeFixes = r.points.map(p => p.id);
+      if (r.problems.length) sysLog(`Route of ${a.cs}: ${r.problems.join("; ")}`);
+    }
+    if (selectedId === a.id) { radar.selRoute = a.routeCheck.points.map(p => ({ id: p.id, p: apt.toXY(p.lat, p.lon) })); renderInfo(); }
   }
   radar.onSelect = (id) => select(sim && sim.ac.find(a => a.id === id));
   // click-to-instruct (F2): a click on a taxiway builds the "via" of the taxi instruction being typed
@@ -840,6 +883,7 @@ function bootMain() {
         ["Squawk", `${esc(a.squawk || "")}${a.assignedSq && a.assignedSq !== a.squawk ? ` <span class="warnline">(assigned ${esc(a.assignedSq)})</span>` : ""} ${a.xpdr === "C" ? "mode C" : a.xpdr === "S" ? "standby" : a.xpdr === "A" ? "mode A" : ""}`],
         ["Ground", a.onGround ? `${a.stand ? "stand " + esc(a.stand.name) : a.standName ? "from " + esc(a.standName) : ""}${a.viaText ? " · via " + esc(a.viaText) : ""}${a.atStop && a.holdRwyName ? " · holding short " + esc(a.holdRwyName) : ""}${a.holdPos ? " · holding position" : ""}` : ""],
         ["Tower", a.kind === "dep" ? `runway ${esc((a.depEnd || sim.depEnd).name)}${a.toClr ? " · cleared for takeoff" : ""}` : a.kind === "arr" ? `runway ${esc((a.end || sim.arrEnd).name)}${a.dthr != null || a.state === "final" ? " · " + (sim.distToThr(a) / 1852).toFixed(1) + " NM" : ""}` : ""],
+        ["Route", a.routeCheck ? `${esc(a.routeCheck.route.slice(0, 80))} ${a.routeCheck.ok ? '<span class="muted">✓ valid</span>' : `<span class="warnline">${esc(a.routeCheck.problems.join("; "))}</span>`}` : null],
         ["Frequency", a.freq === "ALL" ? "combined" : a.freq === "LOST" ? "wrong frequency" : esc(a.freq)],
         ["Crew", `${esc(crew)} · ${esc(voice)}`],
         ["Waiting", a.reqAt != null ? `${Math.round(sim.t - a.reqAt)} s` : null],
@@ -900,6 +944,7 @@ function bootMain() {
       return;
     }
     const pp = parse(text, sim.ac, sim.ac.find(a => a.id === selectedId));
+    for (const w of pp.warnings || []) addLog(pos, "sys", `⚠ ${esc(w)}`);
     const action = pp.ins.length && pp.ins.every(i => i.t === "light" || i.t === "followMe");
     if (action) {
       // a light-gun signal / dispatching the follow-me is not a radio call
@@ -995,7 +1040,9 @@ function bootMain() {
 
   // ---------- push-to-talk: the browser's recogniser, or the server's (Vosk / Whisper) where there is none ----------
   const ptt = new Ptt({ onText: (t, engine) => { if (engine) sysLog(`🎙 (${engine}) ${t}`); transmit(t, undefined, "voice"); }, onPartial: (t) => { $("cmd").value = t; }, onInfo: sysLog, cmd: $("cmd"),
-    phrases: () => (sim ? sim.ac.filter(a => sim.hears(a, txPosition())).flatMap(a => [a.cs, `${a.tel} ${a.num}`.trim()]) : []) });
+    // F3: the spoken names of the fixes / navaids / procedures near the airport bias the recogniser too
+    phrases: () => [...(sim ? sim.ac.filter(a => sim.hears(a, txPosition())).flatMap(a => [a.cs, `${a.tel} ${a.num}`.trim()]) : []),
+      ...(navVocab() ? [...navVocab().ids.values()].filter(x => x.kind !== "fix" || (x.lat != null && apt && Math.hypot(...apt.toXY(x.lat, x.lon)) < 60 * 1852)).slice(0, 25).map(x => x.spoken) : [])] });
   let pttDown = false;
   function pttStart() {
     if (pttDown) return;
@@ -1668,7 +1715,7 @@ function bootMain() {
   loadAirport(params.get("icao") || store.get("tt.icao", "EETN"));
   // for debugging and automated tests
   window.__errors = window.__errors || []; window.addEventListener("error", (e) => window.__errors.push(String(e.message || e)));
-  window.TT = { get sim() { return sim; }, get pilotAtc() { return pilotAtc; }, get apt() { return apt; }, get positions() { return positions; }, get procs() { return procs; }, transmit, parse, radio, radar, guide, app,
+  window.TT = { get sim() { return sim; }, navUi, radar, get pilotAtc() { return pilotAtc; }, get apt() { return apt; }, get positions() { return positions; }, get procs() { return procs; }, transmit, parse, radio, radar, guide, app,
     settings, setActive, setView, select: (id) => select(sim && sim.ac.find(a => a.id === id)), openDebrief, bridges, loadAirport, refreshVoices, get mp() { return mp; }, broadcast,
     scenarios: { start: startScenario, end: endScenario, list: allScenarios, get current() { return scenario; } }, recorder, replay, openReplay, closeReplay, renderScen, get coachStats() { return coachStats; },
     applyStaffing: (mode, keys) => { settings.staff = { mode, keys }; save(); updateStaffBtn(); createSim(); } };

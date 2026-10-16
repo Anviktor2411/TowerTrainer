@@ -13,3 +13,7 @@ _backup*/
 *.key
 tts_keys.json
 node_modules/
+
+# user nav data and VFR points (may be copied from charts / Navigraph)
+nav_user/
+vfr_points/

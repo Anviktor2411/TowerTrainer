@@ -9,7 +9,7 @@ const NM = 1852;
 /** Default VFR reporting points: 5 NM from the field on the cardinal bearings, named phonetically. */
 export function defaultVfrPoints(apt) {
   const pts = [["N", 0, "November"], ["E", 90, "Echo"], ["S", 180, "Sierra"], ["W", 270, "Whiskey"]];
-  return pts.map(([id, brg, name]) => ({ id, name, brg, nm: 5, p: [Math.sin(brg * Math.PI / 180) * 5 * NM, Math.cos(brg * Math.PI / 180) * 5 * NM], alt: 1500 }));
+  return pts.map(([id, brg, name]) => ({ id, name, brg, nm: 5, p: [Math.sin(brg * Math.PI / 180) * 5 * NM, Math.cos(brg * Math.PI / 180) * 5 * NM], alt: 1500, generic: true }));
 }
 
 export function installVfr(Sim) {

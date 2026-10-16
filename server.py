@@ -26,6 +26,8 @@ from socketserver import ThreadingMixIn
 import aptdat
 import fsd
 import navdata
+import navdb
+import vfrpoints
 import setup as setupwiz
 import towerlink
 import simbrief
@@ -74,6 +76,27 @@ CACHE = ROOT / "cache"
 GATEWAY = "https://gateway.x-plane.com/apiv1"
 UA = {"User-Agent": "TowerTrainer/0.1 (personal ATC practice tool)"}
 _metar_cache = {}
+NAV_SETTINGS = CACHE / "nav_settings.json"   # X-Plane choice, data mode, sector package, OpenAIP key (never committed)
+
+
+def nav_settings():
+    try:
+        return {"xplane": "", "mode": "auto", "custom": "", "sector": "", **json.loads(NAV_SETTINGS.read_text("utf-8"))}
+    except (OSError, ValueError):
+        return {"xplane": "", "mode": "auto", "custom": "", "sector": ""}
+
+
+def navdb_():
+    """The indexed nav database (navdb.py), built in the background on first use."""
+    s = nav_settings()
+    return navdb.get(CACHE, {k: s.get(k, "") for k in ("xplane", "mode", "custom", "sector")})
+
+
+def _ll(q):
+    try:
+        return float(q.get("lat")), float(q.get("lon"))
+    except (TypeError, ValueError):
+        return None, None
 
 
 def http_json(url, timeout=30):
@@ -170,6 +193,8 @@ class Handler(BaseHTTPRequestHandler):
             body = self.read_json()
             if path.startswith("/api/setup/"):
                 return self.setup_post(path, body)
+            if path.startswith("/api/nav/") or path.startswith("/api/vfr/"):
+                return self.nav_post(path, body)
             if path == "/api/simbrief/import":          # an OFP JSON the pilot downloaded by hand
                 if not self.is_local():
                     return self.send(403, {"error": "local only"})
@@ -319,6 +344,54 @@ class Handler(BaseHTTPRequestHandler):
     def is_local(self):
         return self.client_address[0] in ("127.0.0.1", "::1")
 
+    def nav_get(self, path, q):
+        """F2/F3: nav database status, search, details, map layers, speech vocabulary; B2: VFR points."""
+        lat, lon = _ll(q)
+        near = (lat, lon) if lat is not None else None
+        db = navdb_()
+        if path == "/api/nav/status":
+            return self.send(200, {**db.status(), "settings": {k: v for k, v in nav_settings().items() if k != "openaip_key"},
+                                   "openaip": bool(nav_settings().get("openaip_key"))})
+        if path == "/api/nav/search":
+            return self.send(200, db.search(q.get("q", ""), lat, lon, int(q.get("limit", 20))))
+        if path == "/api/nav/nearest":
+            return self.send(200, db.nearest_airports(lat, lon, int(q.get("n", 10))) if near else [])
+        if path == "/api/nav/item":
+            return self.send(200, db.item(q.get("kind", ""), q.get("id", ""), near))
+        if path == "/api/nav/area":
+            return self.send(200, db.area(lat, lon, float(q.get("r", 60))) if near else {})
+        if path == "/api/nav/vocab":
+            return self.send(200, db.vocab(lat, lon, float(q.get("r", 120)), q.get("icao", "")) if near else [])
+        m = re.fullmatch(r"/api/vfr/([A-Za-z0-9]{3,7})", path)
+        if m:
+            apt = load_airport(m.group(1))
+            s = nav_settings()
+            return self.send(200, vfrpoints.load(m.group(1), apt["lat"], apt["lon"], ROOT, CACHE, s.get("sector", ""), s.get("openaip_key", "")))
+        return self.send(404, {"error": "unknown nav request"})
+
+    def nav_post(self, path, body):
+        if not self.is_local():
+            return self.send(403, {"error": "nav data is only available on the host PC"})
+        if path == "/api/nav/reload":                 # "Reload nav data": detect installs again, rebuild when anything changed
+            db = navdb_()
+            db.start(force=bool(body.get("force")))
+            return self.send(200, db.status())
+        if path == "/api/nav/settings":
+            s = nav_settings()
+            for k in ("xplane", "mode", "custom", "sector", "openaip_key"):
+                if k in body:
+                    s[k] = str(body[k] or "").strip()
+            CACHE.mkdir(exist_ok=True)
+            NAV_SETTINGS.write_text(json.dumps(s), "utf-8")
+            return self.send(200, navdb_().status())
+        if path == "/api/nav/route":
+            return self.send(200, navdb_().validate_route(str(body.get("route", "")), body.get("dep"), body.get("dest")))
+        m = re.fullmatch(r"/api/vfr/([A-Za-z0-9]{3,7})", path)
+        if m:
+            pts = vfrpoints.save_user(ROOT, m.group(1), body.get("points", []))
+            return self.send(200, {"source": "user", "points": pts, "label": "VFR points: user file"})
+        return self.send(404, {"error": "unknown nav request"})
+
     def do_GET(self):
         path = self.path.split("?")[0]
         q = {k: v[0] for k, v in parse_qs(urlparse(self.path).query).items()}
@@ -329,9 +402,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.is_local():
                     return self.send(403, {"error": "procedures are only available on the host PC"})
                 apt = load_airport(m.group(1))
+                s = nav_settings()
                 return self.send(200, navdata.load_procedures(
-                    m.group(1), apt["lat"], apt["lon"], CACHE, xplane=q.get("xplane", ""), mode=q.get("mode", "auto"),
-                    custom=q.get("custom", ""), sector=q.get("sector", ""), use_cache=q.get("refresh") != "1"))
+                    m.group(1), apt["lat"], apt["lon"], CACHE, xplane=q.get("xplane", s["xplane"]), mode=q.get("mode", s["mode"]),
+                    custom=q.get("custom", s["custom"]), sector=q.get("sector", s["sector"]), use_cache=q.get("refresh") != "1"))
             if path == "/api/setup/status":             # the setup wizard (G6): detection only, local PC only
                 if not self.is_local():
                     return self.send(403, {"error": "the setup wizard is only available on this PC"})
@@ -347,7 +421,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/navdata":
                 if not self.is_local():
                     return self.send(403, {"error": "local only"})
-                return self.send(200, navdata.navdata_info(q.get("xplane", ""), q.get("mode", "auto"), q.get("custom", "")))
+                s = nav_settings()
+                return self.send(200, navdata.navdata_info(q.get("xplane", s["xplane"]), q.get("mode", s["mode"]), q.get("custom", s["custom"])))
+            if path.startswith("/api/nav/") or path.startswith("/api/vfr/"):
+                # local X-Plane / Navigraph / sector data: only for this PC, never for remote players
+                if not self.is_local():
+                    return self.send(403, {"error": "nav data is only available on the host PC"})
+                return self.nav_get(path, q)
             if path == "/api/stt/status":
                 return self.send(200, stt().status())
             if path == "/api/tts/status":
@@ -494,6 +574,7 @@ if __name__ == "__main__":
                             "password": a.xradio_password, "atc_cs": a.xradio_callsign})
         print(f"XRadio bridge -> {a.xradio}")
     PORT, BIND = a.port, a.host
+    navdb_()      # F5: the nav index loads (or builds in the background) while the server already answers
     if a.tower_port:
         try:
             TOWER = towerlink.TowerLink(a.host, a.tower_port, tower_airport).start()

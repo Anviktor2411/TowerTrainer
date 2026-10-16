@@ -27,6 +27,14 @@ export const VIEWS = { DEL: "Delivery", GND: "Ground", TWR: "Tower", APP: "Appro
 const RADAR_VIEWS = new Set(["TWR", "APP", "CTR"]);
 const VEH_COL = { followme: "#ffd04a", fire: "#ff5a3c", ops: "#e8eef4", tug: "#9aa7b4", snow: "#8fd3ff", fuel: "#d9a53d", bus: "#7fc7ff", catering: "#b0e07a", baggage: "#c8c8c8" };
 const LABEL_OFFSETS = [[14, -22], [14, 16], [-14, -22], [-14, 16], [16, -44], [-16, -44], [16, 36], [-16, 36], [0, -58], [0, 48]];
+// Map symbols are sized in screen pixels (B1): a base size that grows a little with zoom, never outside 6-14 px
+export const SYM_MIN = 6, SYM_MAX = 14;
+const MAX_NAV_LABELS = 60;
+/** Pixel size of a map symbol at map scale k (pixels per metre). */
+export function symPx(base, k) {
+  const z = Math.max(0, Math.min(1, (Math.log10(Math.max(k, 1e-6)) + 3.3) / 3));   // 0 at Centre range, 1 zoomed right in
+  return Math.max(SYM_MIN, Math.min(SYM_MAX, base * (0.8 + 0.45 * z)));
+}
 
 export class Radar {
   constructor(canvas) {
@@ -42,7 +50,11 @@ export class Radar {
     this.filter = { ground: true, air: true, maxAlt: 99999 };
     this.procs = [];
     this.flightRoute = [];          // the pilot's OFP route (S1): [{p:[x,y], id, alt}]
-    this.vfrPoints = [];            // VFR reporting points [{name, p, alt}] (D5)
+    this.vfrPoints = [];            // VFR reporting points [{name, p, alt, generic}] (D5, B2)
+    this.nav = null;                // nav layers around the airport (F4): airways, navaids, fixes, holds, MSA, airspaces
+    this.highlight = null;          // a search result shown on the map (F3): {p, label, kind, line:[[x,y]...]}
+    this.symStatic = []; this.symDyn = [];   // every map symbol drawn: {kind, px} (the B1 size test reads symbolSizes())
+    this.onMapClick = null;         // (world [x,y]) => {} when a click should place something (VFR point editor)
     this.history = new Map();       // id -> [{p, t}]
     this.labelOff = new Map();      // id -> [dx, dy] screen offset of the data block (manual drags)
     this.autoOff = new Map();       // id -> offset chosen by the overlap solver
@@ -119,6 +131,32 @@ export class Radar {
   /** OSM buildings etc. (C3): [{pts:[[x,y]...], kind:"terminal"|"hangar"|"tower"|"building"|"apron", name}] */
   setOsm(osm) { this.osm = osm; this.staticKey = null; if (this.apt) this.t3d.setAirport(this.apt, osm); }
 
+  /** Nav layers from /api/nav/area (lat/lon): converted to metres around the airport once. */
+  setNavLayers(area) {
+    if (!this.apt || !area) { this.nav = null; this.staticKey = null; return; }
+    const xy = (la, lo) => this.apt.toXY(la, lo);
+    this.nav = {
+      airways: (area.airways || []).map(w => ({ ...w, pa: xy(...w.a), pb: xy(...w.b) })),
+      navaids: (area.navaids || []).map(n => ({ ...n, p: xy(n.lat, n.lon) })),
+      fixes: (area.fixes || []).map(f => ({ ...f, p: xy(f.lat, f.lon) })),
+      holds: (area.holds || []).filter(h => h.lat != null).map(h => ({ ...h, p: xy(h.lat, h.lon) })),
+      msa: (area.msa || []).filter(m => m.lat != null).map(m => ({ ...m, p: xy(m.lat, m.lon) })),
+      airspaces: (area.airspaces || []).map(a => ({ ...a, pts: a.poly.map(q => xy(q[0], q[1])) })),
+    };
+    this.staticKey = null;
+  }
+  /** Centre the map on a search result and mark it (F3). item: {lat, lon, label, kind, segments?} */
+  showItem(item) {
+    if (!this.apt || !item || item.lat == null) { this.highlight = null; return; }
+    const p = this.apt.toXY(item.lat, item.lon);
+    const line = item.segments ? item.segments.flatMap(s => [this.apt.toXY(...s.a), this.apt.toXY(...s.b)]) : null;
+    this.highlight = { p, label: item.label || item.ident || "", kind: item.kind, line, t0: performance.now() };
+    if (this.view === "3D") return;
+    this.cx = p[0]; this.cy = p[1];
+    const far = Math.hypot(p[0], p[1]);
+    if (far > 12 * NM && this.radarView) this.scale = Math.min(this.scale, Math.min(this.w, this.h) / (2.4 * far));
+    this.staticKey = null;
+  }
   /** SID/STAR polylines from procs.js procLines() (lat/lon). */
   setFlightRoute(pts) { this.flightRoute = pts || []; this.staticKey = null; }
   setProcs(lines) {
@@ -198,6 +236,7 @@ export class Radar {
       if (drag && !drag.moved && this.world && e.target === this.cv) {
         if (drag.label != null) { this.onSelect(drag.label); drag = null; return; }
         const [x, y] = local(e);
+        if (this.onMapClick) { this.onMapClick(this.toWorld(x, y)); drag = null; return; }
         const bar = this.stopBarAt(x, y);
         if (bar && this.onStopBar) { this.onStopBar(bar); drag = null; return; }
         const best = this.targetAt(x, y);
@@ -236,6 +275,7 @@ export class Radar {
     const key = [this.cx, this.cy, this.scale, this.w, this.h, this.dpr, this.view, this.night, this.showGraph, this.showProcs, arrEnd ? arrEnd.name : "", !!this.osm, this.flightRoute.length, this.flightRoute.length ? this.flightRoute[0].id + this.flightRoute[this.flightRoute.length - 1].id : ""].join("|");
     if (key === this.staticKey && this.staticCv) return;
     this.staticKey = key;
+    this.symStatic = []; this._sym = this.symStatic;
     if (!this.staticCv) this.staticCv = document.createElement("canvas");
     const cv = this.staticCv;
     cv.width = this.cv.width; cv.height = this.cv.height;
@@ -249,6 +289,7 @@ export class Radar {
       ctx.strokeStyle = C.ring; ctx.lineWidth = 1 / k;
       for (let r = step; r <= 80 * NM; r += step) { ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke(); }
     }
+    if (radarView && this.nav) this.drawNavLines(ctx);
     if (this.showProcs && radarView && this.procs.length) {
       ctx.lineWidth = 1 / k; ctx.setLineDash([6 / k, 4 / k]);
       for (const l of this.procs) {
@@ -362,26 +403,35 @@ export class Radar {
       const s = this.toScreen([e.pos[0] - e.v[0] * off, e.pos[1] - e.v[1] * off]);
       ctx.fillStyle = C.rwyEdge; ctx.fillText(e.name, s[0], s[1]);
     }
+    // ---- map symbols: fixed pixel sizes, labels decluttered by zoom (B1) ----
+    const labels = this.labelBudget();
+    if (radarView && this.nav) this.drawNavSymbols(ctx, labels);
     if (this.showProcs && radarView) {
-      ctx.font = "9px ui-monospace, Consolas, monospace"; ctx.fillStyle = C.fix; ctx.strokeStyle = C.fix;
-      const seen = new Set();
+      ctx.font = "9px ui-monospace, Consolas, monospace"; ctx.fillStyle = C.fix; ctx.strokeStyle = C.fix; ctx.lineWidth = 1;
+      const seen = new Set(), sz = symPx(8, k);
       for (const l of this.procs) for (const p of l.xy) {
         if (seen.has(p.id)) continue; seen.add(p.id);
         const s = this.toScreen(p.p);
-        ctx.beginPath(); ctx.moveTo(s[0], s[1] - 4); ctx.lineTo(s[0] + 4, s[1] + 3); ctx.lineTo(s[0] - 4, s[1] + 3); ctx.closePath(); ctx.stroke();
-        ctx.fillText(p.id, s[0], s[1] + 11);
+        if (!this.onScreen(s)) continue;
+        this.symbol(ctx, "fix", s, sz);
+        if (labels.take(s)) ctx.fillText(p.alt ? `${p.id} ${p.alt >= 10000 ? "FL" + Math.round(p.alt / 100) : p.alt}` : p.id, s[0], s[1] + sz / 2 + 7);
       }
       ctx.textAlign = "left";
-      for (const l of this.procs) { const last = l.xy[l.kind === "sid" ? l.xy.length - 1 : 0]; const s = this.toScreen(last.p); ctx.fillStyle = l.kind === "sid" ? C.sid : C.star; ctx.fillText(l.name, s[0] + 6, s[1] - 8); }
+      for (const l of this.procs) { const last = l.xy[l.kind === "sid" ? l.xy.length - 1 : 0]; const s = this.toScreen(last.p); if (labels.take([s[0] + 20, s[1] - 8])) { ctx.fillStyle = l.kind === "sid" ? C.sid : C.star; ctx.fillText(l.name, s[0] + 6, s[1] - 8); } }
       ctx.textAlign = "center";
     }
-    // VFR reporting points (D5): hollow triangles with name and altitude on the Tower / Approach pictures
-    if (radarView && this.view !== "CTR" && this.vfrPoints && this.vfrPoints.length) {
-      ctx.font = "9px ui-monospace, Consolas, monospace"; ctx.fillStyle = "#8fc7ff"; ctx.strokeStyle = "#8fc7ff"; ctx.lineWidth = 1;
+    // VFR reporting points (D5, B2): hollow triangles with name and altitude, only at Tower / Approach scale;
+    // generated placeholders are grey and marked "(generic)"
+    const vfrScale = radarView && this.view !== "CTR" && k > Math.min(this.w, this.h) / (2 * 45 * NM);
+    if (vfrScale && this.vfrPoints && this.vfrPoints.length) {
+      ctx.font = "9px ui-monospace, Consolas, monospace"; ctx.lineWidth = 1;
+      const sz = symPx(10, k);
       for (const pt of this.vfrPoints) {
         const s = this.toScreen(pt.p);
-        ctx.beginPath(); ctx.moveTo(s[0], s[1] - 6); ctx.lineTo(s[0] + 6, s[1] + 5); ctx.lineTo(s[0] - 6, s[1] + 5); ctx.closePath(); ctx.stroke();
-        ctx.fillText(`${pt.name} ${pt.alt}`, s[0], s[1] + 16);
+        if (!this.onScreen(s)) continue;
+        ctx.fillStyle = ctx.strokeStyle = pt.generic ? "#6b7682" : pt.type === "on-request" ? "#b9dcff" : "#8fc7ff";
+        this.symbol(ctx, pt.type === "on-request" ? "vfrReq" : "vfr", s, sz);
+        if (labels.take(s)) ctx.fillText(`${pt.name} ${pt.alt}${pt.generic ? " (generic)" : ""}`, s[0], s[1] + sz / 2 + 9);
       }
     }
     if (k > 0.12) {
@@ -408,6 +458,136 @@ export class Radar {
       for (let r = step; r <= 80; r += step) { const s = this.toScreen([0, r * NM]); if (s[1] > 10) ctx.fillText(`${r}`, s[0] + 10, s[1] + 6); }
     }
     this.drawCompassAndScale(ctx);
+  }
+
+  /** Pixel sizes of every symbol on the current picture (static layer + targets). */
+  symbolSizes() { return [...(this.symStatic || []), ...(this.symDyn || [])]; }
+
+  onScreen(s, m = 20) { return s[0] > -m && s[1] > -m && s[0] < this.w + m && s[1] < this.h + m; }
+
+  /** At most MAX_NAV_LABELS labels, none on top of another (60 x 12 px cells). */
+  labelBudget() {
+    const used = new Set();
+    let n = 0;
+    return {
+      take: (s) => {
+        if (n >= MAX_NAV_LABELS) return false;
+        const key = `${Math.round(s[0] / 60)}:${Math.round(s[1] / 14)}`;
+        if (used.has(key)) return false;
+        used.add(key); n++;
+        return true;
+      },
+    };
+  }
+
+  /** One map symbol at screen point s, `px` pixels across (clamped to SYM_MIN..SYM_MAX and logged for the test). */
+  symbol(ctx, kind, s, px) {
+    px = Math.max(SYM_MIN, Math.min(SYM_MAX, px));
+    (this._sym || (this._sym = [])).push({ kind, px });
+    const r = px / 2;
+    ctx.beginPath();
+    if (kind === "fix" || kind === "vfr" || kind === "vfrReq") {
+      ctx.moveTo(s[0], s[1] - r); ctx.lineTo(s[0] + r, s[1] + r * 0.8); ctx.lineTo(s[0] - r, s[1] + r * 0.8); ctx.closePath(); ctx.stroke();
+      if (kind === "vfr") { ctx.beginPath(); ctx.arc(s[0], s[1] + r * 0.15, Math.max(1, r * 0.22), 0, Math.PI * 2); ctx.fill(); }
+    } else if (kind === "VOR") {
+      for (let i = 0; i < 6; i++) { const a = Math.PI / 3 * i; const p = [s[0] + Math.cos(a) * r, s[1] + Math.sin(a) * r]; i ? ctx.lineTo(...p) : ctx.moveTo(...p); }
+      ctx.closePath(); ctx.stroke(); ctx.beginPath(); ctx.arc(s[0], s[1], 1, 0, Math.PI * 2); ctx.fill();
+    } else if (kind === "DME") {
+      ctx.rect(s[0] - r, s[1] - r, px, px); ctx.stroke();
+    } else if (kind === "NDB") {
+      for (let i = 0; i < 12; i++) { const a = Math.PI / 6 * i; ctx.fillRect(s[0] + Math.cos(a) * r - 0.6, s[1] + Math.sin(a) * r - 0.6, 1.2, 1.2); }
+      ctx.arc(s[0], s[1], Math.max(1, r * 0.3), 0, Math.PI * 2); ctx.fill();
+    } else if (kind === "airport") {
+      ctx.arc(s[0], s[1], r, 0, Math.PI * 2); ctx.stroke();
+    } else {
+      ctx.arc(s[0], s[1], r, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+
+  /** Airways (Approach/Centre), airspace boundaries (CTR/TMA), holdings and the MSA circle, in world units. */
+  drawNavLines(ctx) {
+    const k = this.scale, N = this.nav;
+    ctx.lineWidth = 1 / k;
+    for (const a of N.airspaces) {
+      if (a.pts.length < 3) continue;
+      const ctr = /CTR|ATZ|\bD\b/.test(`${a.name} ${a.cls}`);
+      ctx.strokeStyle = ctr ? "#3a6f8f" : "#2f4f66"; ctx.setLineDash(ctr ? [] : [10 / k, 6 / k]);
+      ctx.beginPath(); a.pts.forEach((p, i) => i ? ctx.lineTo(...p) : ctx.moveTo(...p)); ctx.closePath(); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    if (this.view === "APP" || this.view === "CTR") {
+      for (const w of N.airways) {
+        ctx.strokeStyle = w.level === "H" ? "#2e4b5f" : "#3a4d3a";
+        ctx.beginPath(); ctx.moveTo(...w.pa); ctx.lineTo(...w.pb); ctx.stroke();
+      }
+    }
+    if (this.view !== "TWR") {
+      ctx.strokeStyle = "#5a5a8a";
+      for (const h of N.holds) {
+        const legM = (h.legdist ? h.legdist : (h.legtime || 1) * 3.5) * NM, R = 1.4 * NM;
+        const inb = (h.inbound || 0) * Math.PI / 180, v = [Math.sin(inb), Math.cos(inb)], side = h.turn === "L" ? -1 : 1;
+        const n = [v[1] * side, -v[0] * side];
+        const a = h.p, b = [a[0] - v[0] * legM, a[1] - v[1] * legM];
+        ctx.beginPath();
+        ctx.moveTo(...b); ctx.lineTo(...a);
+        ctx.lineTo(a[0] + n[0] * 2 * R, a[1] + n[1] * 2 * R); ctx.lineTo(b[0] + n[0] * 2 * R, b[1] + n[1] * 2 * R); ctx.closePath();
+        ctx.stroke();
+      }
+    }
+    for (const m of N.msa) {
+      ctx.strokeStyle = "#5b4636"; ctx.setLineDash([4 / k, 8 / k]);
+      const r = (m.sectors[0] && m.sectors[0].nm || 25) * NM;
+      ctx.beginPath(); ctx.arc(m.p[0], m.p[1], r, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  /** Navaids with proper symbols, enroute fixes only when zoomed out, airway / airspace / MSA labels (screen space). */
+  drawNavSymbols(ctx, labels) {
+    const k = this.scale, N = this.nav;
+    ctx.font = "9px ui-monospace, Consolas, monospace"; ctx.lineWidth = 1; ctx.textAlign = "center";
+    for (const n of N.navaids) {
+      const s = this.toScreen(n.p);
+      if (!this.onScreen(s)) continue;
+      ctx.strokeStyle = ctx.fillStyle = n.type === "NDB" ? "#b08a5a" : "#6fa8c8";
+      const sz = symPx(11, k);
+      this.symbol(ctx, n.type, s, sz);
+      if (labels.take(s)) ctx.fillText(n.freq ? `${n.ident} ${n.type === "NDB" ? Math.round(n.freq) : n.freq.toFixed(2)}` : n.ident, s[0], s[1] + sz / 2 + 8);
+    }
+    // enroute fixes: Centre view or zoomed out beyond ~40 NM across
+    if (this.view === "CTR" || (this.view === "APP" && k < Math.min(this.w, this.h) / (2 * 40 * NM))) {
+      ctx.strokeStyle = ctx.fillStyle = "#4f6475";
+      const sz = symPx(6, k);
+      for (const f of N.fixes) {
+        if (f.area !== "ENRT") continue;
+        const s = this.toScreen(f.p);
+        if (!this.onScreen(s, 0)) continue;
+        this.symbol(ctx, "fix", s, sz);
+        if (labels.take(s)) ctx.fillText(f.ident, s[0], s[1] + sz / 2 + 7);
+      }
+    }
+    if (this.view === "APP" || this.view === "CTR") {
+      ctx.fillStyle = "#47667c";
+      const seen = new Set();
+      for (const w of N.airways) {
+        if (seen.has(w.name)) continue;
+        const s = this.toScreen([(w.pa[0] + w.pb[0]) / 2, (w.pa[1] + w.pb[1]) / 2]);
+        if (!this.onScreen(s, -10)) continue;
+        if (labels.take(s)) { seen.add(w.name); ctx.fillText(w.name, s[0], s[1]); }
+      }
+    }
+    ctx.fillStyle = "#4e7c9a";
+    for (const a of N.airspaces) {
+      if (!a.pts.length) continue;
+      const c = a.pts.reduce((m, p) => [m[0] + p[0] / a.pts.length, m[1] + p[1] / a.pts.length], [0, 0]);
+      const s = this.toScreen(c);
+      if (this.onScreen(s, -10) && labels.take(s)) ctx.fillText(`${a.name} ${a.low}-${a.high}`.trim(), s[0], s[1]);
+    }
+    ctx.fillStyle = "#8a6a4e";
+    for (const m of N.msa) {
+      const s = this.toScreen([m.p[0], m.p[1] + (m.sectors[0] && m.sectors[0].nm || 25) * NM]);
+      if (this.onScreen(s) && labels.take(s)) ctx.fillText(`MSA ${m.ident} ${m.sectors.map(x => Math.round(x.alt)).join("/")}`, s[0], s[1] - 8);
+    }
   }
 
   drawOsm(ctx) {
@@ -454,6 +634,7 @@ export class Radar {
     if (!apt) { ctx.fillStyle = C.bg; ctx.fillRect(0, 0, this.w, this.h); return; }
     if (this.view === "3D") { this.recordHistory(world.ac); this.t3d.draw(world, selectedId); this.hover = null; return; }
     this.drawStatic(world.arrEnd);
+    this.symDyn = []; this._sym = this.symDyn;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.drawImage(this.staticCv, 0, 0);
     this.worldTransform(ctx);
@@ -514,8 +695,33 @@ export class Radar {
     for (const { a, s } of visible) this.drawTarget(a, s, a.id === selectedId);
     this.layoutLabels(visible, selectedId);
     for (const { a, s } of visible) this.drawLabel(a, s, a.id === selectedId);
+    if (this.selRoute && this.selRoute.length > 1) this.drawSelRoute(ctx);
+    if (this.highlight) this.drawHighlight(ctx);
     this.hover = this.mouse ? this.targetAt(this.mouse[0], this.mouse[1]) : null;
     if (this.hover) this.drawTooltip(this.hover);
+  }
+
+  /** The selected flight's filed route (F4), validated against the nav data. */
+  drawSelRoute(ctx) {
+    ctx.save(); ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.strokeStyle = "#c58af0"; ctx.fillStyle = "#c58af0"; ctx.lineWidth = 1.2; ctx.setLineDash([6, 4]);
+    ctx.beginPath(); this.selRoute.forEach((f, i) => { const s = this.toScreen(f.p); i ? ctx.lineTo(...s) : ctx.moveTo(...s); }); ctx.stroke();
+    ctx.setLineDash([]); ctx.font = "9px ui-monospace, Consolas, monospace"; ctx.textAlign = "left";
+    for (const f of this.selRoute) { const s = this.toScreen(f.p); if (this.onScreen(s, 0)) { ctx.fillRect(s[0] - 2, s[1] - 2, 4, 4); ctx.fillText(f.id, s[0] + 4, s[1] - 4); } }
+    ctx.restore();
+  }
+
+  /** The selected search result: a pulsing ring, its airway in bold, and the name (F3). */
+  drawHighlight(ctx) {
+    const h = this.highlight, s = this.toScreen(h.p);
+    const pulse = 9 + 3 * Math.sin((performance.now() - h.t0) / 250);
+    ctx.save(); ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.strokeStyle = "#7CFC9A"; ctx.fillStyle = "#7CFC9A"; ctx.lineWidth = 2;
+    if (h.line) { ctx.beginPath(); for (let i = 0; i + 1 < h.line.length; i += 2) { const a = this.toScreen(h.line[i]), b = this.toScreen(h.line[i + 1]); ctx.moveTo(...a); ctx.lineTo(...b); } ctx.stroke(); }
+    ctx.beginPath(); ctx.arc(s[0], s[1], pulse, 0, Math.PI * 2); ctx.stroke();
+    ctx.font = "600 11px ui-monospace, Consolas, monospace"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.fillText(h.label, s[0] + 16, s[1] - 14);
+    ctx.restore();
   }
 
   recordHistory(list) {
@@ -598,7 +804,8 @@ export class Radar {
 
   drawVehicle(a, col) {
     const ctx = this.ctx, k = this.scale;
-    const L = Math.max(6, 5.5 * k), W = Math.max(3, 2.4 * k);
+    const L = Math.max(SYM_MIN, Math.min(SYM_MAX, 5.5 * k)), W = Math.max(3, Math.min(SYM_MAX / 2, 2.4 * k));
+    this._sym && this._sym.push({ kind: "vehicle", px: L });
     ctx.save(); ctx.rotate(a.hdg * Math.PI / 180);
     ctx.fillStyle = col; ctx.fillRect(-W / 2, -L / 2, W, L);
     if (a.vtype === "followme") { ctx.fillStyle = "#111"; for (let i = 0; i < 3; i++) ctx.fillRect(-W / 2 + (i % 2) * W / 2, -L / 2 + i * L / 3, W / 2, L / 3); }
@@ -660,6 +867,7 @@ export class Radar {
     for (let i = 0; i < h.length - 1; i++) { const s = this.toScreen(h[i].p); if (Math.hypot(s[0] - me[0], s[1] - me[1]) > 2) ctx.fillRect(s[0] - 1.2, s[1] - 1.2, 2.4, 2.4); }
     ctx.restore();
     ctx.globalAlpha = a._dim || 1;
+    this._sym && this._sym.push({ kind: "aircraft", px: 7 });
     // position symbol: square = mode C, circle = primary only, filled when on ground
     if (a.xpdr === "C" || a.human) { if (a.onGround) ctx.fillRect(-3.5, -3.5, 7, 7); else ctx.strokeRect(-3.5, -3.5, 7, 7); }
     else { ctx.beginPath(); ctx.arc(0, 0, 3.5, 0, Math.PI * 2); ctx.stroke(); }

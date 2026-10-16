@@ -17,13 +17,6 @@ import os
 import re
 from pathlib import Path
 
-XPLANE_GUESSES = [
-    r"D:\SteamLibrary\steamapps\common\X-Plane 12",
-    r"C:\Program Files (x86)\Steam\steamapps\common\X-Plane 12",
-    r"C:\X-Plane 12", r"D:\X-Plane 12", r"E:\X-Plane 12",
-]
-
-
 # ---------------------------------------------------------------- AIRAC
 AIRAC_EPOCH = dt.date(2020, 1, 2)   # AIRAC 2001
 
@@ -39,31 +32,138 @@ def airac_for(day=None):
 
 
 def read_cycle(folder):
-    f = Path(folder) / "cycle_info.txt"
-    if not f.is_file():
-        return None
-    t = f.read_text("utf-8", "replace")
-    m = re.search(r"AIRAC cycle\s*:\s*(\d{4})", t, re.I) or re.search(r"\b(\d{4})\b", t)
-    return m.group(1) if m else None
-
-
-# ---------------------------------------------------------------- data source discovery
-def find_xplane(hint=""):
-    cands = [hint] if hint else []
-    try:  # X-Plane writes its install path here
-        for f in Path(os.environ.get("LOCALAPPDATA", "")).glob("x-plane_install_12.txt"):
-            cands += [l.strip() for l in f.read_text("utf-8", "replace").splitlines() if l.strip()]
-    except OSError:
-        pass
-    cands += XPLANE_GUESSES
-    for c in cands:
-        if c and Path(c).is_dir():
-            return str(Path(c))
+    """AIRAC cycle of a nav data folder: cycle_info.txt, cycle.json (Navigraph), or the earth_nav.dat header."""
+    f = Path(folder)
+    t = _read_head(f / "cycle_info.txt", 4000)
+    if t:
+        m = re.search(r"AIRAC cycle\s*:\s*(\d{4})", t, re.I) or re.search(r"\b(\d{4})\b", t)
+        if m:
+            return m.group(1)
+    t = _read_head(f / "cycle.json", 4000)
+    if t:
+        try:
+            c = str(json.loads(t).get("cycle", "")).strip()
+            if re.fullmatch(r"\d{4}", c):
+                return c
+        except (ValueError, AttributeError):
+            pass
+    for name in ("earth_nav.dat", "earth_fix.dat"):
+        m = re.search(r"data cycle (\d{4})", _read_head(f / name, 600) or "", re.I)
+        if m:
+            return m.group(1)
     return None
 
 
+def _read_head(path, n):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read(n)
+    except OSError:
+        return None
+
+
+def _mtime(p):
+    try:
+        return int(Path(p).stat().st_mtime)
+    except OSError:
+        return 0
+
+
+# ---------------------------------------------------------------- X-Plane installs
+BINARIES = ("X-Plane.exe", "X-Plane-x86_64", "X-Plane.app", "X-Plane")
+
+
+def _install_files():
+    """X-Plane's own install lists (one install path per line), 12 and 11, on every OS."""
+    home = Path.home()
+    bases = [Path(os.environ["LOCALAPPDATA"])] if os.environ.get("LOCALAPPDATA") else []
+    bases += [home / "Library" / "Preferences", home / ".x-plane"]
+    return [b / f"x-plane_install_{v}.txt" for b in bases for v in ("12", "11") if (b / f"x-plane_install_{v}.txt").is_file()]
+
+
+def _steam_libraries():
+    """Every Steam library listed in every libraryfolders.vdf we can find (all drives)."""
+    steams = [Path(os.environ[e]) / "Steam" for e in ("PROGRAMFILES(X86)", "PROGRAMFILES") if os.environ.get(e)]
+    home = Path.home()
+    steams += [home / ".steam" / "steam", home / ".local" / "share" / "Steam", home / "Library" / "Application Support" / "Steam"]
+    libs = []
+    for st in steams:
+        libs.append(st)
+        for m in re.finditer(r'"path"\s+"([^"]+)"', _read_head(st / "steamapps" / "libraryfolders.vdf", 200000) or ""):
+            libs.append(Path(m.group(1).replace("\\\\", "\\")))
+    return libs
+
+
+def _drives():
+    return [f"{c}:\\" for c in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{c}:\\")] if os.name == "nt" else []
+
+
+def xplane_candidates(hint=""):
+    """Folders that may hold X-Plane: the hint, X-Plane's install lists, Steam libraries, common paths."""
+    cands = [hint] if hint else []
+    for f in _install_files():
+        cands += [l.strip() for l in (_read_head(f, 20000) or "").splitlines() if l.strip()]
+    for lib in _steam_libraries():
+        cands += [str(lib / "steamapps" / "common" / v) for v in ("X-Plane 12", "X-Plane 11")]
+    for d in _drives():
+        for v in ("X-Plane 12", "X-Plane 11"):
+            cands += [d + v, d + "Games\\" + v, d + "Program Files\\" + v, d + "SteamLibrary\\steamapps\\common\\" + v]
+    home = Path.home()
+    for v in ("X-Plane 12", "X-Plane 11"):
+        cands += [str(home / v), str(home / "Desktop" / v), "/Applications/" + v]
+    seen, out = set(), []
+    for c in cands:
+        k = os.path.normcase(os.path.abspath(c.rstrip("/\\") or c))
+        if k not in seen:
+            seen.add(k)
+            out.append(c)
+    return out
+
+
+def install_info(path):
+    """What a folder is: a real X-Plane install has Resources/ and the X-Plane program (a leftover folder with
+    only Custom Scenery or plugins does not count); its version and nav data cycles."""
+    p = Path(path)
+    if not p.is_dir():
+        return None
+    binary = next((b for b in BINARIES if (p / b).exists()), None)
+    has_res = (p / "Resources").is_dir()
+    nav, dflt = p / "Custom Data", p / "Resources" / "default data"
+    navigraph = (nav / "CIFP").is_dir() or (nav / "earth_fix.dat").is_file()
+    info = {"path": str(p), "valid": bool(has_res and binary), "binary": binary,
+            "version": 11 if "11" in p.name and "12" not in p.name else 12,
+            "navigraph": navigraph, "navigraph_airac": read_cycle(nav) if navigraph else None,
+            "default": dflt.is_dir(), "default_airac": read_cycle(dflt) if dflt.is_dir() else None}
+    if not info["valid"]:
+        info["why"] = "no Resources folder" if not has_res else "no X-Plane program in it"
+    info["airac"] = max([c for c in (info["navigraph_airac"], info["default_airac"]) if c], default=None)
+    return info
+
+
+def _rank(i):
+    # Navigraph Custom Data first, then the newest AIRAC, then X-Plane 12 over 11
+    return (1 if i["navigraph"] else 0, i["airac"] or "", i["version"], 1 if i["default"] else 0)
+
+
+def find_installs(hint="", include_invalid=False):
+    """Every X-Plane 11/12 install on this PC, the best one first (invalid ones last, when asked for)."""
+    found = [i for i in (install_info(c) for c in xplane_candidates(hint)) if i]
+    valid = sorted([i for i in found if i["valid"]], key=_rank, reverse=True)
+    return valid + ([i for i in found if not i["valid"]] if include_invalid else [])
+
+
+def find_xplane(hint=""):
+    """The X-Plane install to read nav data from: the one asked for when it is a real install, else the best."""
+    if hint:
+        i = install_info(hint)
+        if i and i["valid"]:
+            return i["path"]
+    best = find_installs()
+    return best[0]["path"] if best else None
+
+
 def data_folders(xplane="", mode="auto", custom=""):
-    """Ordered list of (label, folder) that may contain CIFP/ + earth_*.dat."""
+    """Ordered list of (label, folder) that may contain CIFP/ + earth_*.dat: custom, Navigraph, X-Plane default."""
     out = []
     if custom and Path(custom).is_dir():
         out.append(("custom", str(Path(custom))))
@@ -71,25 +171,32 @@ def data_folders(xplane="", mode="auto", custom=""):
     if xp:
         nav = Path(xp) / "Custom Data"
         dflt = Path(xp) / "Resources" / "default data"
-        if mode in ("auto", "navigraph") and (nav / "CIFP").is_dir():
+        if mode in ("auto", "navigraph") and ((nav / "CIFP").is_dir() or (nav / "earth_fix.dat").is_file()):
             out.append(("navigraph", str(nav)))
-        if mode in ("auto", "default") and (dflt / "CIFP").is_dir():
+        if mode in ("auto", "default") and ((dflt / "CIFP").is_dir() or (dflt / "earth_fix.dat").is_file()):
             out.append(("xplane", str(dflt)))
     return out
+
+
+SOURCE_LABEL = {"navigraph": "Navigraph", "xplane": "X-Plane default data", "custom": "Custom folder"}
 
 
 def navdata_info(xplane="", mode="auto", custom=""):
     folders = data_folders(xplane, mode, custom)
     cur = airac_for()
+    xp = find_xplane(xplane)
+    installs = [{k: i.get(k) for k in ("path", "valid", "version", "navigraph", "airac", "why")}
+                for i in find_installs(xplane, include_invalid=True)]
     if not folders:
         return {"source": "none", "label": "No navigation data found (fallback procedures)", "airac": None, "current": cur,
-                "outdated": False, "xplane": find_xplane(xplane)}
+                "outdated": False, "xplane": xp, "installs": installs, "folders": []}
     kind, folder = folders[0]
     cyc = read_cycle(folder)
-    label = {"navigraph": "Navigraph", "xplane": "X-Plane default data", "custom": "Custom folder"}[kind]
     return {"source": kind, "folder": folder, "airac": cyc, "current": cur,
-            "outdated": bool(cyc and cyc < cur), "xplane": find_xplane(xplane),
-            "label": f"Nav data: {label}" + (f" AIRAC {cyc}" if cyc else "")}
+            "outdated": bool(cyc and cyc < cur), "xplane": xp, "installs": installs,
+            "folders": [{"kind": k, "folder": f, "airac": read_cycle(f)} for k, f in folders],
+            "label": f"Nav data: {SOURCE_LABEL[kind]}" + (f" AIRAC {cyc}" if cyc else "") +
+                     (f" (older than the current cycle {cur})" if cyc and cyc < cur else "")}
 
 
 # ---------------------------------------------------------------- CIFP parsing
@@ -305,27 +412,45 @@ def bearing(lat1, lon1, lat2, lon2):
     return (math.degrees(math.atan2(y, x)) + 360) % 360
 
 
+def procedures_key(icao, xplane="", mode="auto", custom="", sector=""):
+    """Cache key: the folders actually read, their files' mtimes and AIRAC cycles -- a Navigraph update, a newly
+    found X-Plane or an edited sector file all change it."""
+    parts = [mode]
+    for kind, folder in data_folders(xplane, mode, custom):
+        f = Path(folder)
+        parts.append([kind, os.path.normcase(str(f.resolve())), read_cycle(folder),
+                      _mtime(f / "CIFP" / f"{icao}.dat"), _mtime(f / "earth_fix.dat"), _mtime(f / "earth_nav.dat")])
+    if sector:
+        eses, scts = find_sector_files(sector)
+        parts.append(["sector", [[str(x), _mtime(x)] for x in [*eses, *scts]]])
+    return json.dumps(parts)
+
+
 def load_procedures(icao, apt_lat, apt_lon, cache_dir, xplane="", mode="auto", custom="", sector="", use_cache=True):
     icao = icao.upper()
-    key = json.dumps([xplane, mode, custom, sector])
+    key = procedures_key(icao, xplane, mode, custom, sector)
     cache = Path(cache_dir) / f"{icao}.procs.json"
     if use_cache and cache.is_file():
         try:
             d = json.loads(cache.read_text("utf-8"))
-            if d.get("_key") == key:
+            if d.get("_key") == key and d.get("source", {}).get("kind") != "fallback":
                 return d
         except (OSError, ValueError):
             pass
     result = None
-    for kind, folder in data_folders(xplane, mode, custom):
+    folders = data_folders(xplane, mode, custom)
+    for kind, folder in folders:
         f = Path(folder) / "CIFP" / f"{icao}.dat"
         if f.is_file():
             procs = parse_cifp(f.read_text("utf-8", "replace"))
             wanted = {l["fix"] for k in ("sids", "stars", "apps") for p in procs[k]
                       for l in [*p["common"], *sum(p["rwy"].values(), []), *sum(p["enroute"].values(), []), *p.get("missed", [])]}
-            fixes = load_fixes(folder, wanted)
-            info = navdata_info(xplane, mode, custom)
-            result = finish(procs, fixes, {"kind": kind, "label": info["label"], "airac": read_cycle(folder)}, apt_lat, apt_lon)
+            fixes = {}
+            for _k, other in reversed(folders):          # merged: the best folder (first) wins
+                fixes.update(load_fixes(other, wanted))
+            cyc = read_cycle(folder)
+            result = finish(procs, fixes, {"kind": kind, "label": f"Nav data: {SOURCE_LABEL[kind]}" + (f" AIRAC {cyc}" if cyc else ""),
+                                           "airac": cyc, "folder": folder}, apt_lat, apt_lon)
             break
     if result is None and sector:
         eses, scts = find_sector_files(sector)
@@ -338,7 +463,8 @@ def load_procedures(icao, apt_lat, apt_lon, cache_dir, xplane="", mode="auto", c
                 result = finish(procs, fixes, {"kind": "euroscope", "label": f"EuroScope sector file {e.name}", "airac": None}, apt_lat, apt_lon)
                 break
     if result is None:
-        result = {"sids": [], "stars": [], "apps": [], "source": {"kind": "fallback", "label": "No procedures found — generic suggestions", "airac": None}}
+        # never cached: the next load looks again, so a newly found X-Plane or a Navigraph update is picked up
+        return {"sids": [], "stars": [], "apps": [], "source": {"kind": "fallback", "label": "No procedures found — generic suggestions", "airac": None}}
     result["_key"] = key
     try:
         cache.parent.mkdir(exist_ok=True)

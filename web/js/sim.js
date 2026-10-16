@@ -365,6 +365,12 @@ export class Sim {
       .map(a => this.distToThr(a)).reduce((m, d) => Math.max(m, d), -1e9);
     if (last > spawnD - 5500) return null;
     const f = this.makeFlight(stand ? stand.types : null, ga, { cargo: !!stand && !ga && isCargoStand(stand), stand });
+    // F4: with an approach position and real data, the arrival starts at its STAR's entry fix and flies the STAR
+    const sp = !ga && this.hasPos("APP") && this.starPath ? this.starPath(e, f) : null;
+    if (sp && sp.pts.length && Math.hypot(...sp.pts[0].p) < 80 * NM && Math.hypot(...sp.pts[0].p) > 8 * NM &&
+      !this.ac.some(o => o.kind === "arr" && !o.onGround && dist(o.pos, sp.pts[0].p) < 8 * NM)) {
+      return this.spawnStarArrival(f, e, sp, stand);
+    }
     const pos = [e.thr[0] - e.v[0] * spawnD, e.thr[1] - e.v[1] * spawnD];
     const sq = ga ? (this.region === "US" ? "1200" : "7000") : this.squawks.next(this.t);
     Object.assign(f, {
@@ -377,6 +383,52 @@ export class Sim {
     this.ac.push(f);
     this.onEvent({ type: "spawn", ac: f });
     return f;
+  }
+
+  /** An arrival on a real STAR: entry fix, the STAR's fixes with their altitudes, then a 10 NM final intercept. */
+  spawnStarArrival(f, e, sp, stand) {
+    const sq = this.squawks.next(this.t);
+    const icpt = { p: [e.thr[0] - e.v[0] * 10 * NM, e.thr[1] - e.v[1] * 10 * NM], id: "FINAL", alt: 3000, final: true };
+    const first = sp.pts[0];
+    const alt = Math.max(5000, Math.min(14000, first.alt || 10000));
+    const wps = [...sp.pts.slice(1), icpt];
+    Object.assign(f, {
+      kind: "arr", state: "star", pos: [...first.p], hdg: hdgOf(wps[0].p[0] - first.p[0], wps[0].p[1] - first.p[1]), spd: 250 * KT, alt, onGround: false, end: e,
+      landClr: false, squawk: sq, assignedSq: sq, xpdr: "C", ifr: true, callAt: this.t + rint(3, 15), stand, cfl: alt,
+      freq: this.split ? "APP" : "ALL", star: sp.name, appName: sp.app, starWps: wps, starI: 0,
+    });
+    this.ac.push(f);
+    this.onEvent({ type: "spawn", ac: f });
+    return f;
+  }
+
+  /** Flying the STAR: turn toward the next fix (3°/s), descend to its altitude (or 3000 ft at the intercept). */
+  starMove(a, dt) {
+    if (this.t >= a.callAt && !a.calledIn) {
+      a.calledIn = true;
+      this.call(a, "approachInitial", { alt: `${a.alt >= 10000 ? "flight level " + Math.round(a.alt / 1000) * 10 : Math.round(a.alt / 100) * 100 + " feet"}` }, "APP");
+    }
+    const list = a.navWps && a.navWps.length ? a.navWps : a.starWps;
+    const k = a.navWps && a.navWps.length ? "navI" : "starI";
+    a[k] = a[k] || 0;
+    const w = list[a[k]];
+    if (!w) { a.navWps = null; a.navI = 0; if (a.starI >= a.starWps.length) a.starI = a.starWps.length - 1; return; }
+    a.hdg = this.turnToward(a.hdg, hdgOf(w.p[0] - a.pos[0], w.p[1] - a.pos[1]), dt, 3);
+    const want = w.final ? 3000 : (w.alt && w.desc !== "+" ? w.alt : Math.max(3000, Math.min(a.alt, w.alt || a.alt)));
+    const top = Math.min(a.cfl || a.alt, a.alt);
+    if (!this.tcasControls || !this.tcasControls(a, dt)) a.alt += Math.max(-1800 / 60 * dt, Math.min(0, Math.max(want, Math.min(want, top)) - a.alt));
+    a.spd = Math.max(a.appSpd + 30 * KT, Math.min(250 * KT, a.spd + (w.final ? -0.5 : 0) * dt));
+    const hv = vecFromHdg(a.hdg);
+    a.pos = [a.pos[0] + hv[0] * a.spd * dt, a.pos[1] + hv[1] * a.spd * dt];
+    if (dist(a.pos, w.p) < 1800) {
+      a[k]++;
+      if (w.final) {                      // established: the rest is the normal final (ILS) model
+        const e = a.end, along = -this.distToThr(a);
+        a.pos = [e.thr[0] + e.v[0] * along, e.thr[1] + e.v[1] * along];
+        a.hdg = e.hdg; a.state = "final"; a.cfl = Math.max(a.alt, 3000); a.navWps = null;
+        a.alt = this.arrAlt(a);
+      }
+    }
   }
 
   spawnOverflight() {
@@ -701,7 +753,9 @@ export class Sim {
       if (this.t >= a.callAt && !a.calledIn) { a.calledIn = true; this.call(a, "overflight", { cfl: `flight level ${a.alt / 100}` }, "CTR"); }
       if (Math.hypot(...a.pos) > 45 * NM) a.gone = true;
     } else {
-      if (s === "final" || s === "goaround") {
+      if (s === "star") {
+        this.starMove(a, dt);
+      } else if (s === "final" || s === "goaround") {
         this.approachMove(a, dt);
       } else if (s === "rollout") {
         this.rolloutMove(a, dt);
@@ -1338,8 +1392,20 @@ export class Sim {
         this.call(a, "freqChange", { alt: `${Math.round(a.alt / 100) * 100} feet`, greet: "" }, "TWR");
       }
     }
-    a.hdg = e.hdg;
-    a.pos = [a.pos[0] + v[0] * a.spd * dt, a.pos[1] + v[1] * a.spd * dt];
+    // F4: once airborne the departure flies its real SID (or a "direct" it was given), else runway heading
+    let route = null;
+    if (a.state === "airborne" && !a.heliDep) {
+      if (a.sidWps === undefined) a.sidWps = this.sidPath ? (this.sidPath(a) || []) : [];
+      route = a.navWps || a.sidWps;
+    }
+    if (route && route.length && a.alt > 400) {
+      const k = a.navWps ? "navI" : "sidI";
+      a[k] = a[k] || 0;
+      while (a[k] < route.length && dist(a.pos, route[a[k]].p) < 1500) a[k]++;
+      if (a[k] < route.length) { const w = route[a[k]].p; a.hdg = this.turnToward(a.hdg, hdgOf(w[0] - a.pos[0], w[1] - a.pos[1]), dt, 3); }
+    } else if (!route || !route.length || a.alt <= 400) a.hdg = e.hdg;
+    const hv = vecFromHdg(a.hdg);
+    a.pos = [a.pos[0] + hv[0] * a.spd * dt, a.pos[1] + hv[1] * a.spd * dt];
     if (!this.split) {
       if (a.alt > 5000 || dist(a.pos, e.pos) > 25000) {
         if (!a.handedOff) this.alert(`${a.cs} left your airspace without a frequency change.`, "ho" + a.cs, false);
@@ -1670,9 +1736,16 @@ export class Sim {
       }
     }
     if (pos === "APP") {
-      if (a.kind === "arr" && s === "final") {
-        if (!a.appCleared && a.calledIn) { a.appCleared = true; return `${cs}, identified, descend 3000 feet, cleared ILS approach runway ${a.end.name}`; }
-        if (a.appCleared && this.distToThr(a) < 10 * NM && this.positions.TWR) return `${cs}, ${this.contactPhrase("TWR")}`;
+      if (a.kind === "arr" && (s === "final" || s === "star")) {
+        if (!a.appCleared && a.calledIn) {
+          a.appCleared = true;
+          // F4: the STAR and approach from the real procedures when there are any
+          const sg = this.suggestArrival ? this.suggestArrival(a) : null;
+          const star = s === "star" && a.star ? `via ${a.star} arrival, ` : "";
+          const app = (a.appName || (sg && sg.appTitle) || "ILS").replace(/^LOC.*/, "localizer");
+          return `${cs}, identified, ${star}descend 3000 feet, cleared ${app} approach runway ${a.end.name}`;
+        }
+        if (a.appCleared && s === "final" && this.distToThr(a) < 10 * NM && this.positions.TWR) return `${cs}, ${this.contactPhrase("TWR")}`;
       }
       if (a.kind === "dep" && !a.onGround) {
         if (!a.appIdent) { a.appIdent = true; return `${cs}, identified, climb flight level 120`; }
@@ -2083,6 +2156,25 @@ export class Sim {
       }
       case "approach": return `cleared ILS approach runway ${a.end ? a.end.name : this.arrEnd.name}`;
       case "identified": return null;
+      // nav instructions (F4): a fix the crew cannot find in their box is queried, not flown
+      case "direct": {
+        if (i.known === false) return { unable: `Unable, ${i.fix.split("").join(" ")} is not in our database, say again the fix` };
+        if (a.onGround) return { unable: "Say again" };
+        const p = this.navPoint ? this.navPoint(i.fix) : null;
+        if (p) { const k = (a.wps || []).findIndex(w => w.id === i.fix); a.navWps = k >= 0 ? a.wps.slice(k) : [{ p, id: i.fix, leg: i.fix }]; a.wps = a.navWps; a.wpi = 0; }
+        a.directTo = i.fix;
+        return `direct ${i.fix}`;
+      }
+      case "holdAt": {
+        if (i.known === false) return { unable: `Unable, confirm the holding fix` };
+        a.holdFix = i.fix;
+        return `hold at ${i.fix}${i.turn ? (i.turn === "L" ? ", left turns" : ", right turns") : ", as published"}`;
+      }
+      case "star": {
+        if (i.known === false) return { unable: `Unable, we don't have the ${i.name} arrival` };
+        a.star = i.name;
+        return `via ${i.name} arrival`;
+      }
       case "light": {
         const eff = this.applyLight(a, i.color, i.mode);
         return eff ? `roger, ${i.color} ${i.mode}` : { unable: "Say again" };

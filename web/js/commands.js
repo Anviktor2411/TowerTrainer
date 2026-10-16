@@ -6,6 +6,51 @@ const RWY = "(\\d{1,2}[lrc]?)";
 let KNOWN_TAXIWAYS = null;
 /** Taxiway / taxilane names of the loaded airport, so "via" accepts apron lane names like "L3A" too. */
 export function setTaxiNames(set) { KNOWN_TAXIWAYS = set ? new Set([...set].map(x => String(x).toUpperCase())) : null; }
+
+// ---- nav data (F3/F4): fixes, navaids and procedures near the airport, by ident and by their spoken name
+let NAV = null;
+const spokenKey = (s) => normalize(String(s)).replace(/\b(vor|ndb|dme|vortac)\b/g, "").replace(/[^a-z0-9]/g, "");
+/** list: [{ident, kind, spoken}] from /api/nav/vocab, or null when there is no nav data. */
+export function setNavVocab(list) {
+  if (!list || !list.length) { NAV = null; return; }
+  const ids = new Map(), spoken = new Map(), procs = new Map();
+  for (const x of list) {
+    const id = String(x.ident).toUpperCase();
+    if (["SID", "STAR", "APPCH"].includes(x.kind)) { procs.set(id, x); procs.set(spokenKey(x.spoken), x); continue; }
+    if (!ids.has(id)) ids.set(id, x);
+    const k = spokenKey(x.spoken);
+    if (k && !spoken.has(k)) spoken.set(k, id);
+  }
+  NAV = { ids, spoken, procs };
+}
+export function navVocab() { return NAV; }
+/** "lakut" / "tallinn vor" / "t l l" -> {ident, known}. Unknown names keep their letters as the ident. */
+export function resolveFix(words) {
+  const w = String(words || "").trim();
+  const id = w.replace(/\s+/g, "").toUpperCase();
+  if (!NAV) return { ident: id, known: null };
+  if (NAV.ids.has(id)) return { ident: id, known: true, kind: NAV.ids.get(id).kind };
+  const k = spokenKey(w);
+  if (NAV.spoken.has(k)) { const ident = NAV.spoken.get(k); return { ident, known: true, kind: NAV.ids.get(ident).kind }; }
+  return { ident: id, known: false };
+}
+export function resolveProc(name) {
+  const id = String(name || "").replace(/\s+/g, "").toUpperCase();
+  if (!NAV) return { name: id, known: null };
+  const p = NAV.procs.get(id) || NAV.procs.get(spokenKey(name));
+  return p ? { name: String(p.ident).toUpperCase(), known: true, kind: p.kind } : { name: id, known: false };
+}
+/** Warnings for nav instructions given to aircraft `a`: unknown fixes, fixes not on its route, unknown procedures. */
+export function navWarnings(ins, a) {
+  const out = [];
+  const route = a && (a.routeFixes || (a.route ? String(a.route).toUpperCase().split(/\s+/) : null));
+  for (const i of ins) {
+    if ((i.t === "direct" || i.t === "holdAt") && i.known === false) out.push(`${i.fix} is not a known fix or navaid near ${i.t === "holdAt" ? "the airport" : "here"}`);
+    else if (i.t === "direct" && i.known && route && route.length && !route.includes(i.fix)) out.push(`${i.fix} is not on ${a.cs}'s route (${route.slice(0, 8).join(" ")}${route.length > 8 ? " …" : ""})`);
+    if ((i.t === "star" || i.t === "procedure") && i.known === false) out.push(`${i.name} is not a published procedure at this airport`);
+  }
+  return out;
+}
 const STOP_WORDS = new Set(["hold", "holding", "cross", "contact", "monitor", "runway", "and", "then", "behind",
   "give", "way", "line", "cleared", "expect", "short", "of", "to", "stand", "gate", "squawk", "climb", "via", "for", "report", "follow"]);
 const TRAFFIC_WORDS = "(?:the |that )?(landing|departing|arriving|crossing|taxiing|next|preceding)?\\s*([a-z0-9 ]{2,30}?)";
@@ -169,7 +214,7 @@ export function parseInstructions(s) {
   if (!isClearance) add(/\bsquawk (\d{4})\b/, (m) => /^[0-7]{4}$/.test(m[1]) ? { t: "squawk", code: m[1] } : null);
   add(/\bsquawk ident\b/, () => ({ t: "ident" }));
   add(/\binformation ([a-z])\b(?: is| now)*(?: current)?/, (m) => /current/.test(s) ? { t: "atis", letter: m[1] } : null);
-  add(/\bcleared (?:for )?(?:the )?(?:ils|rnav|rnp|vor|visual)(?: approach)?/, () => ({ t: "approach" }));
+  add(/\bcleared (?:for )?(?:the )?(?:ils|rnav|rnp|vor|visual|localizer|loc|ndb|gls|gps)(?: [a-z])?(?: approach)?/, () => ({ t: "approach" }));
   add(/\bidentified\b/, () => ({ t: "identified" }));
   // Tower light signals (ICAO Annex 2, appendix 1): "light green flashing", "flashing green", "red steady light"
   const LMODE = (w) => /^(steady|continuous|solid)$/.test(w) ? "steady" : "flashing";
@@ -178,6 +223,20 @@ export function parseInstructions(s) {
   add(/\b(?:send(?: the| a)? )?follow[ -]?me(?: (?:car|vehicle|van))?(?: (?:is )?(?:on (?:its|the) way|coming))?\b/, () => ({ t: "followMe" }));
   if (!isClearance) add(/\b(climb|descend)(?: and maintain| to)* (?:(?:flight level|fl) ?(\d{2,3})|(\d{3,5})(?: feet| ft)?)/, (m) =>
     ({ t: "alt", verb: m[1], ft: m[2] ? +m[2] * 100 : +m[3], fl: !!m[2] }));
+  // nav data (F4): "direct LAKUT", "proceed direct Tallinn VOR", "hold at TLL", "cleared via LAKUT1T arrival"
+  const NAV_END = "(?=,|$| then| and| climb| descend| maintain| expect| contact| as published| inbound| left| right| reduce| speed| when)";
+  add(new RegExp(`\\b(?:proceed |fly |route )?direct(?: to)? ([a-z][a-z0-9]*(?: [a-z][a-z0-9]*){0,5}?)${NAV_END}`), (m) => {
+    const f = resolveFix(m[1]);
+    return { t: "direct", fix: f.ident, known: f.known };
+  });
+  add(new RegExp(`\\bhold(?:ing)? (?:at|over) ([a-z][a-z0-9]*(?: [a-z][a-z0-9]*){0,5}?)${NAV_END}`), (m) => {
+    const f = resolveFix(m[1]);
+    return { t: "holdAt", fix: f.ident, known: f.known, turn: /left turns?/.test(s) ? "L" : /right turns?/.test(s) ? "R" : null };
+  });
+  add(/\b(?:cleared |descend )?via (?:the )?([a-z]{2,5} ?\d ?[a-z])(?: arrival| star)\b/, (m) => {
+    const p = resolveProc(m[1]);
+    return { t: "star", name: p.name, known: p.known };
+  });
 
   // a "line up" that is part of "cleared for takeoff" sequences is fine; drop duplicates of the same type
   found.sort((a, b) => a.at - b.at);
@@ -203,5 +262,11 @@ export function parse(text, aircraft, selected) {
   let { ac, rest, abbrev } = matchCallsign(s, aircraft);
   const explicit = !!ac;
   if (!ac && selected) ac = selected;
-  return { ac, explicit, abbrev, ins: parseInstructions(rest), normalized: s, neg: /\b(negative|correction)\b/.test(s) };
+  const ins = parseInstructions(rest);
+  // a SID named in a clearance must be one of the airport's ("cleared to Riga via LAKUT1A departure")
+  const clr = ins.find(i => i.t === "clearance" && i.sid && i.sid !== "flight planned route");
+  if (clr && NAV) { const p = resolveProc(clr.sid.replace(/ departure$/i, "")); clr.sidKnown = p.known; if (p.known) clr.sid = p.name + " departure"; }
+  const warnings = navWarnings(ins, ac);
+  if (clr && clr.sidKnown === false) warnings.push(`${clr.sid.replace(/ departure$/i, "")} is not a published SID here`);
+  return { ac, explicit, abbrev, ins, normalized: s, neg: /\b(negative|correction)\b/.test(s), warnings };
 }

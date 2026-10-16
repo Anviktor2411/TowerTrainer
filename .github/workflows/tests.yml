@@ -18,6 +18,7 @@ jobs:
       - run: python tests/fsd_test.py
       - run: python tests/data_test.py
       - run: python tests/navdata_test.py
+      - run: python tests/navdb_test.py
       - run: python tests/tts_test.py
       - run: python tests/stt_test.py
       - run: python tests/setup_test.py
@@ -40,9 +41,11 @@ jobs:
       - run: node tests/taxi.test.mjs
       - run: node tests/ops.test.mjs
       - run: node tests/flow.test.mjs EETN
+      - run: node tests/nav.test.mjs
       - name: browser suite (headless Chrome)
         run: |
           python server.py --fsd-port 0 > server.log 2>&1 &
           sleep 3
           node tests/browser.test.mjs
+          node tests/map.browser.test.mjs
           node tests/perf.mjs
