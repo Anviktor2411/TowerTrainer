@@ -145,12 +145,18 @@ class Session:
             return
         keyed = time.monotonic() < self.keyed_until
         com2 = int(p.get("com2") or 0)
-        payload = P.POSITION.pack(
+        fields = (
             p["lat"], p["lon"], p["alt_m"], p["hdg"], 0.0, 0.0, p["gs"], 1.0 if p["on_ground"] else 0.0, 0.0,
             p["com1"], com2, p.get("lights", 0), 1 if p["on_ground"] else 0,
             P.TX_COM1 if keyed else P.TX_NONE, P.RX_COM1 | (P.RX_COM2 if com2 else 0),
             int(time.monotonic() * 1000) & 0xFFFFFFFF, p["hdg"], p.get("vs", 0.0),
             int(p.get("squawk") or 0), p.get("xpdr", P.XPDR_OFF), 1 if p.get("ident") else 0)
+        if self.bridge.proto >= 6:
+            # XRadio's radio model (its docs/radio.md): a station sends 0 -- its facility's antenna height
+            # and service volume (a tower 25 nm / 4000 ft, approach 60 nm, a centre its area)
+            payload = P.POSITION.pack(*fields, p.get("agl_m", 0.0), 0, 0)
+        else:
+            payload = P.POSITION_V5.pack(*fields)
         self.send(P.PT_POSITION, payload)
 
     def text(self, khz, msg, to="", from_sid=None, from_cs=None):
@@ -679,7 +685,7 @@ class XRadioBridge:
         entries = []
         for local, cs in list(self.ai_gone.items()):
             entries.append(P.TRAFFIC_ENTRY.pack(local, P.pad(cs, 16), P.pad("ZZZZ", 8), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                0, 1, 0, P.XPDR_OFF, 0, 0.0, 0.0, P.pad("", 16), 0, 0, P.AI_REMOVE))
+                                                0, 1, 0, P.XPDR_OFF, 0, 0.0, 0.0, P.pad("", 16), 0, 0, P.AI_REMOVE, 0.0))
         self.ai_gone.clear()
         for cs, local in self.ai_local.items():
             last = self.ai_last.get(cs)
@@ -690,7 +696,9 @@ class XRadioBridge:
             entries.append(P.TRAFFIC_ENTRY.pack(
                 local, P.pad(cs, 16), P.pad(str(a.get("type") or "A320"), 8), p["lat"], p["lon"], p["alt_m"], p["hdg"], 0.0, 0.0,
                 p["gs"], 1.0 if p["on_ground"] else 0.0, 0.0, p["lights"], 1 if p["on_ground"] else 0, 0, p["xpdr"],
-                int(time.monotonic() * 1000) & 0xFFFFFFFF, p["hdg"], p["vs"], P.pad("", 16), p["squawk"], 1 if p["ident"] else 0, 0))
+                int(time.monotonic() * 1000) & 0xFFFFFFFF, p["hdg"], p["vs"], P.pad("", 16), p["squawk"], 1 if p["ident"] else 0, 0,
+                # its height above the ground: 0 on it, above the airport in the air (XRadio's radio model)
+                0.0 if p["on_ground"] else max(0.0, p["alt_m"] - (self.center[2] if self.center else 0.0))))
         for i in range(0, len(entries), P.MAX_TRAFFIC_ENTRIES):
             chunk = entries[i:i + P.MAX_TRAFFIC_ENTRIES]
             inj.send(P.PT_AI_TRAFFIC, P.TRAFFIC_HDR.pack(len(chunk), 0) + b"".join(chunk))
@@ -762,9 +770,12 @@ class XRadioBridge:
         if ptype == P.PT_TRAFFIC:
             count, _ = P.TRAFFIC_HDR.unpack_from(payload, 0)
             off = P.TRAFFIC_HDR.size
+            entry = P.TRAFFIC_ENTRY if len(payload) - off >= count * P.TRAFFIC_ENTRY.size else P.TRAFFIC_ENTRY_V5
             for _ in range(count):
-                e = P.TRAFFIC_ENTRY.unpack_from(payload, off)
-                off += P.TRAFFIC_ENTRY.size
+                if off + entry.size > len(payload):
+                    break
+                e = entry.unpack_from(payload, off)
+                off += entry.size
                 tsid = e[0]
                 if tsid in ours or P.is_ai_sid(tsid) and self.injector and P.ai_owner(tsid) == (self.injector.sid & 0x7FFF):
                     continue
@@ -816,9 +827,11 @@ class XRadioBridge:
                     self.fps[d["session_id"]] = d
                 self.events.append({"type": "fp", "cs": d["callsign"], "status": d["status"], "squawk": d["squawk"], "dep": d["dep"], "dest": d["dest"]})
         elif ptype == P.PT_ATC_LIST:
-            count, _ = P.ATC_LIST_HDR.unpack_from(payload, 0)
+            count, _flags = P.ATC_LIST_HDR.unpack_from(payload, 0)
             off, lst = P.ATC_LIST_HDR.size, []
             for _ in range(count):
+                if off + P.ATC_ENTRY.size > len(payload):
+                    break
                 e = P.ATC_ENTRY.unpack_from(payload, off)
                 off += P.ATC_ENTRY.size
                 lst.append({"cs": P.cstr(e[1]), "icao": P.cstr(e[2]), "khz": e[3], "kind": e[4], "mine": e[0] in ours})
