@@ -448,6 +448,7 @@ function bootMain() {
     if (e.type === "rwyClosed") { sysLog(`Runway ${apt.runways[e.rwy].label} closed.`); renderOps(); }
     // PART A: shared traffic awareness
     if (e.type === "log") sysLog(e.text);
+    if (e.type === "humanType") { sysLog(`${e.ac.cs} now flies ${e.to}${e.ac.typeSource ? " (" + e.ac.typeSource + " by XRadio)" : ""}${e.ac.typeUnknown ? " — type unknown, medium wake assumed" : ""}.`); renderBoard(); }
     if (e.type === "blocked") addLog(e.ac.freq, "sys", `⛔ ${esc(e.ac.cs)} blocked by ${esc(e.by.cs)}${e.by.human ? " (real pilot)" : ""}${e.twy ? " at " + esc(e.twy) : ""} for a minute — it asks for another route`);
     if (e.type === "humanStale") sysLog(`${e.ac.cs}: no XRadio position for ${e.s} s — AI traffic only knows where it was (out of range or disconnected).`);
     if (e.type === "atcError") { addLog(e.ac && e.ac.freq || activePos, "warn", `⚠ ${esc(e.text)} — ${esc(e.by)}`); if (settings.coach) showCoach([{ level: "warn", msg: `${e.text}. ${e.should}` }], activePos); }

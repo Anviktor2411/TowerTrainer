@@ -200,6 +200,8 @@ class XRadioBridge:
         self.roster = {}         # sid -> (callsign, icao)
         self.atc_list = []       # [{cs, icao, khz, kind}] the server's list
         self.fps = {}            # sid -> flight plan dict (real pilots)
+        self.aircraft = {}       # sid -> PT_AIRCRAFT dict (detected type, tail, span, MTOW) of real pilots
+        self.tcas = {}           # sid -> PT_TCAS dict of real pilots (+ "_t"), their own X-Plane TCAS
         self.texts = deque(maxlen=200)
         self.voice_q = deque(maxlen=2000)
         self.events = deque(maxlen=100)
@@ -369,7 +371,18 @@ class XRadioBridge:
         st = self.status()
         st["texts"] = texts
         st["events"] = events
-        st["humans"] = list(self.humans.values()) if self.cfg["real_pilots"] else []
+        now = time.monotonic()
+        humans = []
+        for sid, h in self.humans.items():
+            h = dict(h)
+            if sid in self.aircraft:
+                h["acft"] = self.aircraft[sid]
+                h["type"] = self.aircraft[sid]["ac_icao"] or h["type"]
+            t = self.tcas.get(sid)
+            if t and now - t["_t"] < 4:
+                h["tcas"] = {k: v for k, v in t.items() if k != "_t"}
+            humans.append(h)
+        st["humans"] = humans if self.cfg["real_pilots"] else []
         st["fps"] = list(self.fps.values())
         st["weather"] = self.wx_in if self.cfg["weather"] == "follow" else None
         return st
@@ -781,7 +794,8 @@ class XRadioBridge:
                     continue
                 self.humans[tsid] = {"hid": tsid, "cs": P.cstr(e[1]), "type": P.cstr(e[2]), "lat": e[3], "lon": e[4],
                                      "alt_m": e[5], "hdg": e[6], "gs_ms": e[9], "on_ground": bool(e[13]),
-                                     "tx": bool(e[14]), "xpdr": e[15], "squawk": f"{e[20]:04d}", "ai": P.is_ai_sid(tsid), "_t": now}
+                                     "tx": bool(e[14]), "xpdr": e[15], "squawk": f"{e[20]:04d}", "ai": P.is_ai_sid(tsid), "_t": now,
+                                     "vs_ms": e[18]}
         elif ptype == P.PT_ROSTER:
             _epoch, part, parts, count, _ = P.ROSTER_HDR.unpack_from(payload, 0)
             if part == 0:
@@ -826,6 +840,18 @@ class XRadioBridge:
                 else:
                     self.fps[d["session_id"]] = d
                 self.events.append({"type": "fp", "cs": d["callsign"], "status": d["status"], "squawk": d["squawk"], "dep": d["dep"], "dest": d["dest"]})
+        elif ptype == P.PT_AIRCRAFT:
+            d = P.unpack_aircraft(payload)
+            if d and sid not in ours:            # the header names the pilot's session
+                old = self.aircraft.get(sid)
+                self.aircraft[sid] = d
+                if not old or old["ac_icao"] != d["ac_icao"]:
+                    self.events.append({"type": "aircraft", "hid": sid, "cs": (self.roster.get(sid) or ("",))[0], "ac_icao": d["ac_icao"], "source": d["source"]})
+        elif ptype == P.PT_TCAS:
+            d = P.unpack_tcas(payload)
+            if d and sid not in ours:
+                d["_t"] = time.monotonic()
+                self.tcas[sid] = d
         elif ptype == P.PT_ATC_LIST:
             count, _flags = P.ATC_LIST_HDR.unpack_from(payload, 0)
             off, lst = P.ATC_LIST_HDR.size, []

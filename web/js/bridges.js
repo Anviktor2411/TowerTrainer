@@ -130,7 +130,8 @@ export class Bridges {
       if (this.xr.humans) for (const h of j.humans || []) {
         const pos = apt.toXY(h.lat, h.lon);
         sim.upsertHuman({ hid: h.hid, cs: h.cs, type: h.type, pos, alt: Math.max(0, h.alt_m / FT_M - (apt.d.elevation || 0)),
-          hdg: h.hdg, spd: h.gs_ms, onGround: h.on_ground, squawk: h.squawk, xpdr: h.xpdr >= 3 ? "C" : "S", ai: h.ai, tx: h.tx, fp: fps.get(h.cs) || null });
+          hdg: h.hdg, spd: h.gs_ms, onGround: h.on_ground, squawk: h.squawk, xpdr: h.xpdr >= 3 ? "C" : h.xpdr === 2 ? "A" : "S", ai: h.ai, tx: h.tx, fp: fps.get(h.cs) || null,
+          acft: h.acft || null, tcas: h.tcas || null, vs: h.vs_ms });
       }
       for (const t of j.texts || []) this.onXrText(t);
       for (const e of j.events || []) if (this.onXrEvent) this.onXrEvent(e);

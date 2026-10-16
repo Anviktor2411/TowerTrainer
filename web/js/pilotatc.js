@@ -431,7 +431,7 @@ export class PilotAtc {
     }
     if (F.phase === "landed") return this.say(F, F.pos, `${cs}, roger, vacate the runway when able, report vacated`);
     if (F.phase === "vacated") {
-      const stand = F.stand || (() => { const s = sim.freeStands(); return s && s.length ? s[0] : null; })();
+      const stand = F.stand || (sim.standForHuman ? sim.standForHuman(a) : (() => { const s = sim.freeStands(); return s && s.length ? s[0] : null; })());
       if (!stand) return this.say(F, F.pos, `${cs}, standby for a stand`);
       F.stand = stand;
       const r = this.standRoute(a, stand) || { nodes: [], points: [a.pos, stand.pos], via: [], free: true };

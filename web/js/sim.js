@@ -1,7 +1,7 @@
 // Traffic simulation: aircraft state machines, ground movement, pilots' calls and readbacks,
 // ATC positions with handoffs, AI controllers for unstaffed positions, squawks, readback errors.
 import { KT, FT, dist, hdgOf, angDiff, vecFromHdg } from "./airport.js";
-import { AIRLINES, TYPES, GA_TYPES, HELI_TYPES, REG_PREFIX, LETTER_WORD, DESTS, AIRLINE_NAT, AIRLINE_TYPES, CARGO_TYPES, HOUR_WAVE, REG_NAT, rnd, rint, distKm, weighted, controllerNat } from "./data.js";
+import { AC_DIM, AIRLINES, TYPES, GA_TYPES, HELI_TYPES, REG_PREFIX, LETTER_WORD, DESTS, AIRLINE_NAT, AIRLINE_TYPES, CARGO_TYPES, HOUR_WAVE, REG_NAT, rnd, rint, distKm, weighted, controllerNat } from "./data.js";
 import { standKey, parse, normalize, setTaxiNames } from "./commands.js";
 import { regionOf, makeStyle, callsign, spokenType, pilotCall, readback, ph, greeting, signOff, localHour, cap, NEUTRAL_STYLE, sayNumbers } from "./phrase.js";
 import { makeCrew } from "./voices.js";
@@ -505,8 +505,12 @@ export class Sim {
       this.onEvent({ type: "spawn", ac: a });
     }
     const wasGround = a.onGround;
+    const oldType = a.type;
     Object.assign(a, { cs: h.cs, type: h.type || "ZZZZ", pos: h.pos, alt: h.alt, hdg: h.hdg, spd: h.spd,
       onGround: !!h.onGround, squawk: h.squawk, xpdr: h.xpdr || "C", seenAt: this.t, ai: !!h.ai, tx: !!h.tx });
+    this.humanType(a, h.acft || null, oldType);
+    if (h.tcas !== undefined) a.ownTcas = h.tcas || null;          // PART D: the pilot's own X-Plane TCAS
+    if (h.vs != null) a.vs = h.vs;                                  // vertical speed, m/s (TCAS sense against a human)
     a.fixPos = h.pos; a.fixT = this.t; a.stale = false;           // A5: extrapolated between updates (traffic.js)
     this.humanRunwayEvents(a, wasGround);
     if (h.fp) this.humanFlightPlan(a, h.fp);
@@ -538,6 +542,26 @@ export class Sim {
     if (/\bSIMBRIEF\b/.test(rem)) a.simbrief = true;
   }
   humanByCs(cs) { return this.ac.find(x => x.human && x.cs === cs) || null; }
+
+  /** C3: a real pilot's type as XRadio detected it: wake category, wingspan (silhouette, separation), approach
+   *  speed, stand size. An unknown type shows "type?" and flies with medium / default values. */
+  humanType(a, acft, oldType) {
+    const t = TYPE_INFO[a.type] || [...GA_TYPES, ...HELI_TYPES].find(x => x[0] === a.type), dim = AC_DIM[a.type];
+    const fromXr = acft && acft.ac_icao === a.type ? acft : null;
+    a.typeUnknown = !t && !dim && !(fromXr && fromXr.wtc) || a.type === "ZZZZ" || (fromXr && fromXr.source === 0);
+    a.wtc = (fromXr && fromXr.wtc) || (t && t[1]) || (a.typeUnknown ? "M" : a.wtc || "M");
+    a.span = (fromXr && fromXr.span_m) || (dim && dim[0]) || 35;
+    a.appSpd = ((t && t[3]) || (a.wtc === "H" || a.wtc === "J" ? 145 : a.wtc === "L" ? 80 : 135)) * KT;
+    a.cat = t ? t[2] : a.span > 52 ? "heavy" : a.span > 20 ? "jets" : a.span > 15 ? "turboprops" : "props";
+    if (fromXr) { a.tail = fromXr.tailnum || a.tail; a.typeSource = ["default", "detected", "mapped", "manual"][fromXr.source] || ""; a.mtow = fromXr.mtow_kg || 0; }
+    if (oldType && oldType !== a.type) this.onEvent({ type: "humanType", ac: a, from: oldType, to: a.type });
+  }
+  /** A free stand that fits a real pilot's aircraft. */
+  standForHuman(a) {
+    const tup = [a.type, a.wtc, a.cat || "jets", 0];
+    const free = this.freeStands(["gate", "misc", "tie_down", "hangar"], a.cat === "props", false);
+    return free.find(s => standFits(s, tup) && (!s.types || !s.types.length || s.types.includes(tup[2]))) || free.find(s => standFits(s, tup)) || free[0] || null;
+  }
 
   /** A real pilot taking off starts the wake timers like anyone; entering a runway in use is a runway incursion. */
   humanRunwayEvents(a, wasGround) {
@@ -2419,6 +2443,7 @@ export class Sim {
       alt: a.alt, onGround: a.onGround, squawk: a.squawk, assignedSq: a.assignedSq, xpdr: a.xpdr, freq: a.freq,
       other: a.other, stand: a.stand ? a.stand.name : a.standName || "", rwy: (a.depEnd || a.end || {}).name || "",
       human: !!a.human, ga: !!a.ga, sid: a.sid || "", cfl: a.cfl || 0, warn: this.labelWarnings(a), ident: !!a.identUntil,
+      typeUnknown: !!a.typeUnknown, tcasRa: !!(a.tcas && a.tcas.ra), tcasTa: !!(a.tcas && a.tcas.ta && !a.tcas.ra), vs: a.vs || 0,
       nat: a.nat, path: a.id === selectedId && a.path && a.onGround ? a.path.slice(a.pi).map(p => [p[0], p[1]]) : null,
       dthr: a.kind === "arr" && a.state === "final" ? this.distToThr(a) : null, strip: a.strip || null,
       stripData: a.stripData || null, callingUntil: a.callingUntil || 0, vfr: !!a.ga && a.kind !== "arr",

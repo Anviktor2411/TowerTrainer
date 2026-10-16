@@ -84,7 +84,7 @@ function strip(a, selectedId, now, pos, handedOff = false) {
     handedOff ? `<span class="w" title="handed off, waiting for ${esc(a.handoff.to)} to accept">→${esc(a.handoff.to)} ${a.handoff.age}s</span>` : "";
   return `<div class="${cls}" draggable="true" data-id="${a.id}">` +
     `<span class="cs">${esc(a.cs)}${ho}</span>` +
-    `<span>${esc(a.type)}/${a.wtc}</span>` +
+    (a.human && a.typeUnknown ? `<span class="warnline" title="XRadio could not tell the type: medium / default values">type?</span>` : `<span>${esc(a.type)}/${a.wtc}</span>`) +
     `<span>${route} ${a.kind === "dep" ? ed("sid", d.sid ?? a.sid ?? "", "SID") : ""} ${ed("cfl", d.cfl ?? (a.cfl ? (a.cfl >= 6000 ? "F" + a.cfl / 100 : a.cfl) : ""), "CFL")}` +
     `${a.warn && a.warn.length ? ` <span class="w">${esc(a.warn.join(" "))}</span>` : ""}${issueMarkers(a).map(i => ` <span class="w ${i.level}">${esc(i.t)}</span>`).join("")}` +
     `${a.ctot ? ` <span class="w ${a.ctot.ok ? "ok" : "warn"}" title="CTOT (slot)">CTOT ${esc(a.ctot.text)}</span>` : ""}${a.hot != null ? ` <span class="w ${a.hot > 0 ? "ok" : "warn"}" title="de-icing holdover time left">HOT ${Math.max(0, Math.round(a.hot / 60))}m</span>` : ""}` +
@@ -137,3 +137,6 @@ function wire(el, opts0) {
   });
   el.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.isContentEditable) { e.preventDefault(); e.target.blur(); } });
 }
+
+/** One strip as HTML (tests). */
+export const stripHtml = (a, pos = "ALL") => strip(a, null, 0, pos);

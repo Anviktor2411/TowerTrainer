@@ -26,7 +26,7 @@ const HUMAN_STALE = 5;            // s without an update before a human is "stal
 const BLOCK_ASK = 60;             // s blocked by a stopped human before asking for another route
 const DEADLOCK = 4;               // s of mutual waiting before the tie-break lets one go
 
-export const spanOf = (a) => a.veh ? 4 : (AC_DIM[a.type] || [35])[0];
+export const spanOf = (a) => a.veh ? 4 : a.span || (AC_DIM[a.type] || [35])[0];
 const moving = (o) => o.spd > 0.3;
 
 export function installTraffic(Sim) {

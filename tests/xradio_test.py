@@ -148,6 +148,9 @@ def run_suite(xr_dir, expect_proto):
                    "--com1", str(KHZ), "--talk", "--parrot", "--squawk", "7000"]
         if expect_proto >= 6:
             fc_args += ["--com2", str(ATIS_KHZ), "--file-plan", "EETN EFHK DCT", "--rules", "V", "--cruise", "3500"]
+            # PT_AIRCRAFT (C2) and PT_TCAS (D5) when the XRadio checkout has them
+            if "--aircraft" in (Path(xr_dir) / "tools" / "fake_client.py").read_text("utf-8", "replace"):
+                fc_args += ["--aircraft", "B738,ES-XYZ,35.8,M", "--tcas", "climb", "--tcas-for", "60"]
         procs.append(fake_client(xr_dir, port, fake_out, *fc_args))
 
         humans, texts, events = [], [], []
@@ -180,6 +183,12 @@ def run_suite(xr_dir, expect_proto):
         check(bool(hh), "fake client appears in TowerTrainer as a human aircraft")
         if hh:
             check(abs(hh[-1]["lat"] - (LAT + 0.02)) < 0.01 and hh[-1]["squawk"] == "7000", "human position and squawk")
+        if hh and expect_proto >= 6 and "--aircraft" in (Path(xr_dir) / "tools" / "fake_client.py").read_text("utf-8", "replace"):
+            ac = [h for h in hh if h.get("acft")]
+            check(bool(ac) and ac[-1]["type"] == "B738" and ac[-1]["acft"]["tailnum"] == "ES-XYZ" and abs(ac[-1]["acft"]["span_m"] - 35.8) < 0.1,
+                  "the pilot's detected aircraft (PT_AIRCRAFT) reaches TowerTrainer: " + (str(ac[-1].get("acft")) if ac else "none"))
+            tc = [h for h in hh if h.get("tcas")]
+            check(bool(tc) and tc[-1]["tcas"]["level"] == 2 and tc[-1]["tcas"]["sense"] == 1, "the pilot's own TCAS RA (PT_TCAS) reaches TowerTrainer")
         check(st["pilots"] >= 1 and any(r["cs"] == "ESXYZ" for r in st["roster"]), "roster counts real pilots only: %d" % st["pilots"])
         check(any(t["from"] == "ESXYZ" and "position report" in t["text"] and t["khz"] == KHZ for t in texts), "text from the real pilot reaches TowerTrainer")
         check(any("EETN_TWR: ESXYZ, Tallinn Tower" in l for l in fake_out), "controller text reaches the real pilot")

@@ -101,6 +101,9 @@ export function issueMarkers(a, now) {
   if (waiting != null && waiting > 45 && !a.nordo) out.push({ t: `WAIT ${Math.round(waiting)}s`, level: waiting > 120 ? "alert" : "warn" });
   if (a.atisReported) out.push({ t: "OLD ATIS", level: "warn" });
   if (a.nordo && a.lastWant) out.push({ t: "NO RADIO", level: "warn" });
+  if (a.human && a.typeUnknown) out.push({ t: "type?", level: "warn" });            // C3: XRadio could not tell
+  if (a.tcasRa) out.push({ t: "RA", level: "alert" });                                // D4: red RA on the label
+  else if (a.tcasTa) out.push({ t: "TA", level: "warn" });
   return out;
 }
 
