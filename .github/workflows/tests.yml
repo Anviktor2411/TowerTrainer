@@ -36,8 +36,9 @@ jobs:
         with: { python-version: "3.12" }
       - uses: actions/setup-node@v4
         with: { node-version: "22" }
-      - name: fetch EETN into cache/
-        run: python -c "import server; server.load_airport('EETN'); print('cached')"
+      - name: fetch EETN, EGLL and KORD into cache/
+        # the browser suites open EGLL and KORD too; fetching them here fails clearly instead of mid-test
+        run: python -c "import server; [server.load_airport(a) for a in ('EETN', 'EGLL', 'KORD')]; print('cached')"
       - run: node tests/unit.test.mjs
       - run: node tests/taxi.test.mjs
       - run: node tests/ops.test.mjs

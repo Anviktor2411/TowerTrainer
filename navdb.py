@@ -754,7 +754,9 @@ class NavDB:
                     for r in con.execute(f"SELECT {cols} FROM airports WHERE icao=?", (icao,)):
                         apt(r, 56 - d * 4)
         con.close()
-        return sorted(out.values(), key=lambda x: -x["score"])[:limit]
+        # equal scores: a result with a known position before one without, then nearer, then by id --
+        # the same order on every OS, whatever order SQLite handed the rows back in
+        return sorted(out.values(), key=lambda x: (-x["score"], "nm" not in x, x.get("nm", 0), x["kind"], x["id"]))[:limit]
 
     @staticmethod
     def _proc_item(r):

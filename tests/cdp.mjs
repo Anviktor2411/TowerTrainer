@@ -7,14 +7,24 @@ import { join } from "node:path";
 export const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 // TT_BROWSER=edge (or a path to a Chromium-based browser) runs the same tests in another browser.
 const PICK = process.env.TT_BROWSER || "";
-const CHROME = (PICK === "edge" ? ["C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe"]
-  : PICK ? [PICK] : ["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"]).find(existsSync);
+const CANDIDATES = PICK === "edge"
+  ? ["C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe", "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
+     "/usr/bin/microsoft-edge", "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"]
+  : PICK ? [PICK]
+  : [process.env.CHROME_PATH,                                   // set by browser-actions/setup-chrome and others
+     "C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+     "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser",
+     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"];
+const CHROME = CANDIDATES.filter(Boolean).find(existsSync);
 
 export async function launch({ port = 9334, width = 1600, height = 900 } = {}) {
+  if (!CHROME) throw new Error(`no Chrome/Chromium/Edge found -- set TT_BROWSER to its path (looked in: ${CANDIDATES.filter(Boolean).join(", ")})`);
   const prof = join(tmpdir(), `tt-cdp-${port}`);
   try { rmSync(prof, { recursive: true, force: true }); } catch { /* */ }
   const proc = spawn(CHROME, ["--headless=new", `--remote-debugging-port=${port}`, `--user-data-dir=${prof}`,
-    `--window-size=${width},${height}`, "--autoplay-policy=no-user-gesture-required", "--disable-popup-blocking", "about:blank"], { stdio: "ignore" });
+    `--window-size=${width},${height}`, "--autoplay-policy=no-user-gesture-required", "--disable-popup-blocking",
+    // Ubuntu 24.04 (GitHub's runners) blocks the sandbox's user namespaces; a throwaway test profile does not need it
+    ...(process.platform === "linux" ? ["--no-sandbox"] : []), "about:blank"], { stdio: "ignore" });
   for (let i = 0; i < 60; i++) {
     try { await (await fetch(`http://127.0.0.1:${port}/json/version`)).json(); break; } catch { await sleep(200); }
   }

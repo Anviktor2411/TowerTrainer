@@ -176,7 +176,10 @@ try {
   ok(await p.eval(`TT.sim.lightLog.length > 0 && TT.sim.lightLog[TT.sim.lightLog.length - 1].cs === delAc.cs && delAc.nordo && (delAc.state === "pushing" || delAc.state === "taxi")`), "light-gun button on a 7600 aircraft: logged as an action and the aircraft complies (" + (await p.eval(`delAc.state`)) + ")");
   await p.eval(`TT.app.setSpeed(1)`);
   const vst = await p.eval(`fetch("/api/tts/status").then(r => r.json())`);
-  ok(await p.eval(`document.getElementById("voicePill").innerText.startsWith("Voices:")`) && (vst.neural ? await p.eval(`document.getElementById("voiceBanner").classList.contains("hidden") || /Neural voices ready/.test(document.getElementById("voiceBanner").innerText)`) : await p.eval(`!document.getElementById("voiceBanner").classList.contains("hidden")`)), `voice banner/pill match the server (neural=${vst.neural})`);
+  // voices were switched off at the top of this test: then the banner stays hidden, whatever the server has
+  const voicesOn = await p.eval(`TT.settings.voices`);
+  ok(await p.eval(`document.getElementById("voicePill").innerText.startsWith("Voices:")`) && (!voicesOn ? await p.eval(`document.getElementById("voiceBanner").classList.contains("hidden")`)
+    : vst.neural ? await p.eval(`document.getElementById("voiceBanner").classList.contains("hidden") || /Neural voices ready/.test(document.getElementById("voiceBanner").innerText)`) : await p.eval(`!document.getElementById("voiceBanner").classList.contains("hidden")`)), `voice banner/pill match the server (voices=${voicesOn}, neural=${vst.neural})`);
   await p.eval(`TT.setView("GND")`);
 
   // ---- radio chain measured offline (OfflineAudioContext), ATIS text ----
