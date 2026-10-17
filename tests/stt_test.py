@@ -26,8 +26,13 @@ wav = (ROOT / "tests" / "fixtures" / "ptt_takeoff.wav").read_bytes()
 m = S.STTManager()
 st = m.status()
 print("engines:", st["engines"] or "none")
-a = S.wav_to_float(wav)
-check(len(a) > 16000 and abs(float(a.max())) <= 1.0, f"WAV decoded to {len(a) / 16000:.1f} s of 16 kHz float audio")
+try:
+    import numpy  # noqa: F401 -- comes with every STT engine; a plain Python (like CI's) has none
+except ImportError:
+    print("SKIP  WAV decoding: numpy not installed")
+else:
+    a = S.wav_to_float(wav)
+    check(len(a) > 16000 and abs(float(a.max())) <= 1.0, f"WAV decoded to {len(a) / 16000:.1f} s of 16 kHz float audio")
 w2, ph = S.decode_request({"wav": base64.b64encode(wav).decode(), "phrases": ["Finnair 321"] * 100})
 check(w2 == wav and len(ph) == 60, "request decoding caps the phrase list")
 if not st["engines"]:

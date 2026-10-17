@@ -38,7 +38,7 @@ ok(normalize("climb four thousand five hundred feet") === "climb 4500 feet", "no
 ok(normalize("contact radar one two seven decimal niner zero five") === "contact radar 127.905", "normalize frequency");
 
 // --- departure ---
-const d = sim.spawnDeparture();
+const d = sim.spawnDeparture({ ga: false });   // an IFR airliner: a GA departure flies circuits and never "contact radar"
 ok(d && d.state === "parked", `departure spawned ${d.cs} at stand ${d.stand.name}`);
 let rb;
 if (d.ga) {
