@@ -2,6 +2,9 @@
 
 [![tests](https://github.com/Anviktor2411/TowerTrainer/actions/workflows/tests.yml/badge.svg)](https://github.com/Anviktor2411/TowerTrainer/actions/workflows/tests.yml)
 [![licence: MIT](https://img.shields.io/badge/licence-MIT-green.svg)](LICENSE)
+[![status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#)
+
+> 🧪 **Alpha release.** Everything described here works, but expect rough edges and changes between versions — [report what breaks](https://github.com/Anviktor2411/TowerTrainer/issues).
 
 Offline practice for VATSIM Delivery / Ground / Tower / Approach / Centre at (almost) any airport in the world.
 Airport layouts come from the X-Plane Scenery Gateway (cached in `cache/`), the runway from the live METAR.
